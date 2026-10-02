@@ -1,0 +1,1146 @@
+//! znd アプリ。ビューア・タイムライン・プロパティ編集・音声同期・書き出し・提出前チェック。
+
+mod audio;
+mod panels;
+mod preview;
+mod timeline;
+mod tools;
+mod uiscript;
+mod windows;
+
+use eframe::egui;
+use preview::PreviewEngine;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use znd_audio::{time_to_sample, Mixer, SAMPLE_RATE};
+use znd_core::demo::demo_project;
+use znd_core::*;
+use znd_media::{import_file, ExportReport, ImportOptions, QueueJob};
+use znd_render::safety::FlashWarning;
+use znd_script::ExprError;
+
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(120);
+const AUTOSAVE_GENERATIONS: usize = 20;
+/// 同じプロパティへの連続した値編集（ドラッグ）を 1 回の取り消し単位にまとめる時間幅。
+const COALESCE_WINDOW: Duration = Duration::from_millis(800);
+/// これ以上操作が無ければ「作業していない」とみなす（制作ログの作業時間に数えない）。
+const IDLE_LIMIT: Duration = Duration::from_secs(120);
+
+fn main() -> eframe::Result<()> {
+    // 使い方: znd-app [プロジェクト.znd.json] [--frame N] [--select レイヤーID] [--show ウィンドウ名] [--screenshot 出力.png]
+    // （--select / --show / --screenshot は、画面の自動確認用）
+    let mut project_path = None;
+    let mut screenshot = None;
+    let mut start_frame = 0;
+    let mut select = None;
+    let mut show = Vec::new();
+    // 画面操作の自動確認用: ポインタやキーの操作を書いたファイルを再生する（uiscript.rs）
+    let mut ui_script = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--screenshot" => screenshot = args.next().map(PathBuf::from),
+            "--frame" => start_frame = args.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "--select" => select = args.next(),
+            "--show" => show.extend(args.next()),
+            "--ui-script" => ui_script = args.next().map(PathBuf::from),
+            _ => project_path = Some(PathBuf::from(arg)),
+        }
+    }
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1500.0, 950.0]).with_title("znd"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "znd",
+        options,
+        Box::new(move |cc| {
+            install_japanese_font(&cc.egui_ctx);
+            let mut app = App::new(&cc.egui_ctx, project_path, start_frame, screenshot);
+            app.selected = select.map(LayerId::new);
+            app.script = ui_script.as_deref().and_then(uiscript::Script::load);
+            for w in &show {
+                match w.as_str() {
+                    "export" => app.show.export = true,
+                    "check" => app.show.check = true,
+                    "history" => app.show.history = true,
+                    "snapshots" => app.show.snapshots = true,
+                    "reviews" => app.show.reviews = true,
+                    "graph" => {
+                        app.show.graph = true;
+                        app.graph_path = Some("transform.position".into());
+                    }
+                    "script" => app.show.script = true,
+                    "plugins" => app.show.plugins = true,
+                    "screening" => app.screening = true,
+                    _ => {}
+                }
+            }
+            Ok(Box::new(app))
+        }),
+    )
+}
+
+/// egui 同梱フォントには日本語が無いので、OS のフォントを先頭に差し込む。
+fn install_japanese_font(ctx: &egui::Context) {
+    const CANDIDATES: [&str; 7] = [
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "C:\\Windows\\Fonts\\YuGothR.ttc",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ];
+    let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
+        eprintln!("日本語フォントが見つかりません。UI の日本語が表示されない可能性があります");
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("jp".into(), egui::FontData::from_owned(bytes));
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "jp".into());
+    fonts.families.entry(egui::FontFamily::Monospace).or_default().push("jp".into());
+    ctx.set_fonts(fonts);
+}
+
+/// エフェクトを GPU で処理するか（ウィンドウメニューで切り替える）。
+static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
+
+fn gpu_backend() -> Option<&'static znd_gpu::GpuBackend> {
+    static GPU: std::sync::OnceLock<Option<znd_gpu::GpuBackend>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        // 環境変数 ZND_GPU=0 で、GPU を一切初期化しない
+        if std::env::var("ZND_GPU").is_ok_and(|v| v == "0") {
+            return None;
+        }
+        match znd_gpu::GpuBackend::new() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("GPU を使えません（CPU で処理します）: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// エフェクトの高速化バックエンド。GPU が無い・無効にしている場合は `None`（すべて CPU）。
+pub(crate) fn gpu() -> Option<&'static dyn znd_render::effects::EffectAccel> {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    gpu_backend().map(|g| g as &dyn znd_render::effects::EffectAccel)
+}
+
+pub(crate) fn gpu_name() -> Option<&'static str> {
+    gpu_backend().map(|g| g.name())
+}
+
+pub(crate) fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// バックグラウンドで動く処理の進捗と結果。
+pub(crate) struct Task<T> {
+    pub label: String,
+    pub done: Arc<AtomicI64>,
+    pub total: Arc<AtomicI64>,
+    pub cancel: Arc<AtomicBool>,
+    pub result: Arc<Mutex<Option<Result<T, String>>>>,
+}
+
+impl<T: Send + 'static> Task<T> {
+    /// `f(進捗を報告する関数)` を別スレッドで走らせる。報告関数が false を返したら中断すること。
+    pub fn spawn(
+        label: &str,
+        ctx: &egui::Context,
+        f: impl FnOnce(&mut dyn FnMut(i64, i64) -> bool) -> Result<T, String> + Send + 'static,
+    ) -> Self {
+        let task =
+            Task { label: label.into(), done: Arc::default(), total: Arc::default(), cancel: Arc::default(), result: Arc::default() };
+        let (done, total, cancel, result, ctx) =
+            (task.done.clone(), task.total.clone(), task.cancel.clone(), task.result.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let mut report = |d: i64, t: i64| {
+                done.store(d, Ordering::Relaxed);
+                total.store(t, Ordering::Relaxed);
+                ctx.request_repaint();
+                !cancel.load(Ordering::Relaxed)
+            };
+            let r = f(&mut report);
+            *result.lock().unwrap() = Some(r);
+            ctx.request_repaint();
+        });
+        task
+    }
+
+    pub fn take(&self) -> Option<Result<T, String>> {
+        self.result.lock().unwrap().take()
+    }
+
+    pub fn fraction(&self) -> f32 {
+        self.done.load(Ordering::Relaxed) as f32 / self.total.load(Ordering::Relaxed).max(1) as f32
+    }
+}
+
+struct Screenshot {
+    path: PathBuf,
+    started: Instant,
+    requested: bool,
+}
+
+/// 提出前チェックの結果。
+#[derive(Default)]
+pub(crate) struct CheckResult {
+    /// (問題なしか, 文面)。
+    pub lines: Vec<(bool, String)>,
+    pub flashes: Vec<FlashWarning>,
+}
+
+pub struct App {
+    project: Project,
+    /// `project` のスナップショット。UI の読み取りとレンダースレッドが共有する。
+    shared: Arc<Project>,
+    revision: u64,
+    path: Option<PathBuf>,
+    dirty: bool,
+    unsaved_since_autosave: bool,
+    last_autosave: Instant,
+    /// (操作名, 操作前の状態)。
+    undo: Vec<(String, Project)>,
+    redo: Vec<(String, Project)>,
+    last_edit: Option<(String, Instant)>,
+    user: String,
+
+    comp_id: CompId,
+    frame: i64,
+    selected: Option<LayerId>,
+    selected_footage: Option<FootageId>,
+    downsample: u32,
+    /// 再生開始の（実時刻, フレーム）。
+    playing: Option<(Instant, i64)>,
+    /// ワークエリア [開始, 終了) フレーム。ループ再生と書き出し範囲に使う。
+    work_area: Option<(i64, i64)>,
+    snap: bool,
+    hide_shy: bool,
+    only_animated: bool,
+
+    engine: PreviewEngine,
+    texture: Option<egui::TextureHandle>,
+    overlay: Option<egui::TextureHandle>,
+    /// いまテクスチャに載っている（リビジョン, フレーム, ダウンサンプル）。
+    shown: Option<(u64, i64, u32)>,
+    screening: bool,
+    zoom: f32,
+
+    player: Option<audio::Player>,
+    /// ミックス済みのコンポ音声（48kHz ステレオ）と、その元になった設定の署名。
+    audio_buf: Arc<Vec<f32>>,
+    audio_sig: u64,
+    audio_task: Option<Task<(u64, Vec<f32>)>>,
+    spectrogram: Option<egui::TextureHandle>,
+    show_spectrogram: bool,
+    last_scrub_frame: i64,
+
+    status: String,
+    /// エクスプレッションのエラー（リビジョンごとに検査し直す）。
+    expr_errors: (u64, Vec<ExprError>),
+    /// エクスプレッションを編集中のプロパティ（パス）。
+    expr_open: Option<String>,
+    expr_buf: String,
+    graph_path: Option<String>,
+
+    export_ui: windows::ExportUi,
+    export_task: Option<Task<ExportReport>>,
+    queue: Vec<QueueJob>,
+    check: CheckResult,
+    check_task: Option<Task<CheckResult>>,
+    diff: Option<(egui::TextureHandle, String)>,
+    snapshot_name: String,
+    review_text: String,
+    script_text: String,
+
+    /// ビューアのツールと、ドラッグ中の操作。
+    pub(crate) tool: tools::Tool,
+    pub(crate) viewer_drag: Option<tools::ViewerDrag>,
+    /// ペンツールで描いている途中のパス（レイヤー座標）。
+    pub(crate) pen: Option<edit::PenPath>,
+    /// 編集中のマスクと、選択中の頂点。
+    pub(crate) active_mask: usize,
+    pub(crate) active_vertex: Option<usize>,
+    /// タイムラインの拡大率（1 = コンポ全体）と、左端のフレーム。
+    pub(crate) tl_zoom: f64,
+    pub(crate) tl_scroll: f64,
+    pub(crate) tl_drag: Option<timeline::TlDrag>,
+    /// 直前のフレームで描いたタイムラインの表示範囲。
+    pub(crate) tl_view: Option<timeline::TlView>,
+    /// タイムラインで選択中のキーフレーム（レイヤー, 時刻）。
+    pub(crate) selected_key: Option<(LayerId, Time)>,
+    /// 画面上の主要な領域の位置（操作スクリプトが座標を求めるのに使う）。
+    pub(crate) anchors: std::collections::HashMap<String, egui::Rect>,
+    pub(crate) script: Option<uiscript::Script>,
+    pub(crate) script_shot: Option<PathBuf>,
+    plugin_report: Vec<(PathBuf, String)>,
+
+    recovery: Option<PathBuf>,
+    show: windows::Shown,
+    screenshot: Option<Screenshot>,
+
+    session_start: u64,
+    active: Duration,
+    last_activity: Instant,
+    edits: u32,
+    timelapse: bool,
+    last_capture: Instant,
+}
+
+fn new_engine(ctx: &egui::Context, path: Option<&Path>) -> PreviewEngine {
+    let ctx = ctx.clone();
+    PreviewEngine::new(&base_dir(path), move || ctx.request_repaint())
+}
+
+pub(crate) fn base_dir(path: Option<&Path>) -> PathBuf {
+    path.and_then(|p| p.parent()).filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+impl App {
+    fn new(ctx: &egui::Context, path: Option<PathBuf>, start_frame: i64, screenshot: Option<PathBuf>) -> Self {
+        let mut app = App {
+            project: demo_project(),
+            shared: Arc::new(demo_project()),
+            revision: 0,
+            path: None,
+            dirty: false,
+            unsaved_since_autosave: false,
+            last_autosave: Instant::now(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
+            user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "自分".into()),
+            comp_id: CompId::new("main"),
+            frame: start_frame,
+            selected: None,
+            selected_footage: None,
+            downsample: 2,
+            playing: None,
+            work_area: None,
+            snap: true,
+            hide_shy: false,
+            only_animated: false,
+            engine: new_engine(ctx, None),
+            texture: None,
+            overlay: None,
+            shown: None,
+            screening: false,
+            zoom: 0.0,
+            player: audio::Player::new(),
+            audio_buf: Arc::default(),
+            audio_sig: 0,
+            audio_task: None,
+            spectrogram: None,
+            show_spectrogram: false,
+            last_scrub_frame: -1,
+            status: "デモプロジェクトを開いています".into(),
+            expr_errors: (u64::MAX, Vec::new()),
+            expr_open: None,
+            expr_buf: String::new(),
+            graph_path: None,
+            export_ui: windows::ExportUi::default(),
+            export_task: None,
+            queue: Vec::new(),
+            check: CheckResult::default(),
+            check_task: None,
+            diff: None,
+            snapshot_name: "1次提出版".into(),
+            review_text: String::new(),
+            script_text: "// project を書き換えます。例:\nforEachLayer(function (l) { l.shy = false; });\n".into(),
+            tool: tools::Tool::Select,
+            viewer_drag: None,
+            pen: None,
+            active_mask: 0,
+            active_vertex: None,
+            tl_zoom: 1.0,
+            tl_scroll: 0.0,
+            tl_drag: None,
+            tl_view: None,
+            selected_key: None,
+            anchors: Default::default(),
+            script: None,
+            script_shot: None,
+            // プラグインのエフェクトを、プロジェクトを開く前に使えるようにしておく
+            plugin_report: znd_render::plugins::scan_default().errors,
+            recovery: None,
+            show: windows::Shown::default(),
+            screenshot: screenshot.map(|path| Screenshot { path, started: Instant::now(), requested: false }),
+            session_start: unix_now(),
+            active: Duration::ZERO,
+            last_activity: Instant::now(),
+            edits: 0,
+            timelapse: false,
+            last_capture: Instant::now(),
+        };
+        match path {
+            Some(p) => {
+                app.open(ctx, &p);
+                app.frame = start_frame;
+            }
+            // 未保存のまま終了・異常終了した前回の作業
+            None => app.recovery = io::newer_autosave(&app.autosave_base()),
+        }
+        if app.screenshot.is_some() {
+            app.recovery = None;
+        }
+        app.publish();
+        app
+    }
+
+    // ---------- プロジェクトの入れ替え・保存 ----------
+
+    pub(crate) fn replace_project(&mut self, ctx: &egui::Context, project: Project, path: Option<PathBuf>) {
+        self.comp_id = project.compositions.first().map(|c| c.id.clone()).unwrap_or_else(|| CompId::new(""));
+        self.project = project;
+        self.path = path;
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
+        self.selected = None;
+        self.selected_footage = None;
+        self.frame = 0;
+        self.stop();
+        self.dirty = false;
+        self.unsaved_since_autosave = false;
+        self.check = CheckResult::default();
+        self.diff = None;
+        self.engine = new_engine(ctx, self.path.as_deref());
+        self.engine.footage.attach_existing_proxies(&self.project);
+        self.audio_sig = 0;
+        self.publish();
+    }
+
+    pub(crate) fn open(&mut self, ctx: &egui::Context, path: &Path) {
+        match io::load(path) {
+            Ok(project) => {
+                let issues = project.validate();
+                let missing = znd_media::manage::missing_footage(&project, &base_dir(Some(path))).len();
+                let fonts = znd_media::manage::missing_fonts(&project);
+                self.replace_project(ctx, project, Some(path.to_path_buf()));
+                self.recovery = io::newer_autosave(path);
+                let mut notes = Vec::new();
+                if !issues.is_empty() {
+                    notes.push(format!("構造の問題 {} 件", issues.len()));
+                }
+                if missing > 0 {
+                    notes.push(format!("欠落フッテージ {missing} 個（ファイル → 素材を再リンク）"));
+                }
+                if !fonts.is_empty() {
+                    notes.push(format!("欠落フォント: {}", fonts.join("、")));
+                }
+                self.status = if notes.is_empty() {
+                    format!("{} を開きました", path.display())
+                } else {
+                    format!("{} を開きました — {}", path.display(), notes.join(" / "))
+                };
+            }
+            Err(e) => self.status = format!("開けません: {e}"),
+        }
+    }
+
+    fn save_to(&mut self, path: PathBuf) {
+        match io::save(&self.project, &path) {
+            Ok(()) => {
+                self.status = format!("{} に保存しました", path.display());
+                self.path = Some(path);
+                self.dirty = false;
+                self.unsaved_since_autosave = false;
+            }
+            Err(e) => self.status = format!("保存に失敗しました: {e}"),
+        }
+    }
+
+    pub(crate) fn save(&mut self) {
+        match self.path.clone() {
+            Some(p) => self.save_to(p),
+            None => self.save_as(),
+        }
+    }
+
+    pub(crate) fn save_as(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("znd プロジェクト", &["json"]).set_file_name("untitled.znd.json").save_file()
+        {
+            self.save_to(p);
+        }
+    }
+
+    /// 自動保存の基準パス。未保存プロジェクトは一時ディレクトリに退避する。
+    pub(crate) fn autosave_base(&self) -> PathBuf {
+        self.path.clone().unwrap_or_else(|| std::env::temp_dir().join("znd-untitled.znd.json"))
+    }
+
+    fn autosave_now(&mut self) {
+        match io::autosave(&self.project, &self.autosave_base(), AUTOSAVE_GENERATIONS) {
+            Ok(_) => self.unsaved_since_autosave = false,
+            Err(e) => self.status = format!("自動保存に失敗しました: {e}"),
+        }
+        self.last_autosave = Instant::now();
+    }
+
+    // ---------- 編集と取り消し ----------
+
+    /// 編集後の状態をレンダースレッドに公開する。
+    fn publish(&mut self) {
+        self.revision += 1;
+        self.shared = Arc::new(self.project.clone());
+    }
+
+    /// プロジェクトを変更する唯一の入口。`coalesce` が true なら、直前の同名編集と取り消し単位をまとめる。
+    pub(crate) fn edit(&mut self, label: &str, coalesce: bool, f: impl FnOnce(&mut Project)) {
+        let now = Instant::now();
+        let merge = coalesce && self.last_edit.as_ref().is_some_and(|(l, t)| l == label && now.duration_since(*t) < COALESCE_WINDOW);
+        if !merge {
+            self.undo.push((label.to_string(), self.project.clone()));
+            self.redo.clear();
+            self.edits += 1;
+        }
+        f(&mut self.project);
+        self.last_edit = Some((label.to_string(), now));
+        self.dirty = true;
+        self.unsaved_since_autosave = true;
+        self.publish();
+    }
+
+    /// 現在のコンポを編集する。他の人がロックしているコンポは編集しない。
+    pub(crate) fn edit_comp(&mut self, label: &str, coalesce: bool, f: impl FnOnce(&mut Composition)) {
+        let id = self.comp_id.clone();
+        if let Some(owner) = self.shared.comp(&id).and_then(|c| c.locked_by.clone()).filter(|o| o != &self.user) {
+            self.status = format!("このコンポは {owner} がロックしているため編集できません");
+            return;
+        }
+        self.edit(label, coalesce, |p| {
+            if let Some(c) = p.comp_mut(&id) {
+                f(c);
+            }
+        });
+    }
+
+    pub(crate) fn edit_layer(&mut self, label: &str, coalesce: bool, layer: &LayerId, f: impl FnOnce(&mut Layer)) {
+        let layer = layer.clone();
+        self.edit_comp(label, coalesce, |c| {
+            if let Some(l) = c.layer_mut(&layer) {
+                f(l);
+            }
+        });
+    }
+
+    pub(crate) fn undo(&mut self) {
+        if let Some((label, prev)) = self.undo.pop() {
+            self.redo.push((label.clone(), std::mem::replace(&mut self.project, prev)));
+            self.after_history_jump(&format!("取り消し: {label}"));
+        }
+    }
+
+    pub(crate) fn redo(&mut self) {
+        if let Some((label, next)) = self.redo.pop() {
+            self.undo.push((label.clone(), std::mem::replace(&mut self.project, next)));
+            self.after_history_jump(&format!("やり直し: {label}"));
+        }
+    }
+
+    /// 履歴の `index` 番目の操作の直前まで戻る。
+    pub(crate) fn jump_to_history(&mut self, index: usize) {
+        while self.undo.len() > index {
+            self.undo();
+        }
+    }
+
+    fn after_history_jump(&mut self, status: &str) {
+        self.last_edit = None;
+        self.dirty = true;
+        self.unsaved_since_autosave = true;
+        if self.project.comp(&self.comp_id).is_none() {
+            self.comp_id = self.project.compositions.first().map(|c| c.id.clone()).unwrap_or_else(|| CompId::new(""));
+        }
+        self.status = status.into();
+        self.publish();
+    }
+
+    // ---------- レイヤー操作 ----------
+
+    pub(crate) fn add_layer(&mut self, label: &str, name: &str, kind: LayerKind) {
+        let shared = self.shared.clone();
+        let Some(comp) = shared.comp(&self.comp_id) else { return };
+        let (cw, ch) = (comp.width as f64, comp.height as f64);
+        let (sw, sh) = shared.source_size(&kind).unwrap_or((0.0, 0.0));
+        let id = shared.fresh_id("layer");
+        let mut layer = Layer::new(id.clone(), name, kind, Transform::centered(sw, sh, cw, ch), comp.duration);
+        // 素材レイヤーは再生位置から始める
+        let t = comp.frame_rate.frame_to_time(self.frame);
+        match &layer.kind {
+            LayerKind::Footage { footage } | LayerKind::Audio { footage } => {
+                let d = shared.footage_item(footage).and_then(|f| f.duration.or(f.audio.map(|a| a.duration)));
+                layer.in_point = t;
+                layer.start_time = t;
+                layer.out_point = d.map(|d| (t + d).min(comp.duration)).unwrap_or(comp.duration);
+            }
+            LayerKind::Model { .. } => layer.three_d = true,
+            _ => {}
+        }
+        self.edit_comp(label, false, |c| c.layers.insert(0, layer));
+        self.selected = Some(LayerId::new(id));
+    }
+
+    /// ファイルを選んで読み込む。`sequence` が true なら、選んだ 1 枚を含む連番をまとめて 1 本の動画にする。
+    pub(crate) fn import_footage_dialog(&mut self, sequence: bool) {
+        let Some(path) = rfd::FileDialog::new().pick_file() else { return };
+        self.import_path(&path, sequence);
+    }
+
+    /// 種類を見分けて読み込む（動画・静止画・音声・連番・PSD・SVG/PDF/AI・3D モデル）。
+    pub(crate) fn import_path(&mut self, path: &Path, sequence: bool) {
+        let comp_id = self.comp_id.clone();
+        let opts = ImportOptions { sequence, at: self.frame_rate().frame_to_time(self.frame), ..Default::default() };
+        let mut outcome = None;
+        self.edit("素材の読み込み", false, |p| outcome = Some(import_file(p, &comp_id, path, opts)));
+        match outcome {
+            Some(Ok(out)) => {
+                self.selected = out.layers.last().cloned();
+                self.selected_footage = None;
+                let rights = if out.footage.is_empty() { "" } else { "（権利情報: 未確認）" };
+                self.status = format!("{}{rights}{}", out.summary, out.warnings.iter().map(|w| format!(" — {w}")).collect::<String>());
+            }
+            Some(Err(e)) => {
+                // 何も変わっていないので取り消し履歴に残さない
+                self.undo.pop();
+                self.publish();
+                self.status = format!("読み込めません: {e}");
+            }
+            None => {}
+        }
+    }
+
+    // ---------- 音声 ----------
+
+    /// 音に関わる設定だけから作る署名。これが変わったときだけミックスし直す。
+    fn audio_signature(&self) -> u64 {
+        let Some(comp) = self.shared.comp(&self.comp_id) else { return 0 };
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut feed = |s: &str| s.bytes().for_each(|b| h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+        feed(&comp.id.0);
+        fn walk(p: &Project, c: &Composition, feed: &mut dyn FnMut(&str), depth: usize) {
+            for l in &c.layers {
+                let nested = match &l.kind {
+                    LayerKind::Precomp { comp } if depth < 16 => p.comp(comp),
+                    _ => None,
+                };
+                if znd_audio::layer_footage(p, l).is_some() || nested.is_some() {
+                    feed(
+                        &serde_json::to_string(&(&l.kind, l.in_point, l.out_point, l.start_time, l.speed, &l.audio, &l.time_remap, l.solo))
+                            .unwrap_or_default(),
+                    );
+                }
+                if let Some(n) = nested {
+                    walk(p, n, feed, depth + 1);
+                }
+            }
+        }
+        walk(&self.shared, comp, &mut feed, 0);
+        h
+    }
+
+    fn tick_audio(&mut self, ctx: &egui::Context) {
+        if let Some(task) = &self.audio_task {
+            if let Some(result) = task.take() {
+                self.audio_task = None;
+                match result {
+                    Ok((sig, buf)) if sig == self.audio_signature() => {
+                        self.audio_buf = Arc::new(buf);
+                        if let Some(p) = &self.player {
+                            p.set_buffer(self.audio_buf.clone());
+                        }
+                        self.spectrogram = None;
+                    }
+                    Ok(_) => {}
+                    Err(e) => self.status = format!("音声を読み込めません: {e}"),
+                }
+            }
+        }
+        let sig = self.audio_signature();
+        if sig != self.audio_sig && self.audio_task.is_none() {
+            self.audio_sig = sig;
+            let (project, comp, clips) = (self.shared.clone(), self.comp_id.clone(), self.engine.clips.clone());
+            self.audio_task = Some(Task::spawn("音声をミックス中", ctx, move |_| {
+                let mixer = Mixer::new(&project, &*clips);
+                let frames = project.comp(&comp).map(|c| mixer.comp_frames(c)).unwrap_or(0);
+                Ok((sig, mixer.mix(&comp, 0, frames)?))
+            }));
+        }
+    }
+
+    pub(crate) fn has_audio(&self) -> bool {
+        self.player.as_ref().is_some_and(|p| p.has_audio())
+    }
+
+    // ---------- 再生 ----------
+
+    pub(crate) fn total_frames(&self) -> i64 {
+        self.shared.comp(&self.comp_id).map(|c| c.frame_count()).unwrap_or(1).max(1)
+    }
+
+    pub(crate) fn frame_rate(&self) -> FrameRate {
+        self.shared.comp(&self.comp_id).map(|c| c.frame_rate).unwrap_or(FrameRate::FPS_30)
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.playing = None;
+        if let Some(p) = &self.player {
+            p.stop();
+        }
+    }
+
+    /// 再生ヘッドを動かす。`snap` が true でスナップが有効なら、最寄りのビート・マーカーに吸着する。
+    pub(crate) fn set_frame(&mut self, frame: i64, snap: bool) {
+        let mut frame = frame.clamp(0, self.total_frames() - 1);
+        if snap && self.snap {
+            if let Some(comp) = self.shared.comp(&self.comp_id) {
+                let fr = comp.frame_rate;
+                let t = fr.frame_to_time(frame);
+                let mut best: Option<(i64, i64)> = None;
+                let mut consider = |cand: Time| {
+                    let f = fr.time_to_frame(beat::nearest_frame(cand, fr));
+                    let d = (f - frame).abs();
+                    // 3 フレーム以内なら吸着する
+                    if d <= 3 && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, f));
+                    }
+                };
+                if let Some(g) = &comp.beat_grid {
+                    consider(g.snap(t));
+                }
+                comp.markers.iter().for_each(|m| consider(m.time));
+                if let Some((_, f)) = best {
+                    frame = f.clamp(0, self.total_frames() - 1);
+                }
+            }
+        }
+        self.frame = frame;
+        self.stop();
+    }
+
+    pub(crate) fn toggle_play(&mut self) {
+        if self.playing.is_some() {
+            self.stop();
+            return;
+        }
+        // ワークエリアの外にいたら先頭から
+        if let Some((a, b)) = self.work_area {
+            if self.frame < a || self.frame >= b {
+                self.frame = a;
+            }
+        }
+        self.playing = Some((Instant::now(), self.frame));
+        let fr = self.frame_rate();
+        if let Some(p) = &self.player {
+            let (a, b) = self.work_area.unwrap_or((0, self.total_frames()));
+            p.play_from(
+                time_to_sample(fr.frame_to_time(self.frame)),
+                Some((time_to_sample(fr.frame_to_time(a)), time_to_sample(fr.frame_to_time(b)))),
+            );
+        }
+    }
+
+    fn tick_playback(&mut self, ctx: &egui::Context) {
+        let fr = self.frame_rate();
+        if let Some((started, origin)) = self.playing {
+            // 音があるときは、音声デバイスの再生位置を時計にする（映像が音に合わせて進む）
+            let audio_clock = self.player.as_ref().filter(|p| p.is_playing() && p.has_audio()).map(|p| p.position());
+            let frame = match audio_clock {
+                Some(sample) => fr.time_to_frame(znd_audio::sample_to_time(sample)),
+                None => {
+                    let advanced = (started.elapsed().as_secs_f64() * fr.fps()).floor() as i64;
+                    let (a, b) = self.work_area.unwrap_or((0, self.total_frames()));
+                    a + (origin - a + advanced).rem_euclid((b - a).max(1))
+                }
+            };
+            self.frame = frame.clamp(0, self.total_frames() - 1);
+            ctx.request_repaint();
+        } else if self.frame != self.last_scrub_frame {
+            // スクラブ: フレームが変わったら、その位置の音を少しだけ鳴らす
+            if let Some(p) = self.player.as_ref().filter(|p| self.last_scrub_frame >= 0 && p.has_audio()) {
+                let len = (SAMPLE_RATE as f64 / fr.fps()).ceil() as i64 * 2;
+                p.scrub(time_to_sample(fr.frame_to_time(self.frame)), len);
+            }
+        }
+        self.last_scrub_frame = self.frame;
+    }
+
+    pub(crate) fn add_marker(&mut self, comment: &str) {
+        let t = self.frame_rate().frame_to_time(self.frame);
+        let comment = comment.to_string();
+        // 再生中に連打できる（タップ入力）よう、再生は止めない
+        self.edit_comp("マーカー追加", false, |c| {
+            if !c.markers.iter().any(|m| m.time == t) {
+                c.markers.push(Marker { time: t, duration: Time::ZERO, comment });
+                c.markers.sort_by_key(|m| m.time);
+            }
+        });
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let cmd = Modifiers::COMMAND;
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Z))) {
+            self.redo();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Z))) {
+            self.undo();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::S))) {
+            self.save();
+        }
+        // 文字入力中は再生・コマ送りキーを奪わない
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+        if pressed(Key::Space) {
+            self.toggle_play();
+        }
+        if pressed(Key::ArrowRight) || pressed(Key::PageDown) {
+            self.set_frame(self.frame + 1, false);
+        }
+        if pressed(Key::ArrowLeft) || pressed(Key::PageUp) {
+            self.set_frame(self.frame - 1, false);
+        }
+        if pressed(Key::Home) {
+            self.set_frame(0, false);
+        }
+        if pressed(Key::End) {
+            self.set_frame(i64::MAX, false);
+        }
+        // ビューアのツール
+        for (key, tool) in
+            [(Key::V, tools::Tool::Select), (Key::G, tools::Tool::Pen), (Key::R, tools::Tool::RectMask), (Key::O, tools::Tool::EllipseMask)]
+        {
+            if pressed(key) && !ctx.input(|i| i.modifiers.any()) {
+                self.set_tool(tool);
+            }
+        }
+        // 選択中のキーフレームを削除
+        if (pressed(Key::Delete) || pressed(Key::Backspace)) && self.active_vertex.is_none() && self.pen.is_none() {
+            if let Some((id, at)) = self.selected_key.take() {
+                self.edit_layer("キーフレーム削除", false, &id, |l| {
+                    edit::delete_keys(l, at);
+                });
+            }
+        }
+        // マーカー（再生中に叩けばタップ入力になる）
+        if pressed(Key::M) {
+            self.add_marker("");
+        }
+        // ワークエリアの開始・終了
+        if pressed(Key::B) {
+            let end = self.work_area.map(|w| w.1).unwrap_or(self.total_frames()).max(self.frame + 1);
+            self.work_area = Some((self.frame, end));
+        }
+        if pressed(Key::N) {
+            let start = self.work_area.map(|w| w.0).unwrap_or(0).min(self.frame);
+            self.work_area = Some((start, self.frame + 1));
+        }
+        // 前後のキーフレームへ（J / K）
+        if pressed(Key::J) || pressed(Key::K) {
+            let fr = self.frame_rate();
+            let shared = self.shared.clone();
+            let mut times: Vec<i64> = Vec::new();
+            if let Some(l) = shared.comp(&self.comp_id).and_then(|c| self.selected.as_ref().and_then(|id| c.layer(id))) {
+                visit::visit_layer(l, &mut |_, p| times.extend(p.key_times().iter().map(|t| fr.time_to_frame(*t))));
+            }
+            let target = if pressed(Key::J) {
+                times.iter().filter(|f| **f < self.frame).max()
+            } else {
+                times.iter().filter(|f| **f > self.frame).min()
+            };
+            if let Some(f) = target {
+                self.set_frame(*f, false);
+            }
+        }
+    }
+
+    // ---------- 表示 ----------
+
+    fn viewer(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let shared = self.shared.clone();
+        let Some(comp) = shared.comp(&self.comp_id) else {
+            ui.centered_and_justified(|ui| ui.label("コンポジションがありません"));
+            return;
+        };
+        let total = comp.frame_count().max(1);
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("⏮").on_hover_text("先頭へ (Home)").clicked() {
+                self.set_frame(0, false);
+            }
+            if ui.button("◀").on_hover_text("1 フレーム戻る (←)").clicked() {
+                self.set_frame(self.frame - 1, false);
+            }
+            if ui.button(if self.playing.is_some() { "⏸" } else { "▶" }).on_hover_text("再生／停止 (Space)").clicked() {
+                self.toggle_play();
+            }
+            if ui.button("▶|").on_hover_text("1 フレーム進む (→)").clicked() {
+                self.set_frame(self.frame + 1, false);
+            }
+            let mut f = self.frame;
+            if ui.add(egui::DragValue::new(&mut f).range(0..=total - 1).prefix("フレーム ")).changed() {
+                self.set_frame(f, false);
+            }
+            let secs = comp.frame_rate.frame_to_time(self.frame).seconds();
+            ui.monospace(format!("{:02}:{:06.3} / {}", (secs / 60.0) as i64, secs % 60.0, total));
+            if let Some(g) = &comp.beat_grid {
+                let b = g.beat_at(comp.frame_rate.frame_to_time(self.frame));
+                let per = g.beats_per_bar.max(1) as f64;
+                ui.monospace(format!("♪ {}.{}", (b / per).floor() as i64 + 1, b.rem_euclid(per).floor() as i64 + 1));
+            }
+            ui.separator();
+            egui::ComboBox::from_id_salt("resolution").width(60.0).selected_text(resolution_label(self.downsample)).show_ui(ui, |ui| {
+                for ds in [1, 2, 4] {
+                    ui.selectable_value(&mut self.downsample, ds, resolution_label(ds));
+                }
+            });
+            let zoom_label = if self.zoom <= 0.0 { "全体表示".to_string() } else { format!("{:.0}%", self.zoom * 100.0) };
+            egui::ComboBox::from_id_salt("zoom").width(70.0).selected_text(zoom_label).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.zoom, 0.0, "全体表示");
+                for z in [0.5, 1.0, 2.0, 4.0] {
+                    ui.selectable_value(&mut self.zoom, z, format!("{:.0}%", z * 100.0));
+                }
+            });
+            ui.toggle_value(&mut self.screening, "上映プレビュー")
+                .on_hover_text("暗室を想定した表示。白飛び（赤）・黒つぶれ（青）・バンディングの恐れ（緑）を重ねて表示します");
+            ui.toggle_value(&mut self.snap, "スナップ").on_hover_text("再生ヘッドをビートグリッドとマーカーに吸着させます");
+            match self.work_area {
+                Some((a, b)) => {
+                    if ui.button(format!("範囲 {a}–{b} ✕")).on_hover_text("ワークエリアを解除（B / N キーで設定）").clicked()
+                    {
+                        self.work_area = None;
+                    }
+                }
+                None => {
+                    ui.weak("B/N: 範囲");
+                }
+            }
+            ui.separator();
+            self.tool_buttons(ui);
+            if !self.engine.is_cached(self.frame, self.downsample) {
+                ui.weak("レンダリング中…");
+            }
+        });
+
+        // 現在フレームがキャッシュにあればテクスチャを差し替える。無ければ直前の絵を出し続ける。
+        let key = (self.revision, self.frame, self.downsample);
+        if self.shown != Some(key) {
+            if let Some(p) = self.engine.get(self.frame, self.downsample) {
+                let image = egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.rgba);
+                match &mut self.texture {
+                    Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                    None => self.texture = Some(ctx.load_texture("viewer", image, egui::TextureOptions::LINEAR)),
+                }
+                self.overlay = (p.screening.overlay.len() == p.width * p.height * 4).then(|| {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.screening.overlay);
+                    ctx.load_texture("screening", img, egui::TextureOptions::NEAREST)
+                });
+                if self.screening {
+                    let s = &p.screening;
+                    let pct = |v: f64| format!("{:.1}%", v * 100.0);
+                    self.status = format!(
+                        "上映プレビュー: 白飛び {} / 黒つぶれ {} / バンディングの恐れ {}",
+                        pct(s.clipped_white),
+                        pct(s.crushed_black),
+                        pct(s.banding_risk)
+                    );
+                }
+                self.shown = Some(key);
+            }
+        }
+
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+            let avail = ui.available_size();
+            let scale = if self.zoom > 0.0 { self.zoom } else { (avail.x / comp.width as f32).min(avail.y / comp.height as f32) };
+            let size = egui::vec2(comp.width as f32 * scale, comp.height as f32 * scale);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(size.x.max(avail.x), size.y.max(avail.y)), egui::Sense::click_and_drag());
+            // 上映プレビューでは周囲を真っ黒にする（暗い会場での見え方に近づける）
+            ui.painter().rect_filled(rect, 0.0, if self.screening { egui::Color32::BLACK } else { egui::Color32::from_gray(24) });
+            let img = egui::Rect::from_center_size(rect.center(), size);
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            match (&self.diff, &self.texture) {
+                (Some((tex, _)), _) => {
+                    ui.painter().image(tex.id(), img, uv, egui::Color32::WHITE);
+                }
+                (None, Some(tex)) => {
+                    ui.painter().image(tex.id(), img, uv, egui::Color32::WHITE);
+                    if let Some(o) = self.overlay.as_ref().filter(|_| self.screening) {
+                        ui.painter().image(o.id(), img, uv, egui::Color32::WHITE);
+                    }
+                }
+                _ => {}
+            }
+            // この時刻のレビューコメントの位置
+            let t = comp.frame_rate.frame_to_time(self.frame);
+            for r in shared.reviews.iter().filter(|r| r.comp == comp.id && !r.resolved && r.time == t) {
+                if let Some(p) = r.point {
+                    let pos = img.min + egui::vec2(p[0] as f32 * scale, p[1] as f32 * scale);
+                    ui.painter().circle_stroke(pos, 10.0, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(80, 180, 255)));
+                    let text = format!("{}: {}", r.author, r.text);
+                    ui.painter().text(
+                        pos + egui::vec2(14.0, -8.0),
+                        egui::Align2::LEFT_TOP,
+                        text,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(160, 220, 255),
+                    );
+                }
+            }
+            // 選択・移動、モーションパス、マスクの直接操作（差分表示中は無効）
+            self.anchors.insert("viewer".into(), img);
+            if self.diff.is_none() {
+                self.viewer_tools(ui, &resp, img, scale);
+            }
+            if let Some(e) = self.engine.error() {
+                ui.painter().text(
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    e,
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::LIGHT_RED,
+                );
+            }
+            if let Some((_, label)) = &self.diff {
+                ui.painter().text(
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::YELLOW,
+                );
+            }
+        });
+    }
+
+    fn tick_screenshot(&mut self, ctx: &egui::Context) {
+        let frame_shown = self.shown.is_some_and(|s| s.1 == self.frame);
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            // 操作スクリプトの撮影、起動時のスクリーンショット指定、タイムラプス録画のいずれか
+            let (path, close) = match (self.script_shot.take(), &self.screenshot) {
+                (Some(p), _) => (p, false),
+                (None, Some(s)) => (s.path.clone(), true),
+                (None, None) => {
+                    let dir = base_dir(self.path.as_deref()).join(".znd-timelapse");
+                    let _ = std::fs::create_dir_all(&dir);
+                    (dir.join(format!("{}.png", unix_now())), false)
+                }
+            };
+            if let Err(e) = image::save_buffer(&path, image.as_raw(), w as u32, h as u32, image::ExtendedColorType::Rgba8) {
+                eprintln!("スクリーンショットを保存できません: {e}");
+            }
+            if close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+        if self.script.is_some() {
+            return;
+        }
+        if let Some(shot) = &mut self.screenshot {
+            if !shot.requested && (frame_shown || shot.started.elapsed() > Duration::from_secs(20)) {
+                shot.requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            ctx.request_repaint();
+        } else if self.timelapse && self.last_capture.elapsed() > Duration::from_secs(30) && self.last_activity.elapsed() < IDLE_LIMIT {
+            // タイムラプス: 作業している間だけ、30 秒おきに画面を保存する
+            self.last_capture = Instant::now();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        }
+    }
+
+    /// 制作ログ用に、操作が続いている時間を数える。
+    fn tick_session(&mut self, ctx: &egui::Context) {
+        let dt = ctx.input(|i| i.unstable_dt).min(1.0);
+        let busy = ctx.input(|i| i.pointer.is_moving() || i.pointer.any_down() || !i.events.is_empty());
+        if busy {
+            self.last_activity = Instant::now();
+        }
+        if self.last_activity.elapsed() < IDLE_LIMIT {
+            self.active += Duration::from_secs_f32(dt);
+        }
+    }
+}
+
+pub(crate) fn resolution_label(ds: u32) -> &'static str {
+    match ds {
+        1 => "フル",
+        2 => "1/2",
+        _ => "1/4",
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.shortcuts(ctx);
+        self.tick_session(ctx);
+        self.tick_audio(ctx);
+        self.tick_playback(ctx);
+        self.poll_tasks(ctx);
+        if self.unsaved_since_autosave && self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+            self.autosave_now();
+        }
+        if self.unsaved_since_autosave {
+            // 操作が止まっていても自動保存の時刻が来たら起きる
+            ctx.request_repaint_after(AUTOSAVE_INTERVAL);
+        }
+        self.engine.request(&self.shared, self.revision, &self.comp_id, self.frame, self.downsample);
+
+        egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
+        egui::TopBottomPanel::bottom("timeline")
+            .resizable(true)
+            .default_height(320.0)
+            .min_height(120.0)
+            .show(ctx, |ui| self.timeline(ctx, ui));
+        egui::SidePanel::left("side").default_width(380.0).show(ctx, |ui| self.side_panel(ui));
+        egui::CentralPanel::default().show(ctx, |ui| self.viewer(ctx, ui));
+        self.windows(ctx);
+        self.tick_script(ctx);
+        self.tick_screenshot(ctx);
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(script) = &mut self.script {
+            script.inject(raw);
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 保存せずに閉じても、次回起動時に復旧できるようにする
+        if self.dirty {
+            self.autosave_now();
+        }
+        // 制作ログに今回の作業を記録する（保存済みのプロジェクトのみ）
+        if let Some(path) = &self.path {
+            if self.edits > 0 {
+                let entry = log::SessionEntry {
+                    started: self.session_start,
+                    seconds: self.active.as_secs(),
+                    edits: self.edits,
+                    user: self.user.clone(),
+                };
+                let _ = log::append_session(path, &entry);
+            }
+        }
+    }
+}

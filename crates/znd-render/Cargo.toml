@@ -1,0 +1,22 @@
+[package]
+name = "znd-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+znd-core.workspace = true
+znd-text.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+libloading = "0.8"
+serde_json.workspace = true
+gltf = "1"
+ufbx = "0.11"
+image.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+znd-text.workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "znd-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+znd-core.workspace = true
+znd-render.workspace = true
+znd-audio.workspace = true
+znd-text.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+usvg = "0.45"
+lopdf = "0.34"
+flate2 = "1"
+
+[dev-dependencies]
+lopdf = "0.34"
+serde_json.workspace = true

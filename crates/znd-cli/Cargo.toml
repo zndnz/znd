@@ -1,0 +1,19 @@
+[package]
+name = "znd-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "znd"
+path = "src/main.rs"
+
+[dependencies]
+znd-core.workspace = true
+znd-render.workspace = true
+znd-media.workspace = true
+znd-gpu.workspace = true
+znd-audio.workspace = true
+znd-script.workspace = true
+rayon.workspace = true
+serde_json.workspace = true

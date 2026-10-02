@@ -1,0 +1,10 @@
+[package]
+name = "znd-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+znd-core.workspace = true
+rustybuzz = "0.20"
+fontdb = "0.23"

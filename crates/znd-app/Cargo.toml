@@ -1,0 +1,20 @@
+[package]
+name = "znd-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+znd-core.workspace = true
+znd-render.workspace = true
+znd-media.workspace = true
+znd-gpu.workspace = true
+znd-audio.workspace = true
+znd-script.workspace = true
+znd-text.workspace = true
+rayon.workspace = true
+image.workspace = true
+serde_json.workspace = true
+eframe = "0.29"
+rfd = "0.15"
+cpal = "0.15"

@@ -1,0 +1,5 @@
+/target
+.znd-autosave/
+*.mp4
+/out/
+*.actual.png
