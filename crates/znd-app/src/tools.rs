@@ -2,6 +2,8 @@
 //!
 //! ここはポインタの位置を座標に直して渡すだけで、何がどう変わるかは `znd_core::edit` が決める。
 
+use crate::icons::Icon;
+use crate::panels::{apply_edit, PropEdit};
 use crate::App;
 use eframe::egui::{self, pos2, Color32, Pos2, Rect, Stroke};
 use znd_core::edit::{self, MotionHit, PathHit};
@@ -13,6 +15,12 @@ use znd_core::*;
 pub(crate) enum Tool {
     /// 選択・移動、モーションパスとマスクの頂点の編集。
     Select,
+    /// ビューアを掴んで動かす。
+    Hand,
+    /// クリックで拡大、Option + クリックで縮小。
+    Zoom,
+    /// 選択中のレイヤーをアンカーポイントのまわりに回す。
+    Rotate,
     /// マスクパスを描く。既存のパスの上では頂点を足す。
     Pen,
     RectMask,
@@ -20,11 +28,19 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [(Tool, &'static str, &'static str); 4] = [
-        (Tool::Select, "選択", "選択・移動。モーションパスとマスクの頂点を掴んで動かせます (V)"),
-        (Tool::Pen, "ペン", "クリックで頂点、ドラッグで曲線。始点をクリックで閉じる。Enter で開いたまま確定、Esc で取り消し (G)"),
-        (Tool::RectMask, "矩形マスク", "ドラッグで矩形のマスクを作ります (R)"),
-        (Tool::EllipseMask, "楕円マスク", "ドラッグで楕円のマスクを作ります (O)"),
+    /// （ツール, アイコン, 説明）。ツールバーに並ぶ順。
+    pub const ALL: [(Tool, Icon, &'static str); 7] = [
+        (Tool::Select, Icon::Select, "選択ツール: 選択・移動。モーションパスとマスクの頂点を掴んで動かせます (V)"),
+        (Tool::Hand, Icon::Hand, "手のひらツール: ビューアをドラッグして動かします (H)"),
+        (Tool::Zoom, Icon::Zoom, "ズームツール: クリックで拡大、Option + クリックで縮小 (Z)"),
+        (Tool::Rotate, Icon::Rotate, "回転ツール: 選択中のレイヤーをドラッグして回します (W)"),
+        (
+            Tool::Pen,
+            Icon::Pen,
+            "ペンツール: クリックで頂点、ドラッグで曲線。始点をクリックで閉じる。Enter で開いたまま確定、Esc で取り消し (G)",
+        ),
+        (Tool::RectMask, Icon::Rect, "長方形マスクツール: ドラッグで矩形のマスクを作ります (R)"),
+        (Tool::EllipseMask, Icon::Ellipse, "楕円形マスクツール: ドラッグで楕円のマスクを作ります (O)"),
     ];
 }
 
@@ -42,6 +58,10 @@ pub(crate) enum ViewerDrag {
     },
     /// ペンで足したばかりの頂点の接線を引っ張っている。
     PenTangent,
+    /// 回転ツール。`last` は直前のポインタの方位角（度）。
+    Rotate {
+        last: f64,
+    },
 }
 
 /// 画面上で掴める範囲（px）。
@@ -70,15 +90,6 @@ fn flatten(path: &BezPath) -> Vec<[f64; 2]> {
 }
 
 impl App {
-    /// ツールの切り替えボタン（ビューア上部）。
-    pub(crate) fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        for (tool, label, tip) in Tool::ALL {
-            if ui.selectable_label(self.tool == tool, label).on_hover_text(tip).clicked() {
-                self.set_tool(tool);
-            }
-        }
-    }
-
     pub(crate) fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.pen = None;
@@ -259,6 +270,42 @@ impl App {
                     }
                 }
             }
+            Tool::Hand => {
+                ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                if resp.dragged() {
+                    ui.scroll_with_delta(resp.drag_delta());
+                }
+            }
+            Tool::Zoom => {
+                ui.ctx().set_cursor_icon(if alt { egui::CursorIcon::ZoomOut } else { egui::CursorIcon::ZoomIn });
+                if resp.clicked() {
+                    self.zoom = (if alt { scale / 2.0 } else { scale * 2.0 }).clamp(0.05, 16.0);
+                }
+            }
+            Tool::Rotate => match (layer, world) {
+                (Some(l), Some(w)) if !l.locked => {
+                    let pivot = to_screen(apply(&w, l.transform.anchor.eval(t)));
+                    let angle = |p: Pos2| ((p.y - pivot.y) as f64).atan2((p.x - pivot.x) as f64).to_degrees();
+                    if resp.drag_started() {
+                        self.viewer_drag = press.map(|o| ViewerDrag::Rotate { last: angle(o) });
+                    }
+                    if let (true, Some(p), Some(ViewerDrag::Rotate { last })) = (resp.dragged(), pointer, &self.viewer_drag) {
+                        let a = angle(p);
+                        // 180° をまたいでも連続して回るよう、差を ±180° に収める
+                        let d = (a - last + 540.0).rem_euclid(360.0) - 180.0;
+                        self.viewer_drag = Some(ViewerDrag::Rotate { last: a });
+                        if d != 0.0 {
+                            let (id, value) = (l.id.clone(), l.transform.rotation.eval(t) + d);
+                            self.edit_layer("回転", true, &id, |l| apply_edit(l, "transform.rotation", t, &PropEdit::Set(vec![value])));
+                        }
+                    }
+                }
+                _ => {
+                    if resp.clicked() || resp.drag_started() {
+                        self.status = "回転するレイヤーを先に選択してください".into();
+                    }
+                }
+            },
             Tool::Pen => match (layer, inv) {
                 (Some(l), Some(inv)) => {
                     let id = l.id.clone();

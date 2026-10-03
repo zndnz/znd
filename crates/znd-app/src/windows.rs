@@ -252,14 +252,14 @@ impl App {
                 let missing = plugins::missing(&self.shared);
                 if !missing.is_empty() {
                     ui.separator();
-                    ui.colored_label(egui::Color32::LIGHT_RED, "このプロジェクトが使っているのに、入っていないプラグイン:");
+                    ui.colored_label(crate::theme::ERROR, "このプロジェクトが使っているのに、入っていないプラグイン:");
                     for (kind, layer) in missing {
                         ui.label(format!("{layer}: {kind}（このエフェクトは無視されます）"));
                     }
                 }
                 if !self.plugin_report.is_empty() {
                     ui.separator();
-                    ui.colored_label(egui::Color32::LIGHT_RED, "読み込めなかったファイル:");
+                    ui.colored_label(crate::theme::ERROR, "読み込めなかったファイル:");
                     for (path, e) in &self.plugin_report {
                         ui.label(format!("{}: {e}", path.display()));
                     }
@@ -347,7 +347,7 @@ impl App {
             let warnings = rights::export_warnings(&shared, &comp.id);
             if !warnings.is_empty() {
                 ui.separator();
-                ui.colored_label(Color32::YELLOW, "権利が確認できていない素材があります:");
+                ui.colored_label(crate::theme::WARN, "権利が確認できていない素材があります:");
                 for w in &warnings {
                     ui.label(format!("・{w}"));
                 }
@@ -384,7 +384,7 @@ impl App {
                             job.comp,
                             job.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                         ));
-                        if ui.small_button("✕").clicked() {
+                        if crate::widgets::small_icon(ui, crate::icons::Icon::Close, false, "キューから外す").clicked() {
                             remove = Some(i);
                         }
                     });
@@ -414,10 +414,16 @@ impl App {
             }
             ui.separator();
             for (ok, text) in &self.check.lines {
-                ui.colored_label(
-                    if *ok { Color32::from_rgb(120, 210, 140) } else { Color32::from_rgb(255, 170, 90) },
-                    format!("{} {text}", if *ok { "✓" } else { "✗" }),
-                );
+                ui.horizontal(|ui| {
+                    let (icon, color) = if *ok {
+                        (crate::icons::Icon::Diamond, crate::theme::OK)
+                    } else {
+                        (crate::icons::Icon::Warning, crate::theme::WARN)
+                    };
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+                    crate::icons::paint_sized(ui.painter(), r, icon, color, 12.0);
+                    ui.colored_label(color, text);
+                });
             }
             if !self.check.flashes.is_empty() {
                 ui.weak("明滅の区間はタイムラインに赤で表示されます");
@@ -439,7 +445,7 @@ impl App {
                         jump = Some(i);
                     }
                 }
-                ui.label(egui::RichText::new("▶ 現在").strong());
+                ui.label(egui::RichText::new("現在の状態").strong());
                 let mut redo_to = None;
                 for (i, (label, _)) in self.redo.iter().rev().enumerate() {
                     if ui.selectable_label(false, egui::RichText::new(format!("{label}（やり直し可）")).weak()).clicked() {
@@ -589,7 +595,7 @@ impl App {
         let shared = self.shared.clone();
         egui::Window::new("グラフエディター").open(&mut open).default_size([640.0, 320.0]).show(ctx, |ui| {
             let (Some(comp), Some(path)) = (shared.comp(&self.comp_id), self.graph_path.clone()) else {
-                ui.label("プロパティの 📈 ボタンを押すと、ここにグラフが表示されます");
+                ui.label("プロパティのグラフのアイコンを押すと、ここにグラフが表示されます");
                 return;
             };
             let Some(layer) = self.selected.as_ref().and_then(|id| comp.layer(id)) else {

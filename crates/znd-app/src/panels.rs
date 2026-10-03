@@ -1,6 +1,7 @@
 //! メニューバーと左パネル（プロジェクト・コンポ設定・素材の権利情報・レイヤーのプロパティ）。
 
-use crate::{base_dir, App, Task};
+use crate::icons::{self, Icon};
+use crate::{base_dir, theme, widgets, App, Task};
 use eframe::egui;
 use std::sync::OnceLock;
 use znd_audio::analysis::{band_keyframes, detect_onsets, Band};
@@ -64,6 +65,20 @@ impl KeyKind {
         k.ease_in.clear();
         k.ease_out.clear();
     }
+}
+
+/// 新しく作るレイヤーの種類。
+#[derive(Copy, Clone)]
+pub(crate) enum NewLayer {
+    Solid,
+    Text,
+    Rect,
+    Ellipse,
+    Star,
+    Null,
+    Adjustment,
+    Camera,
+    Light(LightType),
 }
 
 /// プロパティへの操作。値は成分の配列で持つので、どの型のプロパティにも使える。
@@ -178,6 +193,8 @@ pub(crate) struct Row {
     pub animated: bool,
     pub on_key: Option<KeyKind>,
     pub expr: Option<String>,
+    /// キーフレームの時刻と補間の種類（昇順）。
+    pub keys: Vec<(Time, KeyKind)>,
 }
 
 fn snapshot<V: Animatable>(path: &str, p: &Property<V>, t: Time, is_path: bool) -> Row {
@@ -189,6 +206,7 @@ fn snapshot<V: Animatable>(path: &str, p: &Property<V>, t: Time, is_path: bool) 
         animated: p.is_animated(),
         on_key: p.key_index_at(t).map(|i| KeyKind::of(&p.keyframes[i])),
         expr: p.expression.as_ref().map(|e| e.source.clone()),
+        keys: p.keyframes.iter().map(|k| (k.time, KeyKind::of(k))).collect(),
     }
 }
 
@@ -310,6 +328,37 @@ pub(crate) fn path_label(layer: &Layer, path: &str) -> String {
     }
 }
 
+/// 値の入力欄（数値は青字のドラッグ欄、4 成分は色）。変更があれば操作を返す。`rtl` は右から並べるレイアウト用。
+pub(crate) fn value_widgets(ui: &mut egui::Ui, row: &Row, rtl: bool) -> Option<PropEdit> {
+    if row.is_path {
+        ui.label(egui::RichText::new("パス").size(10.5).color(theme::TEXT_DIM));
+        return None;
+    }
+    if row.vals.len() == 4 {
+        let mut c = [row.vals[0] as f32, row.vals[1] as f32, row.vals[2] as f32, row.vals[3] as f32];
+        return ui.color_edit_button_rgba_unmultiplied(&mut c).changed().then(|| PropEdit::Set(c.iter().map(|v| *v as f64).collect()));
+    }
+    let suffix = match row.path.rsplit('.').next().unwrap_or("") {
+        "rotation" | "rotation_x" | "rotation_y" | "angle" | "cone_angle" => "°",
+        "opacity" | "scale" | "end_opacity" => "%",
+        _ => "",
+    };
+    let mut vals = row.vals.clone();
+    let mut changed = false;
+    ui.scope(|ui| {
+        ui.visuals_mut().override_text_color = Some(theme::VALUE);
+        ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+        ui.spacing_mut().item_spacing.x = 1.0;
+        ui.spacing_mut().button_padding.x = 3.0;
+        let n = vals.len();
+        for k in 0..n {
+            let i = if rtl { n - 1 - k } else { k };
+            changed |= ui.add(egui::DragValue::new(&mut vals[i]).speed(0.5).max_decimals(2).suffix(suffix)).changed();
+        }
+    });
+    changed.then_some(PropEdit::Set(vals))
+}
+
 fn font_list() -> &'static Vec<String> {
     static LIST: OnceLock<Vec<String>> = OnceLock::new();
     LIST.get_or_init(znd_text::font_families)
@@ -327,6 +376,8 @@ impl App {
 
     pub(crate) fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
+            ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
             ui.menu_button("ファイル", |ui| {
                 if ui.button("新規（デモプロジェクト）").clicked() {
                     self.replace_project(ctx, demo::demo_project(), None);
@@ -449,9 +500,9 @@ impl App {
                     ui.close_menu();
                 }
             });
-            ui.menu_button("レイヤー", |ui| self.layer_menu(ui));
-            ui.menu_button("音", |ui| self.audio_menu(ctx, ui));
-            ui.menu_button("チェック", |ui| {
+            ui.menu_button("コンポジション", |ui| {
+                self.comp_menu(ui);
+                ui.separator();
                 if ui.button("提出前チェックを実行").clicked() {
                     ui.close_menu();
                     self.start_check(ctx);
@@ -473,6 +524,10 @@ impl App {
                     self.export_breakdown();
                 }
             });
+            ui.menu_button("レイヤー", |ui| self.layer_menu(ui));
+            ui.menu_button("エフェクト", |ui| self.effect_menu(ui));
+            ui.menu_button("アニメーション", |ui| self.animation_menu(ctx, ui));
+            ui.menu_button("表示", |ui| self.view_menu(ui));
             ui.menu_button("ウィンドウ", |ui| {
                 ui.checkbox(&mut self.show.export, "書き出し");
                 ui.checkbox(&mut self.show.check, "提出前チェック");
@@ -512,40 +567,225 @@ impl App {
                 }
             });
 
+            // 右端: ワークスペース名と、プレビュー・レンダーの入口
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add_space(4.0);
+                if ui.button("レンダー").on_hover_text("書き出しウィンドウを開く").clicked() {
+                    self.show.export = true;
+                }
+                if ui.button(if self.playing.is_some() { "停止" } else { "プレビュー" }).on_hover_text("再生／停止 (Space)").clicked()
+                {
+                    self.toggle_play();
+                }
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("ワークスペース: 標準").size(10.5).color(theme::TEXT_DIM));
+            });
+        });
+    }
+
+    /// 進行中の処理（書き出し・提出前チェック）の（名前, 進捗, 中止フラグ）。
+    pub(crate) fn running_task(&self) -> Option<(String, f32, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
+        self.export_task
+            .as_ref()
+            .map(|t| (t.label.clone(), t.fraction(), t.cancel.clone()))
+            .or_else(|| self.check_task.as_ref().map(|t| (t.label.clone(), t.fraction(), t.cancel.clone())))
+    }
+
+    fn comp_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("新規コンポジション").clicked() {
+            ui.close_menu();
+            self.new_composition();
+        }
+        if ui.button("コンポジション設定…").on_hover_text("プロジェクトパネルの下段で編集します").clicked() {
+            ui.close_menu();
+            self.left_tab = 0;
+            self.selected_footage = None;
+        }
+        ui.separator();
+        if ui.button("ワークエリアの開始を現在の時刻に　B").clicked() {
+            ui.close_menu();
+            let end = self.work_area.map(|w| w.1).unwrap_or(self.total_frames()).max(self.frame + 1);
+            self.work_area = Some((self.frame, end));
+        }
+        if ui.button("ワークエリアの終了を現在の時刻に　N").clicked() {
+            ui.close_menu();
+            let start = self.work_area.map(|w| w.0).unwrap_or(0).min(self.frame);
+            self.work_area = Some((start, self.frame + 1));
+        }
+        if ui.add_enabled(self.work_area.is_some(), egui::Button::new("ワークエリアを解除")).clicked() {
+            ui.close_menu();
+            self.work_area = None;
+        }
+        if ui.button("現在の時刻にマーカーを追加　M").clicked() {
+            ui.close_menu();
+            self.add_marker("");
+        }
+        ui.separator();
+        if ui.button("フレームを画像として保存…").clicked() {
+            ui.close_menu();
+            self.save_frame_image();
+        }
+    }
+
+    /// 空のコンポジションを足して、そこへ切り替える（寸法とフレームレートは今のコンポを引き継ぐ）。
+    pub(crate) fn new_composition(&mut self) {
+        let shared = self.shared.clone();
+        let (w, h, fr, dur) = shared.comp(&self.comp_id).map(|c| (c.width, c.height, c.frame_rate, c.duration)).unwrap_or((
+            1920,
+            1080,
+            FrameRate::FPS_30,
+            Time::from_seconds(10.0),
+        ));
+        let id = shared.fresh_id("comp");
+        let name = format!("コンポ {}", shared.compositions.len() + 1);
+        let comp = Composition::new(id.clone(), name, w, h, fr, dur);
+        self.edit("新規コンポジション", false, |p| p.compositions.push(comp));
+        self.switch_comp(CompId::new(id));
+    }
+
+    pub(crate) fn switch_comp(&mut self, id: CompId) {
+        if id != self.comp_id {
+            self.comp_id = id;
+            self.selected = None;
+            self.selected_key = None;
+            self.frame = 0;
+            self.stop();
+            self.audio_sig = 0;
+        }
+    }
+
+    /// 親を設定する。循環する場合は元に戻す。
+    pub(crate) fn set_parent(&mut self, id: &LayerId, parent: Option<LayerId>) {
+        let set = parent.is_some();
+        self.edit_layer("親", false, id, |l| l.parent = parent);
+        if set && !self.project.validate().is_empty() {
+            self.undo();
+            self.redo.clear();
+            self.status = "親子関係が循環するため設定できません".into();
+        }
+    }
+
+    /// 選択中のレイヤーにエフェクトを足す。
+    pub(crate) fn add_effect(&mut self, kind: &str) {
+        let shared = self.shared.clone();
+        let Some(comp) = shared.comp(&self.comp_id) else { return };
+        let Some(layer) = self.selected.as_ref().and_then(|id| comp.layer(id)) else {
+            self.status = "エフェクトを掛けるレイヤーを先に選択してください".into();
+            return;
+        };
+        let (w, h) = shared.source_size(&layer.kind).unwrap_or((comp.width as f64, comp.height as f64));
+        if let Some(fx) = EffectInstance::new(kind, w, h) {
+            let id = layer.id.clone();
+            self.status = format!("「{}」に {} を追加しました", layer.name, fx.name);
+            self.edit_layer("エフェクト追加", false, &id, |l| l.effects.push(fx));
+        }
+    }
+
+    /// 分類ごとのエフェクト一覧（組み込みと、読み込み済みのプラグイン）。
+    pub(crate) fn effect_menu(&mut self, ui: &mut egui::Ui) {
+        if self.selected.is_none() {
+            ui.label(egui::RichText::new("レイヤーを選択すると追加できます").size(10.5).color(theme::TEXT_DIM));
             ui.separator();
-            let title =
-                self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "未保存".into());
-            ui.label(format!("{}{}", title, if self.dirty { " ●" } else { "" }));
-            ui.separator();
-            let running = self
-                .export_task
-                .as_ref()
-                .map(|t| (t.label.clone(), t.fraction(), t.cancel.clone()))
-                .or_else(|| self.check_task.as_ref().map(|t| (t.label.clone(), t.fraction(), t.cancel.clone())));
-            match running {
-                Some((label, fraction, cancel)) => {
-                    ui.add(egui::ProgressBar::new(fraction).desired_width(180.0).text(label));
-                    if ui.button("中止").clicked() {
-                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let effects = all_effects();
+        let mut categories: Vec<&str> = Vec::new();
+        for d in &effects {
+            if !categories.contains(&d.category) {
+                categories.push(d.category);
+            }
+        }
+        for cat in categories {
+            ui.menu_button(cat, |ui| {
+                for def in effects.iter().filter(|d| d.category == cat) {
+                    if ui.button(def.label).clicked() {
+                        ui.close_menu();
+                        self.add_effect(def.kind);
                     }
                 }
-                None => {
-                    ui.label(&self.status);
+            });
+        }
+    }
+
+    fn animation_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let key = self.selected_key.clone();
+        ui.add_enabled_ui(key.is_some(), |ui| {
+            ui.menu_button("キーフレーム補間", |ui| {
+                for k in KeyKind::ALL {
+                    if ui.button(k.label()).clicked() {
+                        ui.close_menu();
+                        if let Some(sel) = &key {
+                            self.edit_layer("キーフレーム補間", false, &sel.layer, |l| {
+                                // プロパティを指定していなければ、その時刻にキーを持つ全プロパティに適用する
+                                let mut paths = Vec::new();
+                                visit_layer(l, &mut |p, _| paths.push(p.to_string()));
+                                for p in paths.iter().filter(|p| sel.path.as_ref().is_none_or(|s| s == *p)) {
+                                    apply_edit(l, p, sel.at, &PropEdit::Kind(k));
+                                }
+                            });
+                        }
+                    }
                 }
+            });
+            if ui.button("選択中のキーフレームを削除").clicked() {
+                ui.close_menu();
+                self.delete_selected_key();
+            }
+        });
+        ui.separator();
+        if ui.button("グラフエディター").clicked() {
+            ui.close_menu();
+            self.show.graph = true;
+        }
+        ui.checkbox(&mut self.only_animated, "動きのあるプロパティだけを表示");
+        ui.checkbox(&mut self.snap, "スナップ");
+        ui.separator();
+        ui.menu_button("オーディオから生成", |ui| self.audio_menu(ctx, ui));
+    }
+
+    /// 選択中のキーフレームを消す（プロパティの指定が無ければ、その時刻の全プロパティのキー）。
+    pub(crate) fn delete_selected_key(&mut self) {
+        let Some(sel) = self.selected_key.take() else { return };
+        self.edit_layer("キーフレーム削除", false, &sel.layer, |l| match &sel.path {
+            Some(path) => apply_edit(l, path, sel.at, &PropEdit::RemoveKey),
+            None => {
+                edit::delete_keys(l, sel.at);
             }
         });
     }
 
-    fn layer_menu(&mut self, ui: &mut egui::Ui) {
-        let dims = self.shared.comp(&self.comp_id).map(|c| (c.width, c.height, c.duration));
-        let Some((w, h, dur)) = dims else { return };
-        ui.menu_button("新規", |ui| {
-            if ui.button("平面").clicked() {
-                ui.close_menu();
-                self.add_layer("平面追加", "平面", LayerKind::Solid { width: w, height: h, color: [0.5, 0.5, 0.5] });
+    fn view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("拡大率", |ui| {
+            ui.radio_value(&mut self.zoom, 0.0, "全体表示");
+            for z in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                ui.radio_value(&mut self.zoom, z, format!("{:.0}%", z * 100.0));
             }
-            if ui.button("テキスト").clicked() {
-                ui.close_menu();
+        });
+        ui.menu_button("解像度", |ui| {
+            for ds in [1, 2, 4] {
+                ui.radio_value(&mut self.downsample, ds, crate::resolution_label(ds));
+            }
+        });
+        ui.separator();
+        ui.checkbox(&mut self.show_guides, "セーフマージン");
+        ui.checkbox(&mut self.show_grid, "グリッド");
+        ui.checkbox(&mut self.screening, "上映プレビュー");
+        ui.separator();
+        ui.checkbox(&mut self.hide_shy, "シャイのレイヤーを隠す");
+        if ui.button("タイムライン全体を表示").clicked() {
+            ui.close_menu();
+            self.tl_zoom = 1.0;
+            self.tl_scroll = 0.0;
+        }
+    }
+
+    /// 新しいレイヤーを作って選択する（メニューとツールバーで共通）。
+    pub(crate) fn create_layer(&mut self, what: NewLayer) {
+        let Some((w, h, dur)) = self.shared.comp(&self.comp_id).map(|c| (c.width, c.height, c.duration)) else { return };
+        let shape = |items: Vec<ShapeItem>| LayerKind::Shape { items };
+        match what {
+            NewLayer::Solid => self.add_layer("平面追加", "平面", LayerKind::Solid { width: w, height: h, color: [0.5, 0.5, 0.5] }),
+            NewLayer::Text => {
                 let mut doc = TextDocument::new("テキスト", 96.0);
                 doc.justify = Justify::Center;
                 self.add_layer(
@@ -554,53 +794,73 @@ impl App {
                     LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false },
                 );
             }
-            for (name, items) in [
-                ("シェイプ（矩形）", vec![ShapeItem::rect(300.0, 200.0), ShapeItem::fill([1.0, 1.0, 1.0, 1.0])]),
-                ("シェイプ（楕円）", vec![ShapeItem::ellipse(300.0, 300.0), ShapeItem::fill([1.0, 1.0, 1.0, 1.0])]),
-                ("シェイプ（スター）", vec![ShapeItem::star(5.0, 200.0, 90.0), ShapeItem::fill([1.0, 0.85, 0.2, 1.0])]),
-            ] {
-                if ui.button(name).clicked() {
-                    ui.close_menu();
-                    self.add_layer("シェイプ追加", "シェイプ", LayerKind::Shape { items });
-                }
-            }
-            if ui.button("ヌル").clicked() {
-                ui.close_menu();
-                self.add_layer("ヌル追加", "ヌル", LayerKind::Null);
-            }
-            if ui.button("調整レイヤー").clicked() {
-                ui.close_menu();
-                self.add_layer("調整レイヤー追加", "調整レイヤー", LayerKind::Adjustment);
-            }
-            if ui.button("カメラ").clicked() {
-                ui.close_menu();
+            NewLayer::Rect => self.add_layer(
+                "シェイプ追加",
+                "シェイプ",
+                shape(vec![ShapeItem::rect(300.0, 200.0), ShapeItem::fill([1.0, 1.0, 1.0, 1.0])]),
+            ),
+            NewLayer::Ellipse => self.add_layer(
+                "シェイプ追加",
+                "シェイプ",
+                shape(vec![ShapeItem::ellipse(300.0, 300.0), ShapeItem::fill([1.0, 1.0, 1.0, 1.0])]),
+            ),
+            NewLayer::Star => self.add_layer(
+                "シェイプ追加",
+                "シェイプ",
+                shape(vec![ShapeItem::star(5.0, 200.0, 90.0), ShapeItem::fill([1.0, 0.85, 0.2, 1.0])]),
+            ),
+            NewLayer::Null => self.add_layer("ヌル追加", "ヌル", LayerKind::Null),
+            NewLayer::Adjustment => self.add_layer("調整レイヤー追加", "調整レイヤー", LayerKind::Adjustment),
+            NewLayer::Camera => {
                 let id = self.shared.fresh_id("camera");
                 let cam = camera_import::default_camera(&id, w, h, dur);
                 self.edit_comp("カメラ追加", false, |c| c.layers.insert(0, cam));
                 self.selected = Some(LayerId::new(id));
             }
-            for (name, kind) in [
-                ("ライト（ポイント）", LightType::Point),
-                ("ライト（スポット）", LightType::Spot),
-                ("ライト（平行）", LightType::Parallel),
-                ("ライト（アンビエント）", LightType::Ambient),
+            NewLayer::Light(kind) => {
+                let name = match kind {
+                    LightType::Point => "ライト（ポイント）",
+                    LightType::Spot => "ライト（スポット）",
+                    LightType::Parallel => "ライト（平行）",
+                    LightType::Ambient => "ライト（アンビエント）",
+                };
+                let light = LayerKind::Light {
+                    light: kind,
+                    color: [1.0, 1.0, 1.0],
+                    intensity: Property::constant(100.0),
+                    cone_angle: Property::constant(90.0),
+                    cone_feather: Property::constant(50.0),
+                    casts_shadows: false,
+                    shadow_darkness: 100.0,
+                    shadow_diffusion: 0.0,
+                };
+                self.add_layer("ライト追加", name, light);
+                if let Some(id) = self.selected.clone() {
+                    self.edit_layer("ライト追加", true, &id, |l| l.transform.position_z = Property::constant(-500.0));
+                }
+            }
+        }
+    }
+
+    fn layer_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("新規", |ui| {
+            for (label, what) in [
+                ("平面", NewLayer::Solid),
+                ("テキスト", NewLayer::Text),
+                ("シェイプ（矩形）", NewLayer::Rect),
+                ("シェイプ（楕円）", NewLayer::Ellipse),
+                ("シェイプ（スター）", NewLayer::Star),
+                ("ヌル", NewLayer::Null),
+                ("調整レイヤー", NewLayer::Adjustment),
+                ("カメラ", NewLayer::Camera),
+                ("ライト（ポイント）", NewLayer::Light(LightType::Point)),
+                ("ライト（スポット）", NewLayer::Light(LightType::Spot)),
+                ("ライト（平行）", NewLayer::Light(LightType::Parallel)),
+                ("ライト（アンビエント）", NewLayer::Light(LightType::Ambient)),
             ] {
-                if ui.button(name).clicked() {
+                if ui.button(label).clicked() {
                     ui.close_menu();
-                    let light = LayerKind::Light {
-                        light: kind,
-                        color: [1.0, 1.0, 1.0],
-                        intensity: Property::constant(100.0),
-                        cone_angle: Property::constant(90.0),
-                        cone_feather: Property::constant(50.0),
-                        casts_shadows: false,
-                        shadow_darkness: 100.0,
-                        shadow_diffusion: 0.0,
-                    };
-                    self.add_layer("ライト追加", name, light);
-                    if let Some(id) = self.selected.clone() {
-                        self.edit_layer("ライト追加", true, &id, |l| l.transform.position_z = Property::constant(-500.0));
-                    }
+                    self.create_layer(what);
                 }
             }
         });
@@ -743,7 +1003,7 @@ impl App {
         });
     }
 
-    fn audio_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub(crate) fn audio_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let shared = self.shared.clone();
         let Some(comp) = shared.comp(&self.comp_id) else { return };
         // 解析の対象: 選択中のレイヤーに音があればそれ、無ければコンポ全体のミックス
@@ -903,76 +1163,14 @@ impl App {
         };
     }
 
-    // ---------- 左パネル ----------
+    // ---------- パネルの中身 ----------
 
-    pub(crate) fn side_panel(&mut self, ui: &mut egui::Ui) {
-        let shared = self.shared.clone();
-        // エクスプレッションのエラーは、編集があったときだけ検査し直す
-        if self.expr_errors.0 != self.revision {
-            let t = self.frame_rate().frame_to_time(self.frame);
-            self.expr_errors = (self.revision, znd_script::ExprEngine::new().check(&shared, &self.comp_id, t));
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("プロジェクト");
-            for comp in &shared.compositions {
-                ui.horizontal(|ui| {
-                    let lock = if comp.locked_by.is_some() { " 🔒" } else { "" };
-                    if ui.selectable_label(comp.id == self.comp_id, format!("▣ {}{lock}", comp.name)).clicked() && comp.id != self.comp_id
-                    {
-                        self.comp_id = comp.id.clone();
-                        self.selected = None;
-                        self.frame = 0;
-                        self.stop();
-                        self.audio_sig = 0;
-                    }
-                    if comp.id != self.comp_id && ui.small_button("＋").on_hover_text("現在のコンポにレイヤーとして追加").clicked()
-                    {
-                        self.add_layer("プリコンポ追加", &comp.name, LayerKind::Precomp { comp: comp.id.clone() });
-                        if !self.project.validate().is_empty() {
-                            self.undo();
-                            self.redo.clear();
-                            self.status = "循環するため追加できません".into();
-                        }
-                    }
-                });
-            }
-            for f in &shared.footage {
-                let warn = !rights::issues(f).is_empty();
-                let text = format!("{} {}{}", if f.width == 0 { "♪" } else { "🎞" }, f.name, if warn { " ⚠" } else { "" });
-                if ui
-                    .selectable_label(self.selected_footage.as_ref() == Some(&f.id), text)
-                    .on_hover_text(if warn { "権利が未確認です" } else { "権利確認済み" })
-                    .clicked()
-                {
-                    self.selected_footage = Some(f.id.clone());
-                    self.selected = None;
-                }
-            }
-
-            let Some(comp) = shared.comp(&self.comp_id) else { return };
-            ui.separator();
-            egui::CollapsingHeader::new("コンポジション・プロジェクト設定").show(ui, |ui| self.comp_settings(ui, comp));
-            ui.separator();
-
-            if let Some(item) = self.selected_footage.clone().and_then(|id| shared.footage_item(&id)) {
-                self.footage_panel(ui, item);
-                return;
-            }
-            match self.selected.clone().and_then(|id| comp.layer(&id)) {
-                Some(layer) => self.layer_panel(ui, comp, layer),
-                None => {
-                    ui.weak("タイムラインでレイヤーを、上の一覧で素材を選択すると、ここで編集できます");
-                }
-            }
-        });
-    }
-
-    fn comp_settings(&mut self, ui: &mut egui::Ui, comp: &Composition) {
+    pub(crate) fn comp_settings(&mut self, ui: &mut egui::Ui, comp: &Composition) {
         let mut name = comp.name.clone();
-        if ui.text_edit_singleline(&mut name).changed() {
+        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).changed() {
             self.edit_comp("コンポ名", true, |c| c.name = name);
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let (mut w, mut h) = (comp.width, comp.height);
             ui.label("解像度");
             let cw = ui.add(egui::DragValue::new(&mut w).range(2..=16384)).changed();
@@ -991,7 +1189,7 @@ impl App {
                 }
             });
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("尺（秒）");
             let mut secs = comp.duration.seconds();
             if ui.add(egui::DragValue::new(&mut secs).speed(0.1).range(0.1..=3600.0)).changed() {
@@ -1003,7 +1201,7 @@ impl App {
                 self.edit_comp("背景色", true, |c| c.background = bg);
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let mut mb = comp.motion_blur;
             let mut changed = ui.checkbox(&mut mb.enabled, "モーションブラー").changed();
             changed |= ui.add(egui::DragValue::new(&mut mb.shutter_angle).range(1.0..=720.0).prefix("角度 ")).changed();
@@ -1013,7 +1211,7 @@ impl App {
                 self.edit_comp("モーションブラー", true, |c| c.motion_blur = mb);
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let mut on = comp.beat_grid.is_some();
             let mut g = comp.beat_grid.unwrap_or_else(|| BeatGrid::new(120.0));
             let mut changed = ui.checkbox(&mut on, "ビートグリッド").changed();
@@ -1029,7 +1227,7 @@ impl App {
                 self.edit_comp("ビートグリッド", true, |c| c.beat_grid = on.then_some(g));
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             match &comp.locked_by {
                 None => {
                     if ui
@@ -1047,7 +1245,7 @@ impl App {
                     }
                 }
                 Some(owner) => {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("{owner} がロック中"));
+                    ui.colored_label(theme::ERROR, format!("{owner} がロック中"));
                 }
             }
             ui.label("名前");
@@ -1055,7 +1253,7 @@ impl App {
         });
         ui.separator();
         let s = &self.shared.settings.clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let mut linear = s.linear_blending;
             if ui.checkbox(&mut linear, "リニアライト合成").changed() {
                 self.edit("合成設定", false, |p| p.settings.linear_blending = linear);
@@ -1081,7 +1279,7 @@ impl App {
             (ColorSpace::AcesCg, "ACEScg"),
         ];
         let name_of = |c: ColorSpace| SPACES.iter().find(|(s, _)| *s == c).map(|(_, n)| *n).unwrap_or("");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("作業色空間");
             egui::ComboBox::from_id_salt("working").selected_text(name_of(s.working_space)).show_ui(ui, |ui| {
                 for (space, label) in SPACES {
@@ -1101,15 +1299,14 @@ impl App {
         });
     }
 
-    fn footage_panel(&mut self, ui: &mut egui::Ui, item: &FootageItem) {
-        ui.heading("素材");
-        ui.label(format!("{}　{}x{}", item.name, item.width, item.height));
-        ui.weak(&item.path);
+    pub(crate) fn footage_panel(&mut self, ui: &mut egui::Ui, item: &FootageItem) {
+        ui.label(format!("{}　{}×{}", item.name, item.width, item.height));
+        ui.add(egui::Label::new(egui::RichText::new(&item.path).size(10.0).color(theme::TEXT_DIM)).truncate());
         if item.vfr {
-            ui.colored_label(egui::Color32::YELLOW, "可変フレームレート素材（固定レートに適合して読み込み）");
+            ui.colored_label(theme::WARN, "可変フレームレート素材（固定レートに適合して読み込み）");
         }
         let id = item.id.clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("レイヤーとして追加").clicked() {
                 let kind =
                     if item.width == 0 { LayerKind::Audio { footage: id.clone() } } else { LayerKind::Footage { footage: id.clone() } };
@@ -1127,8 +1324,8 @@ impl App {
                 };
             }
         });
-        ui.separator();
-        ui.strong("権利情報");
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("権利情報").size(10.5).color(theme::TEXT_DIM));
         let mut r = item.rights.clone();
         let mut changed = false;
         egui::Grid::new("rights").num_columns(2).show(ui, |ui| {
@@ -1177,69 +1374,82 @@ impl App {
         }
     }
 
-    /// プロパティ 1 行。操作があれば `edit_prop` に流す。
+    /// プロパティ 1 行（ストップウォッチ・名前・値・キー・エクスプレッション）。操作があれば編集として適用する。
     fn prop_row(&mut self, ui: &mut egui::Ui, layer: &Layer, row: &Row, t: Time) {
         let label = path_label(layer, &row.path);
         let mut edit: Option<PropEdit> = None;
         ui.horizontal(|ui| {
-            if ui.selectable_label(row.animated, "⏱").on_hover_text("アニメーションのオン／オフ").clicked() {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().interact_size.y = 18.0;
+            if widgets::small_icon(ui, Icon::Stopwatch, row.animated, "ストップウォッチ: アニメーションのオン／オフ").clicked()
+            {
                 edit = Some(PropEdit::ToggleAnimation);
             }
-            ui.label(&label);
-            if row.is_path {
-                ui.weak("（パス）");
-            } else if row.vals.len() == 4 {
-                let mut c = [row.vals[0] as f32, row.vals[1] as f32, row.vals[2] as f32, row.vals[3] as f32];
-                if ui.color_edit_button_rgba_unmultiplied(&mut c).changed() {
-                    edit = Some(PropEdit::Set(c.iter().map(|v| *v as f64).collect()));
-                }
-            } else {
-                let mut vals = row.vals.clone();
-                let mut changed = false;
-                for v in vals.iter_mut() {
-                    changed |= ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(3)).changed();
-                }
-                if changed {
-                    edit = Some(PropEdit::Set(vals));
-                }
+            let (r, _) = ui.allocate_exact_size(egui::vec2(92.0, 18.0), egui::Sense::hover());
+            ui.painter().with_clip_rect(r).text(
+                r.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &label,
+                egui::FontId::proportional(11.5),
+                theme::TEXT,
+            );
+            if let Some(e) = value_widgets(ui, row, false) {
+                edit = Some(e);
             }
-            if row.animated {
-                if ui.selectable_label(row.on_key.is_some(), "◆").on_hover_text("この時刻のキーを追加／削除").clicked() {
-                    edit = Some(if row.on_key.is_some() { PropEdit::RemoveKey } else { PropEdit::AddKey });
-                }
-                if let Some(kind) = row.on_key {
-                    egui::ComboBox::from_id_salt(("interp", &row.path)).width(104.0).selected_text(kind.label()).show_ui(ui, |ui| {
-                        for k in KeyKind::ALL {
-                            if ui.selectable_label(k == kind, k.label()).clicked() {
-                                edit = Some(PropEdit::Kind(k));
-                            }
-                        }
-                    });
-                }
-                if !row.is_path && ui.small_button("📈").on_hover_text("グラフエディターで開く").clicked() {
-                    self.graph_path = Some(row.path.clone());
-                    self.show.graph = true;
-                }
-            }
-            if !row.is_path {
-                let has_error = self.expr_errors.1.iter().any(|e| e.layer == layer.name && e.path == row.path);
-                let text = egui::RichText::new("＝").color(if has_error {
-                    egui::Color32::LIGHT_RED
-                } else if row.expr.is_some() {
-                    egui::Color32::from_rgb(120, 200, 255)
-                } else {
-                    egui::Color32::GRAY
-                });
-                if ui.selectable_label(self.expr_open.as_deref() == Some(&row.path), text).on_hover_text("エクスプレッション").clicked()
-                {
-                    if self.expr_open.as_deref() == Some(&row.path) {
-                        self.expr_open = None;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !row.is_path {
+                    let has_error = self.expr_errors.1.iter().any(|e| e.layer == layer.name && e.path == row.path);
+                    let open = self.expr_open.as_deref() == Some(&row.path);
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                    let color = if has_error {
+                        theme::ERROR
+                    } else if row.expr.is_some() {
+                        theme::VALUE
+                    } else if resp.hovered() {
+                        egui::Color32::WHITE
                     } else {
-                        self.expr_open = Some(row.path.clone());
-                        self.expr_buf = row.expr.clone().unwrap_or_default();
+                        theme::TEXT_OFF
+                    };
+                    if open {
+                        ui.painter().rect_filled(r, 2.0, theme::BG_HOVER);
+                    }
+                    icons::paint_sized(ui.painter(), r, Icon::Expr, color, 14.0);
+                    if resp.on_hover_text("エクスプレッション").clicked() {
+                        if open {
+                            self.expr_open = None;
+                        } else {
+                            self.expr_open = Some(row.path.clone());
+                            self.expr_buf = row.expr.clone().unwrap_or_default();
+                        }
                     }
                 }
-            }
+                if row.animated {
+                    if !row.is_path && widgets::small_icon(ui, Icon::Graph, false, "グラフエディターで開く").clicked() {
+                        self.graph_path = Some(row.path.clone());
+                        self.show.graph = true;
+                    }
+                    let on = row.on_key.is_some();
+                    let resp = widgets::small_icon(
+                        ui,
+                        if on { Icon::DiamondFill } else { Icon::Diamond },
+                        on,
+                        "この時刻のキーフレームを追加／削除（右クリックで補間の種類）",
+                    );
+                    if resp.clicked() {
+                        edit = Some(if on { PropEdit::RemoveKey } else { PropEdit::AddKey });
+                    }
+                    if let Some(kind) = row.on_key {
+                        resp.context_menu(|ui| {
+                            for k in KeyKind::ALL {
+                                if ui.selectable_label(k == kind, k.label()).clicked() {
+                                    edit = Some(PropEdit::Kind(k));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                }
+            });
         });
         if self.expr_open.as_deref() == Some(&row.path) {
             self.expr_editor(ui, layer, row, &mut edit);
@@ -1309,7 +1519,7 @@ impl App {
         });
         for e in self.expr_errors.1.iter().filter(|e| e.layer == layer.name && e.path == row.path) {
             let line = e.line.map(|l| format!("{l} 行目: ")).unwrap_or_default();
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("{line}{}", e.message));
+            ui.colored_label(theme::ERROR, format!("{line}{}", e.message));
         }
     }
 
@@ -1322,217 +1532,219 @@ impl App {
         }
     }
 
-    fn layer_panel(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer) {
+    pub(crate) fn layer_panel(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer) {
         let id = layer.id.clone();
         let t = comp.frame_rate.frame_to_time(self.frame);
         let rows = collect_rows(layer, t);
-        ui.horizontal(|ui| {
-            ui.heading("レイヤー");
-            ui.checkbox(&mut self.only_animated, "動きのあるものだけ")
-                .on_hover_text("キーフレームかエクスプレッションのあるプロパティだけを表示します");
-        });
         ui.add_enabled_ui(!layer.locked, |ui| {
-            let mut name = layer.name.clone();
-            if ui.text_edit_singleline(&mut name).changed() {
-                self.edit_layer("レイヤー名", true, &id, |l| l.name = name);
-            }
-            self.kind_panel(ui, layer);
-            ui.horizontal(|ui| {
-                ui.label("描画モード");
-                egui::ComboBox::from_id_salt("blend").selected_text(layer.blend_mode.label_ja()).show_ui(ui, |ui| {
-                    for mode in BlendMode::ALL {
-                        if ui.selectable_label(mode == layer.blend_mode, mode.label_ja()).clicked() {
-                            self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
-                        }
-                    }
-                });
-            });
-            let others: Vec<&Layer> = comp.layers.iter().filter(|l| l.id != id).collect();
-            let name_of = |lid: &LayerId| comp.layer(lid).map(|l| l.name.clone()).unwrap_or_else(|| format!("（不明: {lid}）"));
-            ui.horizontal(|ui| {
-                ui.label("親");
-                let current = layer.parent.as_ref().map(&name_of).unwrap_or_else(|| "なし".into());
-                egui::ComboBox::from_id_salt("parent").selected_text(current).show_ui(ui, |ui| {
-                    if ui.selectable_label(layer.parent.is_none(), "なし").clicked() {
-                        self.edit_layer("親", false, &id, |l| l.parent = None);
-                    }
-                    for o in &others {
-                        if ui.selectable_label(layer.parent.as_ref() == Some(&o.id), &o.name).clicked() {
-                            let pid = o.id.clone();
-                            self.edit_layer("親", false, &id, |l| l.parent = Some(pid));
-                            if !self.project.validate().is_empty() {
-                                self.undo();
-                                self.redo.clear();
-                                self.status = "親子関係が循環するため設定できません".into();
+            widgets::section(ui, "レイヤー", true, |ui| {
+                let mut name = layer.name.clone();
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).changed() {
+                    self.edit_layer("レイヤー名", true, &id, |l| l.name = name);
+                }
+                self.kind_panel(ui, layer);
+                ui.horizontal(|ui| {
+                    ui.label("描画モード");
+                    egui::ComboBox::from_id_salt("blend").selected_text(layer.blend_mode.label_ja()).show_ui(ui, |ui| {
+                        for mode in BlendMode::ALL {
+                            if ui.selectable_label(mode == layer.blend_mode, mode.label_ja()).clicked() {
+                                self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
                             }
                         }
-                    }
+                    });
                 });
-                ui.label("マット");
-                let current = layer.track_matte.as_ref().map(|m| name_of(&m.layer)).unwrap_or_else(|| "なし".into());
-                egui::ComboBox::from_id_salt("matte").selected_text(current).show_ui(ui, |ui| {
-                    if ui.selectable_label(layer.track_matte.is_none(), "なし").clicked() {
-                        self.edit_layer("トラックマット", false, &id, |l| l.track_matte = None);
-                    }
-                    for o in &others {
-                        if ui.selectable_label(layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name).clicked() {
-                            let mode = layer.track_matte.as_ref().map(|m| m.mode).unwrap_or(MatteMode::Alpha);
-                            let mid = o.id.clone();
-                            self.edit_layer("トラックマット", false, &id, |l| l.track_matte = Some(TrackMatte { layer: mid, mode }));
+                let others: Vec<&Layer> = comp.layers.iter().filter(|l| l.id != id).collect();
+                let name_of = |lid: &LayerId| comp.layer(lid).map(|l| l.name.clone()).unwrap_or_else(|| format!("（不明: {lid}）"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("親");
+                    let current = layer.parent.as_ref().map(&name_of).unwrap_or_else(|| "なし".into());
+                    egui::ComboBox::from_id_salt("parent").selected_text(current).show_ui(ui, |ui| {
+                        if ui.selectable_label(layer.parent.is_none(), "なし").clicked() {
+                            self.edit_layer("親", false, &id, |l| l.parent = None);
                         }
-                    }
-                });
-                if let Some(m) = &layer.track_matte {
-                    const MODES: [(MatteMode, &str); 4] = [
-                        (MatteMode::Alpha, "アルファ"),
-                        (MatteMode::AlphaInverted, "アルファ反転"),
-                        (MatteMode::Luma, "ルミナンス"),
-                        (MatteMode::LumaInverted, "ルミナンス反転"),
-                    ];
-                    let label = MODES.iter().find(|(mode, _)| *mode == m.mode).map(|(_, l)| *l).unwrap_or("");
-                    egui::ComboBox::from_id_salt("matte-mode").selected_text(label).show_ui(ui, |ui| {
-                        for (mode, label) in MODES {
-                            if ui.selectable_label(mode == m.mode, label).clicked() {
-                                self.edit_layer("マットモード", false, &id, |l| {
-                                    if let Some(tm) = &mut l.track_matte {
-                                        tm.mode = mode;
-                                    }
+                        for o in &others {
+                            if ui.selectable_label(layer.parent.as_ref() == Some(&o.id), &o.name).clicked() {
+                                let pid = o.id.clone();
+                                self.edit_layer("親", false, &id, |l| l.parent = Some(pid));
+                                if !self.project.validate().is_empty() {
+                                    self.undo();
+                                    self.redo.clear();
+                                    self.status = "親子関係が循環するため設定できません".into();
+                                }
+                            }
+                        }
+                    });
+                    ui.label("マット");
+                    let current = layer.track_matte.as_ref().map(|m| name_of(&m.layer)).unwrap_or_else(|| "なし".into());
+                    egui::ComboBox::from_id_salt("matte").selected_text(current).show_ui(ui, |ui| {
+                        if ui.selectable_label(layer.track_matte.is_none(), "なし").clicked() {
+                            self.edit_layer("トラックマット", false, &id, |l| l.track_matte = None);
+                        }
+                        for o in &others {
+                            if ui.selectable_label(layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name).clicked() {
+                                let mode = layer.track_matte.as_ref().map(|m| m.mode).unwrap_or(MatteMode::Alpha);
+                                let mid = o.id.clone();
+                                self.edit_layer("トラックマット", false, &id, |l| {
+                                    l.track_matte = Some(TrackMatte { layer: mid, mode })
                                 });
                             }
                         }
                     });
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                let flag = |ui: &mut egui::Ui, app: &mut App, label: &str, value: bool, set: fn(&mut Layer, bool)| {
-                    let mut v = value;
-                    if ui.checkbox(&mut v, label).changed() {
-                        app.edit_layer(label, false, &id, |l| set(l, v));
-                    }
-                };
-                flag(ui, self, "3D", layer.three_d, |l, v| l.three_d = v);
-                flag(ui, self, "モーションブラー", layer.motion_blur, |l, v| l.motion_blur = v);
-                flag(ui, self, "シャイ", layer.shy, |l, v| l.shy = v);
-                flag(ui, self, "ガイド", layer.guide, |l, v| l.guide = v);
-                if matches!(layer.kind, LayerKind::Precomp { .. }) {
-                    flag(ui, self, "コラップス", layer.collapse, |l, v| l.collapse = v);
-                }
-                if matches!(layer.kind, LayerKind::Footage { .. }) {
-                    flag(ui, self, "フレームブレンド", layer.frame_blend, |l, v| l.frame_blend = v);
-                }
-                if layer.three_d {
-                    flag(ui, self, "ライトを受ける", layer.accepts_lights, |l, v| l.accepts_lights = v);
-                    flag(ui, self, "影を落とす", layer.casts_shadows, |l, v| l.casts_shadows = v);
-                }
-            });
-            ui.horizontal(|ui| {
-                let fr = comp.frame_rate;
-                let (mut fin, mut fout) = (fr.time_to_frame(layer.in_point), fr.time_to_frame(layer.out_point));
-                ui.label("イン／アウト");
-                let ci = ui.add(egui::DragValue::new(&mut fin)).changed();
-                let co = ui.add(egui::DragValue::new(&mut fout)).changed();
-                if ci || co {
-                    let fout = fout.max(fin + 1);
-                    self.edit_layer("イン／アウト", true, &id, |l| {
-                        l.in_point = fr.frame_to_time(fin);
-                        l.out_point = fr.frame_to_time(fout);
-                    });
-                }
-                let mut start = fr.time_to_frame(layer.start_time);
-                if ui.add(egui::DragValue::new(&mut start).prefix("開始 ")).on_hover_text("ソースの先頭が来るフレーム").changed()
-                {
-                    self.edit_layer("開始位置", true, &id, |l| l.start_time = fr.frame_to_time(start));
-                }
-            });
-            if matches!(layer.kind, LayerKind::Footage { .. } | LayerKind::Precomp { .. } | LayerKind::Audio { .. }) {
-                ui.horizontal(|ui| {
-                    let mut speed = layer.speed * 100.0;
-                    if ui
-                        .add(egui::DragValue::new(&mut speed).range(1.0..=1000.0).prefix("速度 ").suffix("%"))
-                        .on_hover_text("映像と音声の両方に掛かります（音程は変わりません）")
-                        .changed()
-                    {
-                        self.edit_layer("再生速度", true, &id, |l| l.speed = speed / 100.0);
-                    }
-                    egui::ComboBox::from_id_salt("hold")
-                        .selected_text(if layer.hold_frames <= 1 {
-                            "コマ打ちなし".to_string()
-                        } else {
-                            format!("{} コマ打ち", layer.hold_frames)
-                        })
-                        .show_ui(ui, |ui| {
-                            for n in [1u32, 2, 3, 4, 6] {
-                                if ui
-                                    .selectable_label(
-                                        layer.hold_frames == n,
-                                        if n == 1 { "コマ打ちなし".to_string() } else { format!("{n} コマ打ち") },
-                                    )
-                                    .clicked()
-                                {
-                                    self.edit_layer("コマ打ち", false, &id, |l| l.hold_frames = n);
+                    if let Some(m) = &layer.track_matte {
+                        const MODES: [(MatteMode, &str); 4] = [
+                            (MatteMode::Alpha, "アルファ"),
+                            (MatteMode::AlphaInverted, "アルファ反転"),
+                            (MatteMode::Luma, "ルミナンス"),
+                            (MatteMode::LumaInverted, "ルミナンス反転"),
+                        ];
+                        let label = MODES.iter().find(|(mode, _)| *mode == m.mode).map(|(_, l)| *l).unwrap_or("");
+                        egui::ComboBox::from_id_salt("matte-mode").selected_text(label).show_ui(ui, |ui| {
+                            for (mode, label) in MODES {
+                                if ui.selectable_label(mode == m.mode, label).clicked() {
+                                    self.edit_layer("マットモード", false, &id, |l| {
+                                        if let Some(tm) = &mut l.track_matte {
+                                            tm.mode = mode;
+                                        }
+                                    });
                                 }
                             }
                         });
-                    if layer.time_remap.is_none() && ui.button("タイムリマップ").clicked() {
-                        self.edit_layer("タイムリマップ", false, &id, |l| apply_edit(l, "time_remap", t, &PropEdit::AddKey));
                     }
                 });
-            }
-            if znd_audio::layer_footage(&self.shared, layer).is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    let flag = |ui: &mut egui::Ui, app: &mut App, label: &str, value: bool, set: fn(&mut Layer, bool)| {
+                        let mut v = value;
+                        if ui.checkbox(&mut v, label).changed() {
+                            app.edit_layer(label, false, &id, |l| set(l, v));
+                        }
+                    };
+                    flag(ui, self, "3D", layer.three_d, |l, v| l.three_d = v);
+                    flag(ui, self, "モーションブラー", layer.motion_blur, |l, v| l.motion_blur = v);
+                    flag(ui, self, "シャイ", layer.shy, |l, v| l.shy = v);
+                    flag(ui, self, "ガイド", layer.guide, |l, v| l.guide = v);
+                    if matches!(layer.kind, LayerKind::Precomp { .. }) {
+                        flag(ui, self, "コラップス", layer.collapse, |l, v| l.collapse = v);
+                    }
+                    if matches!(layer.kind, LayerKind::Footage { .. }) {
+                        flag(ui, self, "フレームブレンド", layer.frame_blend, |l, v| l.frame_blend = v);
+                    }
+                    if layer.three_d {
+                        flag(ui, self, "ライトを受ける", layer.accepts_lights, |l, v| l.accepts_lights = v);
+                        flag(ui, self, "影を落とす", layer.casts_shadows, |l, v| l.casts_shadows = v);
+                    }
+                });
                 ui.horizontal(|ui| {
-                    let mut a = layer.audio.clone();
-                    let mut changed = ui.checkbox(&mut a.mute, "ミュート").changed();
-                    let (mut fi, mut fo) = (a.fade_in.seconds(), a.fade_out.seconds());
-                    if ui.add(egui::DragValue::new(&mut fi).speed(0.01).range(0.0..=60.0).prefix("フェードイン ").suffix("秒")).changed()
+                    let fr = comp.frame_rate;
+                    let (mut fin, mut fout) = (fr.time_to_frame(layer.in_point), fr.time_to_frame(layer.out_point));
+                    ui.label("イン／アウト");
+                    let ci = ui.add(egui::DragValue::new(&mut fin)).changed();
+                    let co = ui.add(egui::DragValue::new(&mut fout)).changed();
+                    if ci || co {
+                        let fout = fout.max(fin + 1);
+                        self.edit_layer("イン／アウト", true, &id, |l| {
+                            l.in_point = fr.frame_to_time(fin);
+                            l.out_point = fr.frame_to_time(fout);
+                        });
+                    }
+                    let mut start = fr.time_to_frame(layer.start_time);
+                    if ui.add(egui::DragValue::new(&mut start).prefix("開始 ")).on_hover_text("ソースの先頭が来るフレーム").changed()
                     {
-                        a.fade_in = Time::from_seconds(fi);
-                        changed = true;
-                    }
-                    if ui.add(egui::DragValue::new(&mut fo).speed(0.01).range(0.0..=60.0).prefix("アウト ").suffix("秒")).changed() {
-                        a.fade_out = Time::from_seconds(fo);
-                        changed = true;
-                    }
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut a.pitch).speed(0.1).range(-24.0..=24.0).prefix("ピッチ ").suffix(" 半音"))
-                        .changed();
-                    if changed {
-                        self.edit_layer("オーディオ設定", true, &id, |l| l.audio = a);
+                        self.edit_layer("開始位置", true, &id, |l| l.start_time = fr.frame_to_time(start));
                     }
                 });
-            }
-
-            ui.separator();
-            ui.strong("トランスフォーム");
-            let three = layer.three_d || matches!(layer.kind, LayerKind::Camera { .. } | LayerKind::Light { .. } | LayerKind::Model { .. });
-            for row in rows.iter().filter(|r| r.path.starts_with("transform.")) {
-                let z_only = matches!(
-                    row.path.as_str(),
-                    "transform.position_z" | "transform.anchor_z" | "transform.rotation_x" | "transform.rotation_y"
-                );
-                if (z_only && !three) || (self.only_animated && !row.animated && row.expr.is_none()) {
-                    continue;
+                if matches!(layer.kind, LayerKind::Footage { .. } | LayerKind::Precomp { .. } | LayerKind::Audio { .. }) {
+                    ui.horizontal(|ui| {
+                        let mut speed = layer.speed * 100.0;
+                        if ui
+                            .add(egui::DragValue::new(&mut speed).range(1.0..=1000.0).prefix("速度 ").suffix("%"))
+                            .on_hover_text("映像と音声の両方に掛かります（音程は変わりません）")
+                            .changed()
+                        {
+                            self.edit_layer("再生速度", true, &id, |l| l.speed = speed / 100.0);
+                        }
+                        egui::ComboBox::from_id_salt("hold")
+                            .selected_text(if layer.hold_frames <= 1 {
+                                "コマ打ちなし".to_string()
+                            } else {
+                                format!("{} コマ打ち", layer.hold_frames)
+                            })
+                            .show_ui(ui, |ui| {
+                                for n in [1u32, 2, 3, 4, 6] {
+                                    if ui
+                                        .selectable_label(
+                                            layer.hold_frames == n,
+                                            if n == 1 { "コマ打ちなし".to_string() } else { format!("{n} コマ打ち") },
+                                        )
+                                        .clicked()
+                                    {
+                                        self.edit_layer("コマ打ち", false, &id, |l| l.hold_frames = n);
+                                    }
+                                }
+                            });
+                        if layer.time_remap.is_none() && ui.button("タイムリマップ").clicked() {
+                            self.edit_layer("タイムリマップ", false, &id, |l| apply_edit(l, "time_remap", t, &PropEdit::AddKey));
+                        }
+                    });
                 }
-                self.prop_row(ui, layer, row, t);
-            }
-            self.rows_with_prefix(ui, layer, &rows, "time_remap", t);
-            self.rows_with_prefix(ui, layer, &rows, "audio.", t);
-            self.rows_with_prefix(ui, layer, &rows, "camera.", t);
-            self.rows_with_prefix(ui, layer, &rows, "light.", t);
+                self.audio_controls(ui, layer);
+            });
+            widgets::section(ui, "トランスフォーム", true, |ui| {
+                let three =
+                    layer.three_d || matches!(layer.kind, LayerKind::Camera { .. } | LayerKind::Light { .. } | LayerKind::Model { .. });
+                for row in rows.iter().filter(|r| r.path.starts_with("transform.")) {
+                    let z_only = matches!(
+                        row.path.as_str(),
+                        "transform.position_z" | "transform.anchor_z" | "transform.rotation_x" | "transform.rotation_y"
+                    );
+                    if (z_only && !three) || (self.only_animated && !row.animated && row.expr.is_none()) {
+                        continue;
+                    }
+                    self.prop_row(ui, layer, row, t);
+                }
+                self.rows_with_prefix(ui, layer, &rows, "time_remap", t);
+                self.rows_with_prefix(ui, layer, &rows, "audio.", t);
+                self.rows_with_prefix(ui, layer, &rows, "camera.", t);
+                self.rows_with_prefix(ui, layer, &rows, "light.", t);
+            });
             if matches!(layer.kind, LayerKind::Shape { .. }) {
-                ui.separator();
-                ui.strong("シェイプ");
-                self.rows_with_prefix(ui, layer, &rows, "shape.", t);
+                widgets::section(ui, "コンテンツ", true, |ui| self.rows_with_prefix(ui, layer, &rows, "shape.", t));
             }
-            if matches!(layer.kind, LayerKind::Text { .. }) {
-                self.rows_with_prefix(ui, layer, &rows, "text.", t);
+            if rows.iter().any(|r| r.path.starts_with("text.")) {
+                widgets::section(ui, "テキストアニメーター", true, |ui| self.rows_with_prefix(ui, layer, &rows, "text.", t));
             }
             self.masks_panel(ui, layer, &rows, t);
             self.effects_panel(ui, comp, layer, &rows, t);
         });
     }
 
+    /// 音のあるレイヤーの設定（ミュート・フェード・ピッチ）。
+    pub(crate) fn audio_controls(&mut self, ui: &mut egui::Ui, layer: &Layer) {
+        let id = layer.id.clone();
+        if znd_audio::layer_footage(&self.shared, layer).is_some() {
+            ui.horizontal_wrapped(|ui| {
+                let mut a = layer.audio.clone();
+                let mut changed = ui.checkbox(&mut a.mute, "ミュート").changed();
+                let (mut fi, mut fo) = (a.fade_in.seconds(), a.fade_out.seconds());
+                if ui.add(egui::DragValue::new(&mut fi).speed(0.01).range(0.0..=60.0).prefix("フェードイン ").suffix("秒")).changed()
+                {
+                    a.fade_in = Time::from_seconds(fi);
+                    changed = true;
+                }
+                if ui.add(egui::DragValue::new(&mut fo).speed(0.01).range(0.0..=60.0).prefix("アウト ").suffix("秒")).changed() {
+                    a.fade_out = Time::from_seconds(fo);
+                    changed = true;
+                }
+                changed |=
+                    ui.add(egui::DragValue::new(&mut a.pitch).speed(0.1).range(-24.0..=24.0).prefix("ピッチ ").suffix(" 半音")).changed();
+                if changed {
+                    self.edit_layer("オーディオ設定", true, &id, |l| l.audio = a);
+                }
+            });
+        }
+    }
+
     /// レイヤー種別ごとの設定（平面の色、テキスト、シェイプの追加など）。
-    fn kind_panel(&mut self, ui: &mut egui::Ui, layer: &Layer) {
+    pub(crate) fn kind_panel(&mut self, ui: &mut egui::Ui, layer: &Layer) {
         let id = layer.id.clone();
         match &layer.kind {
             LayerKind::Solid { width, height, color } => {
@@ -1548,10 +1760,10 @@ impl App {
             LayerKind::Text { document, animators, .. } => {
                 let mut doc = document.clone();
                 let mut changed = ui.add(egui::TextEdit::multiline(&mut doc.text).desired_rows(2).desired_width(f32::INFINITY)).changed();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let current =
                         if doc.font_family.is_empty() { "（既定のフォント）".to_string() } else { doc.font_family.clone() };
-                    egui::ComboBox::from_id_salt("font").width(170.0).selected_text(current).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("font").width(150.0).selected_text(current).show_ui(ui, |ui| {
                         if ui.selectable_label(doc.font_family.is_empty(), "（既定のフォント）").clicked() {
                             doc.font_family.clear();
                             changed = true;
@@ -1567,12 +1779,9 @@ impl App {
                     changed |= ui.add(egui::DragValue::new(&mut doc.weight).range(100..=900).speed(100.0).prefix("太さ ")).changed();
                 });
                 if !znd_text::font_available(&doc.font_family) {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        format!("フォント「{}」が見つかりません（代替フォントで表示中）", doc.font_family),
-                    );
+                    ui.colored_label(theme::ERROR, format!("フォント「{}」が見つかりません（代替フォントで表示中）", doc.font_family));
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let mut fill = doc.fill.unwrap_or([1.0, 1.0, 1.0, 0.0]).map(|v| v as f32);
                     ui.label("塗り");
                     if ui.color_edit_button_rgba_unmultiplied(&mut fill).changed() {
@@ -1593,7 +1802,7 @@ impl App {
                         changed |= ui.add(egui::DragValue::new(&mut s.width).range(0.0..=200.0)).changed();
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for (j, label) in [(Justify::Left, "左"), (Justify::Center, "中央"), (Justify::Right, "右")] {
                         changed |= ui.selectable_value(&mut doc.justify, j, label).changed();
                     }
@@ -1615,7 +1824,7 @@ impl App {
                         }
                     });
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.menu_button("アニメーターを追加", |ui| {
                         let range_in = |unit: SelectorUnit| match TextSelector::range() {
                             TextSelector::Range { end, amount, shape, mode, randomize, seed, .. } => TextSelector::Range {
@@ -1701,7 +1910,8 @@ impl App {
                         }
                     });
                     for (i, a) in animators.iter().enumerate() {
-                        if ui.small_button(format!("{} ✕", a.name)).on_hover_text("このアニメーターを削除").clicked() {
+                        ui.label(&a.name);
+                        if widgets::small_icon(ui, Icon::Close, false, "このアニメーターを削除").clicked() {
                             self.edit_layer("アニメーター削除", false, &id, |l| {
                                 if let LayerKind::Text { animators, .. } = &mut l.kind {
                                     animators.remove(i);
@@ -1777,10 +1987,12 @@ impl App {
     }
 
     fn masks_panel(&mut self, ui: &mut egui::Ui, layer: &Layer, rows: &[Row], t: Time) {
+        widgets::section(ui, "マスク", !layer.masks.is_empty(), |ui| self.masks_body(ui, layer, rows, t));
+    }
+
+    fn masks_body(&mut self, ui: &mut egui::Ui, layer: &Layer, rows: &[Row], t: Time) {
         let id = layer.id.clone();
-        ui.separator();
         ui.horizontal(|ui| {
-            ui.strong("マスク");
             let (w, h) = self
                 .shared
                 .source_size(&layer.kind)
@@ -1788,11 +2000,11 @@ impl App {
             // 寸法を持たないレイヤー（シェイプ・テキスト）は原点が中心
             let centered = self.shared.source_size(&layer.kind).is_none();
             let (ox, oy) = if centered { (-w / 2.0, -h / 2.0) } else { (0.0, 0.0) };
-            if ui.small_button("＋矩形").clicked() {
+            if ui.button("矩形を追加").clicked() {
                 let m = Mask::new(BezPath::rect(ox + w * 0.25, oy + h * 0.25, w * 0.5, h * 0.5));
                 self.edit_layer("マスク追加", false, &id, |l| l.masks.push(m));
             }
-            if ui.small_button("＋楕円").clicked() {
+            if ui.button("楕円を追加").clicked() {
                 let m = Mask::new(BezPath::ellipse([ox + w / 2.0, oy + h / 2.0], [w * 0.3, h * 0.3]));
                 self.edit_layer("マスク追加", false, &id, |l| l.masks.push(m));
             }
@@ -1821,7 +2033,7 @@ impl App {
                 if ui.checkbox(&mut inv, "反転").changed() {
                     self.edit_layer("マスク反転", false, &id, |l| l.masks[i].inverted = inv);
                 }
-                if ui.small_button("✕").clicked() {
+                if widgets::small_icon(ui, Icon::Close, false, "このマスクを削除").clicked() {
                     self.edit_layer("マスク削除", false, &id, |l| {
                         l.masks.remove(i);
                     });
@@ -1831,11 +2043,13 @@ impl App {
         }
     }
 
-    fn effects_panel(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, rows: &[Row], t: Time) {
+    pub(crate) fn effects_panel(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, rows: &[Row], t: Time) {
+        widgets::section(ui, "エフェクト", true, |ui| self.effects_body(ui, comp, layer, rows, t));
+    }
+
+    pub(crate) fn effects_body(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, rows: &[Row], t: Time) {
         let id = layer.id.clone();
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.strong("エフェクト");
+        ui.horizontal_wrapped(|ui| {
             ui.menu_button("追加", |ui| {
                 // 組み込みと、読み込み済みのプラグイン（znd / OpenFX）のエフェクト
                 let effects = all_effects();
@@ -1892,8 +2106,8 @@ impl App {
             let Some(def) = effect_def(&fx.kind) else {
                 // 定義が無い = 入っていないプラグインのエフェクト。消さずに残し、外すことだけできるようにする
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("{}（プラグイン「{}」が入っていません）", fx.name, fx.kind));
-                    if ui.small_button("✕").clicked() {
+                    ui.colored_label(theme::ERROR, format!("{}（プラグイン「{}」が入っていません）", fx.name, fx.kind));
+                    if widgets::small_icon(ui, Icon::Close, false, "このエフェクトを外す").clicked() {
                         self.edit_layer("エフェクト削除", false, &id, |l| {
                             l.effects.remove(i);
                         });
@@ -1906,10 +2120,10 @@ impl App {
                 if ui.checkbox(&mut on, &fx.name).changed() {
                     self.edit_layer("エフェクト有効", false, &id, |l| l.effects[i].enabled = on);
                 }
-                if i > 0 && ui.small_button("↑").clicked() {
+                if i > 0 && widgets::small_icon(ui, Icon::Up, false, "1 つ上へ").clicked() {
                     self.edit_layer("エフェクト順", false, &id, |l| l.effects.swap(i, i - 1));
                 }
-                if ui.small_button("✕").clicked() {
+                if widgets::small_icon(ui, Icon::Close, false, "このエフェクトを削除").clicked() {
                     self.edit_layer("エフェクト削除", false, &id, |l| {
                         l.effects.remove(i);
                     });

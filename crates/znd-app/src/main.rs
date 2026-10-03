@@ -1,12 +1,16 @@
 //! znd アプリ。ビューア・タイムライン・プロパティ編集・音声同期・書き出し・提出前チェック。
 
 mod audio;
+mod icons;
 mod panels;
 mod preview;
+mod theme;
 mod timeline;
 mod tools;
 mod uiscript;
+mod widgets;
 mod windows;
+mod workspace;
 
 use eframe::egui;
 use preview::PreviewEngine;
@@ -51,7 +55,7 @@ fn main() -> eframe::Result<()> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1500.0, 950.0]).with_title("znd"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1720.0, 1000.0]).with_title("znd"),
         ..Default::default()
     };
     eframe::run_native(
@@ -59,6 +63,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             install_japanese_font(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx);
             let mut app = App::new(&cc.egui_ctx, project_path, start_frame, screenshot);
             app.selected = select.map(LayerId::new);
             app.script = ui_script.as_deref().and_then(uiscript::Script::load);
@@ -277,8 +282,25 @@ pub struct App {
     pub(crate) tl_drag: Option<timeline::TlDrag>,
     /// 直前のフレームで描いたタイムラインの表示範囲。
     pub(crate) tl_view: Option<timeline::TlView>,
-    /// タイムラインで選択中のキーフレーム（レイヤー, 時刻）。
-    pub(crate) selected_key: Option<(LayerId, Time)>,
+    /// タイムラインの左ペイン（レイヤーの列）の幅。
+    pub(crate) tl_left: f32,
+    /// タイムラインで開閉を既定から切り替えた行（レイヤー ID、または `レイヤー ID/グループ`）。
+    pub(crate) tl_open: std::collections::HashSet<String>,
+    pub(crate) tl_search: String,
+    /// タイムラインで選択中のキーフレーム。
+    pub(crate) selected_key: Option<timeline::KeySel>,
+    /// 各パネルで開いているタブ。
+    pub(crate) left_tab: usize,
+    pub(crate) right_tab: usize,
+    pub(crate) lower_tab: usize,
+    pub(crate) project_search: String,
+    pub(crate) fx_search: String,
+    /// ビューアに出すチャンネル（0 = RGB、1〜3 = R・G・B、4 = 輝度）。
+    pub(crate) channel: u8,
+    pub(crate) show_guides: bool,
+    pub(crate) show_grid: bool,
+    /// ビューア上のポインタの（コンポ座標, その画素の RGBA）。情報パネルに出す。
+    pub(crate) hover_info: Option<([f64; 2], [u8; 4])>,
     /// 画面上の主要な領域の位置（操作スクリプトが座標を求めるのに使う）。
     pub(crate) anchors: std::collections::HashMap<String, egui::Rect>,
     pub(crate) script: Option<uiscript::Script>,
@@ -366,7 +388,19 @@ impl App {
             tl_scroll: 0.0,
             tl_drag: None,
             tl_view: None,
+            tl_left: timeline::LEFT_DEFAULT,
+            tl_open: Default::default(),
+            tl_search: String::new(),
             selected_key: None,
+            left_tab: 0,
+            right_tab: 0,
+            lower_tab: 0,
+            project_search: String::new(),
+            fx_search: String::new(),
+            channel: 0,
+            show_guides: false,
+            show_grid: false,
+            hover_info: None,
             anchors: Default::default(),
             script: None,
             script_shot: None,
@@ -408,6 +442,8 @@ impl App {
         self.last_edit = None;
         self.selected = None;
         self.selected_footage = None;
+        self.selected_key = None;
+        self.tl_open.clear();
         self.frame = 0;
         self.stop();
         self.dirty = false;
@@ -820,20 +856,22 @@ impl App {
             self.set_frame(i64::MAX, false);
         }
         // ビューアのツール
-        for (key, tool) in
-            [(Key::V, tools::Tool::Select), (Key::G, tools::Tool::Pen), (Key::R, tools::Tool::RectMask), (Key::O, tools::Tool::EllipseMask)]
-        {
+        for (key, tool) in [
+            (Key::V, tools::Tool::Select),
+            (Key::H, tools::Tool::Hand),
+            (Key::Z, tools::Tool::Zoom),
+            (Key::W, tools::Tool::Rotate),
+            (Key::G, tools::Tool::Pen),
+            (Key::R, tools::Tool::RectMask),
+            (Key::O, tools::Tool::EllipseMask),
+        ] {
             if pressed(key) && !ctx.input(|i| i.modifiers.any()) {
                 self.set_tool(tool);
             }
         }
         // 選択中のキーフレームを削除
         if (pressed(Key::Delete) || pressed(Key::Backspace)) && self.active_vertex.is_none() && self.pen.is_none() {
-            if let Some((id, at)) = self.selected_key.take() {
-                self.edit_layer("キーフレーム削除", false, &id, |l| {
-                    edit::delete_keys(l, at);
-                });
-            }
+            self.delete_selected_key();
         }
         // マーカー（再生中に叩けばタップ入力になる）
         if pressed(Key::M) {
@@ -875,71 +913,11 @@ impl App {
             ui.centered_and_justified(|ui| ui.label("コンポジションがありません"));
             return;
         };
-        let total = comp.frame_count().max(1);
-
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("⏮").on_hover_text("先頭へ (Home)").clicked() {
-                self.set_frame(0, false);
-            }
-            if ui.button("◀").on_hover_text("1 フレーム戻る (←)").clicked() {
-                self.set_frame(self.frame - 1, false);
-            }
-            if ui.button(if self.playing.is_some() { "⏸" } else { "▶" }).on_hover_text("再生／停止 (Space)").clicked() {
-                self.toggle_play();
-            }
-            if ui.button("▶|").on_hover_text("1 フレーム進む (→)").clicked() {
-                self.set_frame(self.frame + 1, false);
-            }
-            let mut f = self.frame;
-            if ui.add(egui::DragValue::new(&mut f).range(0..=total - 1).prefix("フレーム ")).changed() {
-                self.set_frame(f, false);
-            }
-            let secs = comp.frame_rate.frame_to_time(self.frame).seconds();
-            ui.monospace(format!("{:02}:{:06.3} / {}", (secs / 60.0) as i64, secs % 60.0, total));
-            if let Some(g) = &comp.beat_grid {
-                let b = g.beat_at(comp.frame_rate.frame_to_time(self.frame));
-                let per = g.beats_per_bar.max(1) as f64;
-                ui.monospace(format!("♪ {}.{}", (b / per).floor() as i64 + 1, b.rem_euclid(per).floor() as i64 + 1));
-            }
-            ui.separator();
-            egui::ComboBox::from_id_salt("resolution").width(60.0).selected_text(resolution_label(self.downsample)).show_ui(ui, |ui| {
-                for ds in [1, 2, 4] {
-                    ui.selectable_value(&mut self.downsample, ds, resolution_label(ds));
-                }
-            });
-            let zoom_label = if self.zoom <= 0.0 { "全体表示".to_string() } else { format!("{:.0}%", self.zoom * 100.0) };
-            egui::ComboBox::from_id_salt("zoom").width(70.0).selected_text(zoom_label).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.zoom, 0.0, "全体表示");
-                for z in [0.5, 1.0, 2.0, 4.0] {
-                    ui.selectable_value(&mut self.zoom, z, format!("{:.0}%", z * 100.0));
-                }
-            });
-            ui.toggle_value(&mut self.screening, "上映プレビュー")
-                .on_hover_text("暗室を想定した表示。白飛び（赤）・黒つぶれ（青）・バンディングの恐れ（緑）を重ねて表示します");
-            ui.toggle_value(&mut self.snap, "スナップ").on_hover_text("再生ヘッドをビートグリッドとマーカーに吸着させます");
-            match self.work_area {
-                Some((a, b)) => {
-                    if ui.button(format!("範囲 {a}–{b} ✕")).on_hover_text("ワークエリアを解除（B / N キーで設定）").clicked()
-                    {
-                        self.work_area = None;
-                    }
-                }
-                None => {
-                    ui.weak("B/N: 範囲");
-                }
-            }
-            ui.separator();
-            self.tool_buttons(ui);
-            if !self.engine.is_cached(self.frame, self.downsample) {
-                ui.weak("レンダリング中…");
-            }
-        });
-
         // 現在フレームがキャッシュにあればテクスチャを差し替える。無ければ直前の絵を出し続ける。
         let key = (self.revision, self.frame, self.downsample);
         if self.shown != Some(key) {
             if let Some(p) = self.engine.get(self.frame, self.downsample) {
-                let image = egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.rgba);
+                let image = channel_image(&p, self.channel);
                 match &mut self.texture {
                     Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                     None => self.texture = Some(ctx.load_texture("viewer", image, egui::TextureOptions::LINEAR)),
@@ -968,7 +946,7 @@ impl App {
             let size = egui::vec2(comp.width as f32 * scale, comp.height as f32 * scale);
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(size.x.max(avail.x), size.y.max(avail.y)), egui::Sense::click_and_drag());
             // 上映プレビューでは周囲を真っ黒にする（暗い会場での見え方に近づける）
-            ui.painter().rect_filled(rect, 0.0, if self.screening { egui::Color32::BLACK } else { egui::Color32::from_gray(24) });
+            ui.painter().rect_filled(rect, 0.0, if self.screening { egui::Color32::BLACK } else { theme::INPUT });
             let img = egui::Rect::from_center_size(rect.center(), size);
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             match (&self.diff, &self.texture) {
@@ -983,6 +961,42 @@ impl App {
                 }
                 _ => {}
             }
+            // グリッドとセーフマージン（アクションセーフ 90%・タイトルセーフ 80%）
+            let overlay = ui.painter_at(img.intersect(rect));
+            if self.show_grid {
+                let step = (comp.width.max(comp.height) as f32 / 16.0).max(8.0) * scale;
+                let line = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(26));
+                let mut x = img.left() + step;
+                while x < img.right() {
+                    overlay.vline(x, img.y_range(), line);
+                    x += step;
+                }
+                let mut y = img.top() + step;
+                while y < img.bottom() {
+                    overlay.hline(img.x_range(), y, line);
+                    y += step;
+                }
+            }
+            if self.show_guides {
+                let line = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(90));
+                for k in [0.9, 0.8] {
+                    overlay.rect_stroke(egui::Rect::from_center_size(img.center(), img.size() * k), 0.0, line);
+                }
+                let c = img.center();
+                overlay.hline((c.x - 10.0)..=(c.x + 10.0), c.y, line);
+                overlay.vline(c.x, (c.y - 10.0)..=(c.y + 10.0), line);
+            }
+            // ポインタの下の座標と色（情報パネル用）
+            self.hover_info = resp.hover_pos().filter(|h| img.contains(*h)).and_then(|h| {
+                let pos = [((h.x - img.left()) / scale) as f64, ((h.y - img.top()) / scale) as f64];
+                let p = self.engine.get(self.frame, self.downsample)?;
+                let (px, py) = (
+                    ((pos[0] / comp.width as f64 * p.width as f64) as usize).min(p.width.saturating_sub(1)),
+                    ((pos[1] / comp.height as f64 * p.height as f64) as usize).min(p.height.saturating_sub(1)),
+                );
+                let rgba: [u8; 4] = p.rgba.get((py * p.width + px) * 4..(py * p.width + px) * 4 + 4)?.try_into().ok()?;
+                Some((pos, rgba))
+            });
             // この時刻のレビューコメントの位置
             let t = comp.frame_rate.frame_to_time(self.frame);
             for r in shared.reviews.iter().filter(|r| r.comp == comp.id && !r.resolved && r.time == t) {
@@ -994,7 +1008,7 @@ impl App {
                         pos + egui::vec2(14.0, -8.0),
                         egui::Align2::LEFT_TOP,
                         text,
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::proportional(11.5),
                         egui::Color32::from_rgb(160, 220, 255),
                     );
                 }
@@ -1009,8 +1023,8 @@ impl App {
                     rect.left_top() + egui::vec2(8.0, 8.0),
                     egui::Align2::LEFT_TOP,
                     e,
-                    egui::FontId::proportional(14.0),
-                    egui::Color32::LIGHT_RED,
+                    egui::FontId::proportional(11.5),
+                    theme::ERROR,
                 );
             }
             if let Some((_, label)) = &self.diff {
@@ -1018,8 +1032,8 @@ impl App {
                     rect.left_top() + egui::vec2(8.0, 8.0),
                     egui::Align2::LEFT_TOP,
                     label,
-                    egui::FontId::proportional(14.0),
-                    egui::Color32::YELLOW,
+                    egui::FontId::proportional(11.5),
+                    theme::WARN,
                 );
             }
         });
@@ -1082,6 +1096,25 @@ impl App {
     }
 }
 
+/// 表示用の画像。チャンネルを選んでいるときは、その成分をグレースケールで出す。
+fn channel_image(p: &preview::Preview, channel: u8) -> egui::ColorImage {
+    if channel == 0 {
+        return egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.rgba);
+    }
+    let pixels = p
+        .rgba
+        .chunks_exact(4)
+        .map(|c| {
+            let v = match channel {
+                1..=3 => c[channel as usize - 1],
+                _ => (0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32) as u8,
+            };
+            egui::Color32::from_gray(v)
+        })
+        .collect();
+    egui::ColorImage { size: [p.width, p.height], pixels }
+}
+
 pub(crate) fn resolution_label(ds: u32) -> &'static str {
     match ds {
         1 => "フル",
@@ -1106,14 +1139,12 @@ impl eframe::App for App {
         }
         self.engine.request(&self.shared, self.revision, &self.comp_id, self.frame, self.downsample);
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
-        egui::TopBottomPanel::bottom("timeline")
-            .resizable(true)
-            .default_height(320.0)
-            .min_height(120.0)
-            .show(ctx, |ui| self.timeline(ctx, ui));
-        egui::SidePanel::left("side").default_width(380.0).show(ctx, |ui| self.side_panel(ui));
-        egui::CentralPanel::default().show(ctx, |ui| self.viewer(ctx, ui));
+        // エクスプレッションのエラーは、編集があったときだけ検査し直す
+        if self.expr_errors.0 != self.revision {
+            let t = self.frame_rate().frame_to_time(self.frame);
+            self.expr_errors = (self.revision, znd_script::ExprEngine::new().check(&self.shared, &self.comp_id, t));
+        }
+        self.workspace(ctx);
         self.windows(ctx);
         self.tick_script(ctx);
         self.tick_screenshot(ctx);
