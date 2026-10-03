@@ -5,6 +5,7 @@
 //! 横方向は拡大・スクロールできる（⌘ / Alt + ホイールで拡大、ホイールで横スクロール）。最大まで拡大すると
 //! 波形が 1 サンプルずつ見える。レイヤーのバーは掴んで移動・端を掴んでトリム、キーフレームは掴んで移動でき、
 //! いずれもビートグリッド・マーカー・再生ヘッド・他のレイヤーの端に吸着する（Shift で吸着なし）。
+//! 左のレイヤーの行は、上下にドラッグで重ね順の並び替え、右クリックで複製・削除などのメニュー。
 
 use crate::icons::{self, Icon};
 use crate::panels::{apply_edit, collect_rows, path_label, value_widgets, KeyKind, PropEdit, Row};
@@ -77,6 +78,10 @@ pub(crate) enum TlDrag {
         layer: LayerId,
         path: Option<String>,
         at: Time,
+    },
+    /// 左の行を掴んで、重ね順を並び替える。
+    Reorder {
+        layer: LayerId,
     },
 }
 
@@ -401,6 +406,10 @@ impl App {
         let t = fr.frame_to_time(self.frame);
         let mut rows_ui = child(ui, area, Layout::top_down(Align::Min));
         rows_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        // 並び替えの落とし先を決めるための、(重ね順の位置, 行の上端) と最後の行の下端
+        let mut blocks: Vec<(usize, f32)> = Vec::new();
+        let mut rows_end = area.top();
+        let reordering = matches!(self.tl_drag, Some(TlDrag::Reorder { .. }));
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -409,7 +418,8 @@ impl App {
                     if (self.hide_shy && layer.shy) || (!search.is_empty() && !layer.name.to_lowercase().contains(&search)) {
                         continue;
                     }
-                    self.layer_row(ui, comp, layer, index + 1, view, geo);
+                    let row = self.layer_row(ui, comp, layer, index + 1, view, geo);
+                    blocks.push((index, row.top()));
                     if !self.tl_is_open(&layer.id.0, false) {
                         continue;
                     }
@@ -439,7 +449,24 @@ impl App {
                         }
                     }
                 }
+                rows_end = ui.cursor().top();
+                // 並び替え中は、上下の端に近づくと行を送る
+                if let Some(pos) = ui.input(|i| i.pointer.latest_pos()).filter(|_| reordering) {
+                    let edge = 18.0;
+                    let dy = if pos.y < area.top() + edge {
+                        6.0
+                    } else if pos.y > area.bottom() - edge {
+                        -6.0
+                    } else {
+                        0.0
+                    };
+                    if dy != 0.0 {
+                        ui.scroll_with_delta(vec2(0.0, dy));
+                        ui.ctx().request_repaint();
+                    }
+                }
             });
+        self.tl_reorder(ui, comp, left_of(area), &blocks, rows_end);
 
         // 現在時刻インジケーター（ルーラーから行の下端まで）
         let lanes = Rect::from_min_max(pos2(time_l, head.top() + WORK_H), pos2(time_r, area.bottom()));
@@ -941,6 +968,134 @@ impl App {
         self.selected_footage = None;
     }
 
+    /// レイヤーを複製して、元のすぐ上に置く。複製したほうを選択する。
+    pub(crate) fn duplicate_layer(&mut self, id: &LayerId) {
+        let new_id = LayerId::new(self.shared.fresh_id("layer"));
+        let (source, created) = (id.clone(), new_id.clone());
+        self.edit_comp("レイヤー複製", false, |c| {
+            edit::duplicate_layer(c, &source, new_id);
+        });
+        if self.shared.comp(&self.comp_id).is_some_and(|c| c.layer(&created).is_some()) {
+            self.select_layer(&created);
+            self.selected_key = None;
+        }
+    }
+
+    /// レイヤーを削除する。ロック中のレイヤーは消さない。
+    pub(crate) fn delete_layer(&mut self, id: &LayerId) {
+        let shared = self.shared.clone();
+        let Some(layer) = shared.comp(&self.comp_id).and_then(|c| c.layer(id)) else { return };
+        if layer.locked {
+            self.status = format!("「{}」はロックされているため削除できません", layer.name);
+            return;
+        }
+        let target = id.clone();
+        self.edit_comp("レイヤー削除", false, |c| {
+            edit::remove_layer(c, &target);
+        });
+        // 他の人がロックしているコンポでは消えていない
+        if self.shared.comp(&self.comp_id).is_some_and(|c| c.layer(id).is_some()) {
+            return;
+        }
+        if self.selected.as_ref() == Some(id) {
+            self.selected = None;
+        }
+        if self.selected_key.as_ref().is_some_and(|k| &k.layer == id) {
+            self.selected_key = None;
+        }
+        self.status = format!("「{}」を削除しました（⌘Z で元に戻せます）", layer.name);
+    }
+
+    /// レイヤーを重ね順の `to` 番目の手前へ移す（`to` は移動前の並びでの位置）。
+    pub(crate) fn reorder_layer(&mut self, id: &LayerId, to: usize) {
+        let moves = self.shared.comp(&self.comp_id).and_then(|c| c.layer_index(id)).is_some_and(|from| to != from && to != from + 1);
+        if moves {
+            let target = id.clone();
+            self.edit_comp("重ね順", false, |c| {
+                edit::reorder_layer(c, &target, to);
+            });
+        }
+    }
+
+    /// 行のドラッグによる並び替え。落とし先の位置に線を引き、ボタンを離したら移す（Esc で中止）。
+    fn tl_reorder(&mut self, ui: &egui::Ui, comp: &Composition, left: Rect, blocks: &[(usize, f32)], rows_end: f32) {
+        let Some(TlDrag::Reorder { layer }) = &self.tl_drag else { return };
+        let layer = layer.clone();
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tl_drag = None;
+            return;
+        }
+        let Some(pos) = ui.input(|i| i.pointer.latest_pos()) else { return };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        // ポインタが行の上半分ならその行の手前、下半分ならその行（と展開したプロパティ）の後ろ
+        let mut slot: Option<(usize, f32)> = None;
+        for (k, (index, top)) in blocks.iter().enumerate() {
+            if pos.y < top + ROW * 0.5 {
+                slot = Some((*index, *top));
+                break;
+            }
+            slot = Some((index + 1, blocks.get(k + 1).map(|b| b.1).unwrap_or(rows_end)));
+        }
+        let Some((to, y)) = slot else { return };
+        let moves = comp.layer_index(&layer).is_some_and(|from| to != from && to != from + 1);
+        if moves {
+            let p = ui.painter().with_clip_rect(left.expand2(vec2(0.0, 1.0)));
+            let y = y.round() - 0.5;
+            p.hline(left.x_range(), y, Stroke::new(2.0_f32, theme::PLAYHEAD));
+            p.circle_filled(pos2(left.left() + 4.0, y), 3.0, theme::PLAYHEAD);
+        }
+        if ui.input(|i| i.pointer.any_released()) && moves {
+            self.reorder_layer(&layer, to);
+        }
+    }
+
+    /// レイヤーの行・バーを右クリックしたときのメニュー。
+    fn layer_context_menu(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let id = &layer.id;
+        let Some(index) = comp.layer_index(id) else {
+            ui.close_menu();
+            return;
+        };
+        let last = comp.layers.len() - 1;
+        ui.set_min_width(170.0);
+        ui.label(egui::RichText::new(&layer.name).size(10.0).color(theme::TEXT_DIM));
+        ui.separator();
+        let duplicate = ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::D));
+        if ui.add(egui::Button::new("複製").shortcut_text(duplicate)).clicked() {
+            ui.close_menu();
+            self.duplicate_layer(id);
+        }
+        ui.separator();
+        for (label, enabled, to) in [
+            ("最前面へ", index > 0, 0),
+            ("ひとつ前面へ", index > 0, index.saturating_sub(1)),
+            ("ひとつ背面へ", index < last, index + 2),
+            ("最背面へ", index < last, last + 1),
+        ] {
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                ui.close_menu();
+                self.reorder_layer(id, to);
+            }
+        }
+        ui.separator();
+        if ui.button(if layer.locked { "ロックを解除" } else { "ロック" }).clicked() {
+            ui.close_menu();
+            let v = !layer.locked;
+            self.edit_layer("ロック", false, id, |l| l.locked = v);
+        }
+        if ui.button(if layer.visible { "非表示にする" } else { "表示する" }).clicked() {
+            ui.close_menu();
+            let v = !layer.visible;
+            self.edit_layer("表示", false, id, |l| l.visible = v);
+        }
+        ui.separator();
+        if ui.add_enabled(!layer.locked, egui::Button::new("削除").shortcut_text("Delete")).clicked() {
+            ui.close_menu();
+            self.delete_layer(id);
+        }
+    }
+
     /// 行の背景と下端の線。選択中のレイヤーの行は少し明るくする。
     fn row_background(&self, ui: &egui::Ui, rect: Rect, geo: Geo, selected: bool) {
         let p = ui.painter_at(rect);
@@ -952,10 +1107,10 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, number: usize, view: TlView, geo: Geo) {
+    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, number: usize, view: TlView, geo: Geo) -> Rect {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         if !ui.is_rect_visible(rect) {
-            return;
+            return rect;
         }
         let fr = comp.frame_rate;
         let id = layer.id.clone();
@@ -966,8 +1121,18 @@ impl App {
 
         // ---------- 左: レイヤーの列 ----------
         let left = Rect::from_min_max(rect.min, pos2(geo.split, rect.bottom()));
-        if ui.interact(left, rid.with("row"), Sense::click()).clicked() {
+        // クリックで選択、上下にドラッグで重ね順の並び替え、右クリックでメニュー
+        let row = ui.interact(left, rid.with("row"), Sense::click_and_drag());
+        if row.clicked() || row.secondary_clicked() {
             self.select_layer(&id);
+        }
+        if row.drag_started_by(egui::PointerButton::Primary) && self.tl_drag.is_none() {
+            self.select_layer(&id);
+            self.tl_drag = Some(TlDrag::Reorder { layer: id.clone() });
+        }
+        row.context_menu(|ui| self.layer_context_menu(ui, comp, layer));
+        if matches!(&self.tl_drag, Some(TlDrag::Reorder { layer: l }) if *l == id) {
+            ui.painter_at(left).rect_filled(left, 0.0, theme::ACCENT.gamma_multiply(0.35));
         }
         let off = theme::TEXT_OFF.gamma_multiply(0.6);
         let av = |i: usize| geo.cell(geo.x0 + 2.0 + i as f32 * AV_W, AV_W, rect);
@@ -1031,6 +1196,7 @@ impl App {
             12.0,
         );
         let name_clip = Rect::from_min_max(pos2(geo.x0 + TREE_X + 30.0, rect.top()), pos2(geo.switches() - 4.0, rect.bottom()));
+        self.anchors.insert(format!("row:name:{}", id.0), name_clip);
         p.with_clip_rect(name_clip).text(
             pos2(name_clip.left(), rect.center().y),
             Align2::LEFT_CENTER,
@@ -1229,6 +1395,11 @@ impl App {
             self.selected_key =
                 resp.interact_pointer_pos().and_then(|pos| key_at(pos.x)).map(|at| KeySel { layer: id.clone(), path: None, at });
         }
+        if resp.secondary_clicked() {
+            self.select_layer(&id);
+        }
+        resp.context_menu(|ui| self.layer_context_menu(ui, comp, layer));
+        rect
     }
 
     /// グループの行（トランスフォーム・エフェクトなど）。

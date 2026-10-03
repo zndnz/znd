@@ -9,10 +9,12 @@
 //! tool select|pen|rect|ellipse
 //! vmove X Y              ビューア上の、コンポ座標 (X, Y) へポインタを動かす
 //! tmove LAYER_ID FRAME   タイムラインの、そのレイヤーの行のフレーム位置へ
+//! lmove LAYER_ID [DY]    タイムラインの左の、そのレイヤーの名前の上へ（DY は行の中心からの上下のずれ）
 //! rmove FRAME            タイムラインのルーラーのフレーム位置へ
 //! move X Y               画面座標へ
 //! down / up              左ボタンを押す／離す
 //! click / dclick         その場でクリック／ダブルクリック
+//! rclick                 その場で右クリック
 //! mod alt|shift|cmd|none 以後の操作に付ける修飾キー
 //! key NAME               キーを押して離す（Enter, Escape, Delete, V など）
 //! scroll DX DY           ホイール
@@ -52,7 +54,11 @@ impl Script {
     }
 
     fn button(&mut self, pressed: bool) {
-        self.pending.push(Event::PointerButton { pos: self.pos, button: PointerButton::Primary, pressed, modifiers: self.modifiers });
+        self.press(PointerButton::Primary, pressed);
+    }
+
+    fn press(&mut self, button: PointerButton, pressed: bool) {
+        self.pending.push(Event::PointerButton { pos: self.pos, button, pressed, modifiers: self.modifiers });
     }
 
     fn move_to(&mut self, p: Pos2) {
@@ -110,6 +116,10 @@ impl App {
                 (Some(r), Some(view)) => script.move_to(pos2(view.x(num(1) as f64), r.center().y)),
                 _ => fail("そのレイヤーの行がタイムラインにありません"),
             },
+            "lmove" => match args.first().and_then(|id| self.anchors.get(&format!("row:name:{id}"))) {
+                Some(r) => script.move_to(pos2(r.left() + 20.0, r.center().y + num(1))),
+                None => fail("そのレイヤーの行がタイムラインにありません"),
+            },
             "rmove" => match (self.anchors.get("ruler"), self.tl_view) {
                 (Some(r), Some(view)) => script.move_to(pos2(view.x(num(0) as f64), r.center().y)),
                 _ => fail("タイムラインがまだ表示されていません"),
@@ -119,6 +129,10 @@ impl App {
             "click" => {
                 script.button(true);
                 script.button(false);
+            }
+            "rclick" => {
+                script.press(PointerButton::Secondary, true);
+                script.press(PointerButton::Secondary, false);
             }
             "dclick" => {
                 for _ in 0..2 {

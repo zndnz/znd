@@ -869,9 +869,19 @@ impl App {
                 self.set_tool(tool);
             }
         }
-        // 選択中のキーフレームを削除
+        // 選択中のキーフレームを削除（キーフレームを選んでいなければ、選択中のレイヤーを削除）
         if (pressed(Key::Delete) || pressed(Key::Backspace)) && self.active_vertex.is_none() && self.pen.is_none() {
-            self.delete_selected_key();
+            if self.selected_key.is_some() {
+                self.delete_selected_key();
+            } else if let Some(id) = self.selected.clone().filter(|_| self.selected_footage.is_none()) {
+                self.delete_layer(&id);
+            }
+        }
+        // 選択中のレイヤーを複製
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::D))) {
+            if let Some(id) = self.selected.clone() {
+                self.duplicate_layer(&id);
+            }
         }
         // マーカー（再生中に叩けばタップ入力になる）
         if pressed(Key::M) {

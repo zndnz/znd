@@ -2,6 +2,7 @@
 //!
 //! UI（znd-app）はポインタの位置をここに渡すだけにして、何がどう変わるかは UI なしでテストできるようにする。
 
+use crate::effect::ParamValue;
 use crate::eval::{world_matrix, Affine};
 use crate::model::{Composition, Layer, LayerId, LayerKind, Project};
 use crate::property::{Property, SpatialTangents};
@@ -118,6 +119,66 @@ pub fn snap_time(comp: &Composition, t: Time, exclude: Option<&LayerId>, extra: 
     }
     extra.iter().for_each(|e| consider(*e));
     best.map(|b| b.1).unwrap_or_else(|| round(t))
+}
+
+// ---------- タイムライン: レイヤーの複製・削除・並び替え ----------
+
+/// 複製したレイヤーの名前。末尾の番号を進めて、コンポ内でまだ使われていない名前にする（「平面」→「平面 2」→「平面 3」）。
+fn copy_name(comp: &Composition, name: &str) -> String {
+    let (base, start) = match name.rsplit_once(' ') {
+        Some((base, n)) if !base.is_empty() => match n.parse::<u32>() {
+            Ok(n) => (base, n.saturating_add(1)),
+            Err(_) => (name, 2),
+        },
+        _ => (name, 2),
+    };
+    (start..).map(|n| format!("{base} {n}")).find(|c| comp.layers.iter().all(|l| &l.name != c)).unwrap()
+}
+
+/// レイヤーを複製して、元のレイヤーのすぐ上に置く。`new_id` はプロジェクト内で未使用の ID。
+pub fn duplicate_layer(comp: &mut Composition, id: &LayerId, new_id: LayerId) -> bool {
+    let Some(i) = comp.layer_index(id) else { return false };
+    let mut copy = comp.layers[i].clone();
+    copy.name = copy_name(comp, &copy.name);
+    copy.id = new_id;
+    comp.layers.insert(i, copy);
+    true
+}
+
+/// レイヤーを削除する。このレイヤーを指していた親・トラックマット・エフェクトのレイヤー引数は「なし」に戻す。
+pub fn remove_layer(comp: &mut Composition, id: &LayerId) -> Option<Layer> {
+    let i = comp.layer_index(id)?;
+    let removed = comp.layers.remove(i);
+    for l in &mut comp.layers {
+        if l.parent.as_ref() == Some(id) {
+            l.parent = None;
+        }
+        if l.track_matte.as_ref().is_some_and(|m| &m.layer == id) {
+            l.track_matte = None;
+        }
+        for fx in &mut l.effects {
+            for p in fx.params.values_mut() {
+                if matches!(p, ParamValue::Layer(Some(target)) if target == id) {
+                    *p = ParamValue::Layer(None);
+                }
+            }
+        }
+    }
+    Some(removed)
+}
+
+/// レイヤーを重ね順の `to` 番目の手前へ移す（`to` は移動前の並びでの位置。末尾なら `layers.len()`）。
+/// 位置が変わったら true。
+pub fn reorder_layer(comp: &mut Composition, id: &LayerId, to: usize) -> bool {
+    let Some(from) = comp.layer_index(id) else { return false };
+    let to = to.min(comp.layers.len());
+    let dest = if to > from { to - 1 } else { to };
+    if dest == from {
+        return false;
+    }
+    let layer = comp.layers.remove(from);
+    comp.layers.insert(dest, layer);
+    true
 }
 
 // ---------- ビューア: レイヤーの選択と移動 ----------
@@ -584,6 +645,46 @@ mod tests {
         assert_eq!(delete_keys(&mut l, f(20)), 2);
         assert!(!l.transform.opacity.is_animated());
         assert_eq!(l.transform.position.keyframes.len(), 1);
+    }
+
+    #[test]
+    fn duplicating_a_layer_puts_a_renamed_copy_right_above_it() {
+        let mut c = comp(vec![layer("a"), layer("b")]);
+        assert!(duplicate_layer(&mut c, &LayerId::new("b"), LayerId::new("b2")));
+        assert!(duplicate_layer(&mut c, &LayerId::new("b"), LayerId::new("b3")));
+        let names: Vec<_> = c.layers.iter().map(|l| (l.id.0.as_str(), l.name.as_str())).collect();
+        assert_eq!(names, [("a", "a"), ("b2", "b 2"), ("b3", "b 3"), ("b", "b")]);
+        assert!(!duplicate_layer(&mut c, &LayerId::new("none"), LayerId::new("x")));
+    }
+
+    #[test]
+    fn removing_a_layer_clears_references_to_it() {
+        let mut c = comp(vec![layer("a"), layer("b"), layer("c")]);
+        c.layers[0].parent = Some(LayerId::new("b"));
+        c.layers[2].track_matte = Some(crate::model::TrackMatte { layer: LayerId::new("b"), mode: crate::model::MatteMode::Alpha });
+        c.layers[2].parent = Some(LayerId::new("a"));
+        assert_eq!(remove_layer(&mut c, &LayerId::new("b")).map(|l| l.id), Some(LayerId::new("b")));
+        assert_eq!(c.layers.len(), 2);
+        assert_eq!(c.layers[0].parent, None);
+        assert_eq!(c.layers[1].track_matte, None);
+        // 関係のない参照は残る
+        assert_eq!(c.layers[1].parent, Some(LayerId::new("a")));
+        assert!(remove_layer(&mut c, &LayerId::new("b")).is_none());
+    }
+
+    #[test]
+    fn reordering_moves_a_layer_before_the_given_slot() {
+        let order = |c: &Composition| c.layers.iter().map(|l| l.id.0.clone()).collect::<Vec<_>>().join("");
+        let mut c = comp(vec![layer("a"), layer("b"), layer("c"), layer("d")]);
+        // 自分の前後の隙間に落としても動かない
+        assert!(!reorder_layer(&mut c, &LayerId::new("b"), 1));
+        assert!(!reorder_layer(&mut c, &LayerId::new("b"), 2));
+        assert!(reorder_layer(&mut c, &LayerId::new("a"), 3));
+        assert_eq!(order(&c), "bcad");
+        assert!(reorder_layer(&mut c, &LayerId::new("d"), 0));
+        assert_eq!(order(&c), "dbca");
+        assert!(reorder_layer(&mut c, &LayerId::new("d"), 99));
+        assert_eq!(order(&c), "bcad");
     }
 
     #[test]

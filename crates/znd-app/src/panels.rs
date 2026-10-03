@@ -870,17 +870,13 @@ impl App {
         if ui.add_enabled(has, egui::Button::new("複製")).clicked() {
             ui.close_menu();
             if let Some(id) = selected.clone() {
-                let new_id = LayerId::new(self.shared.fresh_id("layer"));
-                let created = new_id.clone();
-                self.edit_comp("レイヤー複製", false, |c| {
-                    if let Some(i) = c.layer_index(&id) {
-                        let mut copy = c.layers[i].clone();
-                        copy.id = new_id;
-                        copy.name = format!("{} のコピー", copy.name);
-                        c.layers.insert(i, copy);
-                    }
-                });
-                self.selected = Some(created);
+                self.duplicate_layer(&id);
+            }
+        }
+        if ui.add_enabled(has, egui::Button::new("削除")).clicked() {
+            ui.close_menu();
+            if let Some(id) = selected.clone() {
+                self.delete_layer(&id);
             }
         }
         if ui.add_enabled(has, egui::Button::new("現在の時刻で分割")).on_hover_text("映像と音声を同じ位置で切ります").clicked()
