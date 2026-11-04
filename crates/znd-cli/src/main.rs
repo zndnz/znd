@@ -118,6 +118,15 @@ fn positional(args: &[String], n: usize) -> Option<&String> {
 /// `--gpu`（または環境変数 `ZND_GPU=1`）が指定されていれば、エフェクトを GPU で処理する。
 /// GPU が使えなければ理由を表示して CPU で続ける。
 fn gpu(args: &[String]) -> Option<&'static dyn znd_render::effects::EffectAccel> {
+    gpu_backend(args).map(|g| g as &dyn znd_render::effects::EffectAccel)
+}
+
+/// `--gpu` のときは合成も GPU で行う（レイヤーのソースを送り、完成したフレームだけを読み戻す）。
+fn gpu_composite(args: &[String]) -> Option<&'static dyn znd_render::gpu_composite::CompositeAccel> {
+    gpu_backend(args).map(|g| g as &dyn znd_render::gpu_composite::CompositeAccel)
+}
+
+fn gpu_backend(args: &[String]) -> Option<&'static znd_gpu::GpuBackend> {
     static GPU: std::sync::OnceLock<Option<znd_gpu::GpuBackend>> = std::sync::OnceLock::new();
     let wanted = flag(args, "--gpu") || std::env::var("ZND_GPU").is_ok_and(|v| v == "1");
     if !wanted {
@@ -134,7 +143,6 @@ fn gpu(args: &[String]) -> Option<&'static dyn znd_render::effects::EffectAccel>
         }
     })
     .as_ref()
-    .map(|g| g as &dyn znd_render::effects::EffectAccel)
 }
 
 fn load(path: Option<&String>) -> Result<(Project, PathBuf), String> {
@@ -278,7 +286,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let mixer = Mixer::new(&project, &clips);
             let engine = ExprEngine::new();
             let renderer =
-                Renderer::new(&project, &footage).with_resolver(&engine).with_audio(&mixer).with_base_dir(&dir).with_accel(gpu(rest));
+                Renderer::new(&project, &footage).with_resolver(&engine).with_audio(&mixer).with_base_dir(&dir).with_accel(gpu(rest)).with_composite(gpu_composite(rest));
             let start = Instant::now();
             let buf = renderer.render_frame(&comp.id, comp.frame_rate.frame_to_time(frame), opts).map_err(|e| e.to_string())?;
             let elapsed = start.elapsed();
@@ -307,6 +315,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 resolver: Some(&engine),
                 base_dir: Some(dir),
                 accel: gpu(rest),
+                composite: gpu_composite(rest),
             };
             let start = Instant::now();
             let report = export(&ctx, &comp.id, &out, &settings, progress_line).map_err(|e| format!("\n{e}"))?;
@@ -345,6 +354,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 resolver: Some(&engine),
                 base_dir: Some(dir),
                 accel: gpu(rest),
+                composite: gpu_composite(rest),
             };
             let results = run_queue(&ctx, &jobs, |e| {
                 match e {
@@ -419,6 +429,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 resolver: Some(&engine),
                 base_dir: Some(dir.clone()),
                 accel: gpu(rest),
+                composite: gpu_composite(rest),
             };
             let flashes = scan_flashes(&ctx, &comp.id, |d, t| {
                 eprint!("\r明滅を解析中 {d}/{t}");
@@ -655,6 +666,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 resolver: Some(&engine),
                 base_dir: Some(dir),
                 accel: gpu(rest),
+                composite: gpu_composite(rest),
             };
             let files = export_breakdown(&ctx, &comp.id, comp.frame_rate.frame_to_time(frame), Path::new(out), "breakdown")
                 .map_err(|e| e.to_string())?;
@@ -742,6 +754,7 @@ fn run(args: &[String]) -> Result<(), String> {
             opt_num(rest, "--effects", 0)?,
             flag(rest, "--full"),
             gpu(rest),
+            gpu_composite(rest),
         ),
         "plugin-scan" => {
             let file = positional(rest, 0).ok_or("スキャンするファイルかフォルダを指定してください")?;
@@ -855,6 +868,7 @@ fn bench(
     effects: usize,
     full: bool,
     accel: Option<&'static dyn znd_render::effects::EffectAccel>,
+    composite: Option<&'static dyn znd_render::gpu_composite::CompositeAccel>,
 ) -> Result<(), String> {
     let dur = Time::from_seconds(10.0);
     let modes = [BlendMode::Normal, BlendMode::Add, BlendMode::Screen, BlendMode::Multiply, BlendMode::Overlay];
@@ -895,7 +909,7 @@ fn bench(
     let mut project = Project::new("bench");
     let fr = FrameRate::FPS_30;
     project.compositions.push(Composition { layers: list, ..Composition::new("bench", "bench", 1920, 1080, fr, dur) });
-    let renderer = Renderer::new(&project, &NoFootage).with_accel(accel);
+    let renderer = Renderer::new(&project, &NoFootage).with_accel(accel).with_composite(composite);
     let opts = RenderOptions { downsample: scale, ..RenderOptions::PREVIEW };
     let id = CompId::new("bench");
     let time_of = |f: i64| fr.frame_to_time(f * 3 % 300);
@@ -906,7 +920,7 @@ fn bench(
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0 / frames as f64;
     println!(
-        "1080p / レイヤー {layers} 枚 / エフェクト各 {effects} 個 / 解像度 1/{scale} / エフェクト処理: {}",
+        "1080p / レイヤー {layers} 枚 / エフェクト各 {effects} 個 / 解像度 1/{scale} / エフェクト・合成: {}",
         if accel.is_some() { "GPU" } else { "CPU" }
     );
     println!("  1 フレームずつ（スクラブ時）      : {ms:6.1} ms/フレーム（{:.1} fps）", 1000.0 / ms);

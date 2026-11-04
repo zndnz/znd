@@ -153,6 +153,14 @@ pub(crate) fn gpu() -> Option<&'static dyn znd_render::effects::EffectAccel> {
     gpu_backend().map(|g| g as &dyn znd_render::effects::EffectAccel)
 }
 
+/// 合成の GPU 化（エフェクトの GPU 処理と同じスイッチで切り替わる）。
+pub(crate) fn gpu_composite() -> Option<&'static dyn znd_render::gpu_composite::CompositeAccel> {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    gpu_backend().map(|g| g as &dyn znd_render::gpu_composite::CompositeAccel)
+}
+
 pub(crate) fn gpu_name() -> Option<&'static str> {
     gpu_backend().map(|g| g.name())
 }

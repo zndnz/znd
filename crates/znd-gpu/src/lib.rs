@@ -1,11 +1,17 @@
 //! GPU バックエンド（wgpu）。エフェクトを GPU で処理する。
 //!
 //! レイヤーに掛かっているエフェクトのうち GPU 対応のものが続く区間を、画像を 1 回転送するだけで
-//! まとめて処理する（`znd_render::effects::EffectAccel`）。レイヤーのラスタライズと合成は CPU のまま。
+//! まとめて処理する（`znd_render::effects::EffectAccel`）。
+//!
+//! 合成（`znd_render::gpu_composite::CompositeAccel`、[`composite`]）も GPU で行える。レイヤーのソースを送り、
+//! エフェクト・配置・描画モードでの重ね合わせまで GPU の上で済ませて、完成したフレームだけを読み戻す。
 //!
 //! 計算式は CPU リファレンス（`znd-render/src/effects`）と同じで、`tests/parity.rs` が全対応エフェクトを
 //! CPU の結果と比較している。対応していないエフェクトやパラメータ（巨大なぼかし半径など）は
 //! `supports` が false を返し、CPU で処理される。
+
+mod batch;
+mod composite;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -53,6 +59,8 @@ const MAX_BOX_RADIUS: usize = 256;
 pub const MIN_PIXELS: usize = 100_000;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const PARAM_FLOATS: usize = 48;
+/// 使い回すために取っておくテクスチャの合計の上限。
+const POOL_BYTES: usize = 1536 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Fs {
@@ -102,6 +110,35 @@ impl Fs {
             Fs::Edges => "fs_edges",
         }
     }
+}
+
+/// エフェクトのシェーダー（`shaders.wgsl`）を、コンピュートシェーダーにして返す。
+///
+/// wgpu の Metal では描画パスごとにコマンドバッファが作られ、レイヤー 200 枚 × 数パスでは遅すぎる。
+/// コンピュートなら 1 つのパスに何千回でもディスパッチを積めるので、各 `fs_*` を普通の関数に直し、
+/// 画素ごとに呼んで書き込む `cs_*` を足す（計算式はフラグメント版と同じ）。
+fn compute_source() -> String {
+    let mut src = include_str!("shaders.wgsl").to_string();
+    for fs in Fs::ALL {
+        let name = fs.entry();
+        let from = format!("@fragment\nfn {name}(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{");
+        assert!(src.contains(&from), "{name} の宣言が見つかりません");
+        src = src.replace(&from, &format!("fn {name}(pos: vec4<f32>) -> vec4<f32> {{"));
+    }
+    src.push_str(
+        "\n@group(0) @binding(3) var out_tex: texture_storage_2d<rgba32float, write>;\n\n\
+         fn out_px(g: vec3<u32>) -> bool {\n  let d = textureDimensions(out_tex);\n  return g.x < d.x && g.y < d.y;\n}\n\n\
+         fn center(g: vec3<u32>) -> vec4<f32> {\n  return vec4<f32>(f32(g.x) + 0.5, f32(g.y) + 0.5, 0.0, 1.0);\n}\n\n\
+         @compute @workgroup_size(8, 8)\nfn cs_fill(@builtin(global_invocation_id) g: vec3<u32>) {\n  if (out_px(g)) {\n    textureStore(out_tex, vec2<i32>(g.xy), u.v[0]);\n  }\n}\n",
+    );
+    for fs in Fs::ALL {
+        let name = fs.entry();
+        let cs = name.replacen("fs_", "cs_", 1);
+        src.push_str(&format!(
+            "\n@compute @workgroup_size(8, 8)\nfn {cs}(@builtin(global_invocation_id) g: vec3<u32>) {{\n  if (out_px(g)) {{\n    textureStore(out_tex, vec2<i32>(g.xy), {name}(center(g)));\n  }}\n}}\n"
+        ));
+    }
+    src
 }
 
 /// 1 回の描画パス。`a`・`b` は入力、`out` は出力のレジスタ（テクスチャ）番号。
@@ -467,12 +504,24 @@ fn emit(prog: &mut Program, op: &AccelOp, env: &AccelEnv, cur: usize, w: usize, 
 pub struct GpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: HashMap<Fs, wgpu::RenderPipeline>,
+    /// エフェクトの各処理（コンピュートシェーダー。`shaders.wgsl` の各 `fs_*` を包んだもの）。
+    pipelines: HashMap<Fs, wgpu::ComputePipeline>,
+    /// 画像を 1 色で塗る。
+    fill: wgpu::ComputePipeline,
+    /// 大きな画像のエフェクト用の描画パス（`shaders.wgsl` のフラグメントシェーダーそのまま）。
+    raster: HashMap<Fs, wgpu::RenderPipeline>,
+    raster_layout: wgpu::BindGroupLayout,
+    /// 合成（レイヤー 1 枚をキャンバスに重ねる、コンピュートシェーダー）。
+    place: wgpu::ComputePipeline,
+    place_layout: wgpu::BindGroupLayout,
+    /// 合成のキャンバスと読み戻し用のバッファ（大きさが同じ間は使い回す）。
+    canvas: Mutex<Option<(u32, u32, wgpu::Buffer, wgpu::Buffer)>>,
     layout: wgpu::BindGroupLayout,
     /// 使い終わったテクスチャ（大きさごと）。
     pool: Mutex<HashMap<(u32, u32), Vec<wgpu::Texture>>>,
     max_size: u32,
     name: String,
+    composite_lock: Mutex<()>,
 }
 
 impl GpuBackend {
@@ -498,11 +547,11 @@ impl GpuBackend {
         .map_err(|e| format!("GPU を初期化できません: {e}"))?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("znd effects"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(compute_source().into()),
         });
         let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -517,11 +566,17 @@ impl GpuBackend {
                 tex_entry(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
                 },
@@ -532,15 +587,52 @@ impl GpuBackend {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
-        let pipelines = Fs::ALL
+        let compute = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: entry,
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let pipelines = Fs::ALL.into_iter().map(|fs| (fs, compute(&fs.entry().replacen("fs_", "cs_", 1)))).collect();
+        let fill = compute("cs_fill");
+        // 大きな画像のエフェクトは描画パス（フラグメントシェーダー）のほうが速い（タイル型の GPU で
+        // テクスチャの読み書きが効率的なため）。パスごとのコストは画素数に比べて無視できる
+        let raster_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("znd effects (raster)"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
+        });
+        let frag_tex = |binding: u32| wgpu::BindGroupLayoutEntry { visibility: wgpu::ShaderStages::FRAGMENT, ..tex_entry(binding) };
+        let raster_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("znd effects (raster)"),
+            entries: &[
+                frag_tex(0),
+                frag_tex(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let raster_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&raster_layout],
+            push_constant_ranges: &[],
+        });
+        let raster = Fs::ALL
             .into_iter()
             .map(|fs| {
                 let p = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(fs.entry()),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[], compilation_options: Default::default() },
+                    layout: Some(&raster_pipeline_layout),
+                    vertex: wgpu::VertexState { module: &raster_shader, entry_point: "vs", buffers: &[], compilation_options: Default::default() },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
+                        module: &raster_shader,
                         entry_point: fs.entry(),
                         targets: &[Some(wgpu::ColorTargetState { format: FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
                         compilation_options: Default::default(),
@@ -554,15 +646,65 @@ impl GpuBackend {
                 (fs, p)
             })
             .collect();
+        let composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("znd composite"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+        });
+        let place_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("znd composite"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let place = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cs_place"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&place_layout],
+                push_constant_ranges: &[],
+            })),
+            module: &composite,
+            entry_point: "cs_place",
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let max_size = device.limits().max_texture_dimension_2d;
         Ok(GpuBackend {
             device,
             queue,
             pipelines,
+            fill,
+            raster,
+            raster_layout,
+            place,
+            place_layout,
+            canvas: Mutex::default(),
             layout,
             pool: Mutex::default(),
             max_size,
             name: format!("{} ({:?})", info.name, info.backend),
+            composite_lock: Mutex::new(()),
         })
     }
 
@@ -582,7 +724,8 @@ impl GpuBackend {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST,
@@ -592,8 +735,11 @@ impl GpuBackend {
 
     fn recycle(&self, textures: Vec<wgpu::Texture>, w: u32, h: u32) {
         let mut pool = self.pool.lock().unwrap();
-        // 大きさの種類が増えすぎたら捨てる（プレビュー解像度の切り替えなどで溜まる）
-        if pool.len() > 8 {
+        // 合成ではレイヤーごとに大きさが違うので、大きさの種類ではなく合計のメモリ量で上限を決める。
+        // 超えたら全部捨てる（プレビュー解像度の切り替えなどで、使わない大きさが溜まったとき）
+        let bytes = |w: u32, h: u32, n: usize| w as usize * h as usize * 16 * n;
+        let total: usize = pool.iter().map(|((pw, ph), v)| bytes(*pw, *ph, v.len())).sum();
+        if total + bytes(w, h, textures.len()) > POOL_BYTES {
             pool.clear();
         }
         let slot = pool.entry((w, h)).or_default();
@@ -604,51 +750,22 @@ impl GpuBackend {
         }
     }
 
-    fn execute(&self, prog: &Program, result: usize, buf: &FrameBuf) -> Result<Vec<f32>, String> {
+    fn upload(&self, buf: &FrameBuf) -> wgpu::Texture {
         let (w, h) = (buf.width as u32, buf.height as u32);
-        let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-        let textures: Vec<wgpu::Texture> = (0..prog.regs).map(|_| self.texture(w, h)).collect();
-        let views: Vec<wgpu::TextureView> = textures.iter().map(|t| t.create_view(&Default::default())).collect();
+        let tex = self.texture(w, h);
         self.queue.write_texture(
-            wgpu::ImageCopyTexture { texture: &textures[0], mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             bytemuck::cast_slice(&buf.data),
             wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
-            size,
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        for step in &prog.steps {
-            let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: (PARAM_FLOATS * 4) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&uniform, 0, bytemuck::cast_slice(&step.params));
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[step.a]) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[step.b]) },
-                    wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &views[step.out],
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.pipelines[&step.fs]);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        // 読み戻し。行の長さは 256 バイトの倍数にそろえる必要がある
+        tex
+    }
+
+    /// 記録した処理を実行して、`tex` を読み戻す。
+    fn read_back(&self, mut encoder: wgpu::CommandEncoder, tex: &wgpu::Texture, w: u32, h: u32) -> Result<Vec<f32>, String> {
+        let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        // 行の長さは 256 バイトの倍数にそろえる必要がある
         let row = w as usize * 16;
         let padded = row.div_ceil(256) * 256;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -658,12 +775,7 @@ impl GpuBackend {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &textures[result],
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+            wgpu::ImageCopyTexture { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::ImageCopyBuffer {
                 buffer: &readback,
                 layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(padded as u32), rows_per_image: Some(h) },
@@ -678,7 +790,7 @@ impl GpuBackend {
         });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("GPU からの読み戻しに失敗しました: {e}"))?;
-        let mut out = vec![0.0f32; buf.data.len()];
+        let mut out = vec![0.0f32; w as usize * h as usize * 4];
         {
             let mapped = slice.get_mapped_range();
             for y in 0..h as usize {
@@ -687,9 +799,18 @@ impl GpuBackend {
             }
         }
         readback.unmap();
-        drop(views);
-        self.recycle(textures, w, h);
         Ok(out)
+    }
+
+    fn execute(&self, prog: &Program, result: usize, buf: &FrameBuf) -> Result<Vec<f32>, String> {
+        let mut batch = batch::Batch::new(self);
+        let input = batch.upload(buf);
+        let out = batch.program(prog, result, input);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        batch.record(&mut encoder, None);
+        let data = self.read_back(encoder, batch.texture(out), buf.width as u32, buf.height as u32);
+        batch.finish();
+        data
     }
 }
 

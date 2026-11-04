@@ -1107,6 +1107,7 @@ impl App {
             resolver: Some(&exprs),
             base_dir: Some(base_dir(self.path.as_deref())),
             accel: crate::gpu(),
+            composite: crate::gpu_composite(),
         };
         self.status = match znd_media::review::export_breakdown(&ctx, &comp, t, &dir, "making") {
             Ok(files) => format!("{} 枚の分解画像を {} に書き出しました", files.len(), dir.display()),
@@ -2195,6 +2196,7 @@ impl App {
                 resolver: Some(&exprs),
                 base_dir: Some(dir.clone()),
                 accel: crate::gpu(),
+                composite: crate::gpu_composite(),
             };
             let flashes = znd_media::review::scan_flashes(&ectx, &comp_id, |d, t| report(d, t)).map_err(|e| e.to_string())?;
             let fr = comp.frame_rate;

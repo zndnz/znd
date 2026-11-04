@@ -4,6 +4,7 @@
 //! → トラックマット → 描画モードで合成。シェイプ・テキスト・コラップスしたプリコンポは
 //! 「連続ラスタライズ」で、トランスフォームを先に掛けて出力解像度で直接描く。
 
+use crate::gpu_composite::{CompositeAccel, CompositeJob, CompositeLayer, CompositeSource};
 use crate::blend::blend_tile;
 use crate::color::{luma, ColorXf, OutputXf};
 use crate::effects::{self, FxContext};
@@ -128,6 +129,8 @@ pub struct Renderer<'a> {
     pub base_dir: Option<PathBuf>,
     /// エフェクトの高速化バックエンド（GPU）。無ければすべて CPU で処理する。
     pub accel: Option<&'a dyn effects::EffectAccel>,
+    /// 合成の高速化バックエンド（GPU）。無ければ CPU で合成する。
+    pub composite: Option<&'a dyn CompositeAccel>,
     cx: ColorXf,
 }
 
@@ -162,6 +165,7 @@ impl<'a> Renderer<'a> {
             audio: None,
             base_dir: None,
             accel: None,
+            composite: None,
             cx: ColorXf::new(project.settings.working_space),
         }
     }
@@ -178,6 +182,11 @@ impl<'a> Renderer<'a> {
 
     pub fn with_accel(mut self, accel: Option<&'a dyn effects::EffectAccel>) -> Self {
         self.accel = accel;
+        self
+    }
+
+    pub fn with_composite(mut self, composite: Option<&'a dyn CompositeAccel>) -> Self {
+        self.composite = composite;
         self
     }
 
@@ -247,8 +256,24 @@ impl<'a> Renderer<'a> {
         let linear = self.project.settings.linear_blending;
         let clamp = self.project.settings.bit_depth != BitDepth::F32;
         let any_solo = comp.layers.iter().any(|l| l.solo);
-        let mut canvas = FrameBuf { width: out_w, height: out_h, data: take_zeroed(out_w * out_h * 4) };
         let drawable = |layer: &Layer| layer.visible && !(any_solo && !layer.solo) && !(layer.guide && !opts.guides) && layer.active_at(t);
+        if let Some(gpu) = self.composite {
+            // 3D のまとまりと調整レイヤーは「ここまでの絵」を CPU で読むので、そのコンポは CPU で合成する
+            let cpu_only = comp.layers.iter().any(|l| drawable(l) && (three_d::is_scene_layer(l) || matches!(l.kind, LayerKind::Adjustment)));
+            if !cpu_only && gpu.fits(out_w, out_h) {
+                let job = self.composite_job(gpu, orig, comp, &drawable, t, base, out_w, out_h, opts, depth)?;
+                match gpu.composite(&job) {
+                    Ok(mut canvas) => {
+                        if clamp {
+                            quantize(&mut canvas, self.project.settings.bit_depth);
+                        }
+                        return Ok(canvas);
+                    }
+                    Err(e) => eprintln!("GPU の合成に失敗したため CPU で合成します: {e}"),
+                }
+            }
+        }
+        let mut canvas = FrameBuf { width: out_w, height: out_h, data: take_zeroed(out_w * out_h * 4) };
 
         let mut i = comp.layers.len();
         while i > 0 {
@@ -296,6 +321,98 @@ impl<'a> Renderer<'a> {
             quantize(&mut canvas, self.project.settings.bit_depth);
         }
         Ok(canvas)
+    }
+
+    /// GPU で合成するための依頼を作る。GPU に載せられないレイヤーは CPU で出力空間のタイルまで作る。
+    #[allow(clippy::too_many_arguments)]
+    fn composite_job(
+        &self,
+        gpu: &dyn CompositeAccel,
+        orig: &Composition,
+        comp: &Composition,
+        drawable: &dyn Fn(&Layer) -> bool,
+        t: Time,
+        base: Affine,
+        out_w: usize,
+        out_h: usize,
+        opts: RenderOptions,
+        depth: usize,
+    ) -> Result<CompositeJob<'_>, RenderError> {
+        let linear = self.project.settings.linear_blending;
+        let clamp = self.project.settings.bit_depth != BitDepth::F32;
+        let mut job = CompositeJob { width: out_w, height: out_h, linear, clamp, time_seconds: t.seconds(), cx: &self.cx, layers: Vec::new() };
+        let mb = comp.motion_blur;
+        for layer in comp.layers.iter().rev().filter(|l| drawable(l)) {
+            let blur = mb.enabled && layer.motion_blur && mb.samples > 1 && mb.shutter_angle > 0.0;
+            let simple = layer.track_matte.is_none() && !blur && !is_comp_space(layer) && !has_masks(layer);
+            if simple {
+                let opacity = (layer.transform.opacity.eval(t) / 100.0).clamp(0.0, 1.0) as f32;
+                if opacity <= 0.0 {
+                    continue;
+                }
+                let m = base.then_after(&world_matrix(comp, layer, t));
+                let fx = has_effects(layer);
+                let ops = || -> Vec<(String, znd_core::EvalParams)> {
+                    layer.effects.iter().filter(|e| e.enabled).map(|e| (e.kind.clone(), e.eval(t))).collect()
+                };
+                let on_gpu = |ops: &[(String, znd_core::EvalParams)], scale: f32| {
+                    let env = job.env(scale);
+                    ops.iter().all(|(k, p)| gpu.supports_in_composite(&effects::AccelOp { kind: k, params: p }, &env))
+                };
+                if let (true, LayerKind::Solid { width, height, color }) = (fx, &layer.kind) {
+                    // エフェクト付きの平面: CPU で塗った画像を作らず、GPU の上で塗る（`raw_content` と同じ大きさ）
+                    let ds = opts.downsample.max(1);
+                    let (bw, bh) = ((*width).div_ceil(ds).max(1) as usize, (*height).div_ceil(ds).max(1) as usize);
+                    let (lw, lh) = (*width as f64, *height as f64);
+                    let scale = matrix_scale(&Affine::scale(bw as f64 / lw, bh as f64 / lh));
+                    let ops = ops();
+                    if on_gpu(&ops, scale) {
+                        let c = self.cx.rgb(*color);
+                        let fit = Affine::scale(lw / bw as f64, lh / bh as f64);
+                        job.layers.push(CompositeLayer {
+                            source: CompositeSource::Fill { width: bw, height: bh, color: [c[0], c[1], c[2], 1.0], ops, effect_scale: scale },
+                            matrix: m.then_after(&fit),
+                            opacity,
+                            blend: layer.blend_mode,
+                        });
+                        continue;
+                    }
+                }
+                let content = self.raw_content(comp, layer, t, opts, depth, fx)?;
+                let source = match content {
+                    None => continue,
+                    Some(Content::Solid { width, height, color }) => {
+                        Some((CompositeSource::Solid { width: width as f64, height: height as f64, color }, m))
+                    }
+                    Some(Content::Image { buf, width, height }) => {
+                        let fit = Affine::scale(width / buf.width as f64, height / buf.height as f64);
+                        let to_buf = Affine::scale(buf.width as f64 / width, buf.height as f64 / height);
+                        let scale = matrix_scale(&to_buf);
+                        let ops = ops();
+                        on_gpu(&ops, scale).then(|| (CompositeSource::Image { buf: Arc::new(buf), ops, effect_scale: scale }, m.then_after(&fit)))
+                    }
+                    Some(Content::Shared { buf, width, height }) => {
+                        let fit = Affine::scale(width / buf.width as f64, height / buf.height as f64);
+                        Some((CompositeSource::Image { buf, ops: Vec::new(), effect_scale: 1.0 }, m.then_after(&fit)))
+                    }
+                };
+                if let Some((source, matrix)) = source {
+                    job.layers.push(CompositeLayer { source, matrix, opacity, blend: layer.blend_mode });
+                    continue;
+                }
+            }
+            // GPU に載せられない: CPU でタイルまで作る（マットもここで適用する）
+            let Some(mut tile) = self.layer_tile(orig, comp, layer, t, base, out_w, out_h, opts, depth)? else { continue };
+            if let Some(tm) = &layer.track_matte {
+                let matte = match comp.layer(&tm.layer) {
+                    Some(ml) if ml.active_at(t) => self.layer_tile(orig, comp, ml, t, base, out_w, out_h, opts, depth)?,
+                    _ => None,
+                };
+                apply_matte(&mut tile, matte.as_ref(), tm.mode);
+            }
+            job.layers.push(CompositeLayer { source: CompositeSource::Tile(tile), matrix: Affine::IDENTITY, opacity: 1.0, blend: layer.blend_mode });
+        }
+        Ok(job)
     }
 
     /// 3D レイヤーのまとまりを描く（投影・ライティング・深度合成は `three_d.rs`）。

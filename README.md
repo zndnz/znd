@@ -1,7 +1,7 @@
 # znd
 
 ネット発の自主制作映像クリエイター向け、レイヤーベースの合成・モーショングラフィックスエンジン。
-要件は [PRODUCT.md](PRODUCT.md)。M1〜M5 を通して実装したが、要件のすべては満たしていない（GPU はエフェクトのみ、OpenFX は一部など）。
+要件は [PRODUCT.md](PRODUCT.md)。M1〜M5 を通して実装したが、要件のすべては満たしていない（GPU は一部のレイヤー・エフェクトのみ、OpenFX は一部など）。
 何ができて何ができないかは [docs/04-milestones.md](docs/04-milestones.md) にまとめてある。
 
 ## 設計ドキュメント
@@ -18,7 +18,7 @@
 - Rust 1.80 以降
 - FFmpeg（`ffmpeg` / `ffprobe`。動画の読み込みと書き出しに使用。`ZND_FFMPEG_DIR` で場所を指定可）
 - C コンパイラ（ビルド時に FBX 読み込みと OpenFX ホストの一部をコンパイルする）
-- GPU は任意。あればエフェクトの処理に使う（`ZND_GPU=0` で無効）
+- GPU は任意。あればエフェクトと合成の処理に使う（`ZND_GPU=0` で無効）
 
 ## 使い方
 
@@ -77,7 +77,7 @@ ZND_BLESS=1 cargo test -p znd-render
 | `crates/znd-render` | CPU レンダラー（合成、シェイプ、マスク、エフェクト、3D、品質チェック） |
 | `crates/znd-audio` | ミキシング、タイムストレッチ、音声解析、ラウドネス |
 | `crates/znd-script` | エクスプレッションと自動化スクリプト（QuickJS） |
-| `crates/znd-gpu` | GPU バックエンド（wgpu。エフェクトの処理） |
+| `crates/znd-gpu` | GPU バックエンド（wgpu。エフェクトと合成） |
 | `crates/znd-media` | FFmpeg 連携（読み込み・各形式への書き出し）、素材管理 |
 | `crates/znd-cli` | `znd` コマンド |
 | `crates/znd-app` | アプリ |

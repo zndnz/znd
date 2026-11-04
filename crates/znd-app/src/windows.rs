@@ -141,6 +141,7 @@ impl App {
                 resolver: Some(&exprs),
                 base_dir: Some(dir),
                 accel: crate::gpu(),
+                composite: crate::gpu_composite(),
             };
             let mut last = None;
             let mut failures = Vec::new();

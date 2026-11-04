@@ -11,6 +11,7 @@ pub mod color;
 pub mod compositor;
 pub mod effects;
 pub mod fingerprint;
+pub mod gpu_composite;
 pub mod frame;
 pub mod mask;
 pub mod model;

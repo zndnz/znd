@@ -250,7 +250,8 @@ fn worker(
             .with_resolver(&*job.exprs)
             .with_audio(&mixer)
             .with_base_dir(&base_dir)
-            .with_accel(crate::gpu());
+            .with_accel(crate::gpu())
+            .with_composite(crate::gpu_composite());
         let xf = renderer.output_xf();
         let opts = job.opts();
         let results: Vec<(u64, Result<Preview, String>)> = frames

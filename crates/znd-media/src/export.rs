@@ -133,11 +133,13 @@ pub struct ExportContext<'a> {
     pub base_dir: Option<PathBuf>,
     /// エフェクトの高速化バックエンド（GPU）。`None` ならすべて CPU で処理する。
     pub accel: Option<&'a dyn znd_render::effects::EffectAccel>,
+    /// 合成の高速化バックエンド（GPU）。`None` なら CPU で合成する。
+    pub composite: Option<&'a dyn znd_render::gpu_composite::CompositeAccel>,
 }
 
 impl<'a> ExportContext<'a> {
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource) -> Self {
-        ExportContext { project, footage, clips: None, resolver: None, base_dir: None, accel: None }
+        ExportContext { project, footage, clips: None, resolver: None, base_dir: None, accel: None, composite: None }
     }
 }
 
@@ -313,7 +315,7 @@ pub fn export(
 
     let mut warnings = rights::export_warnings(project, comp_id);
     let mixer = ctx.clips.map(|c| Mixer::new(project, c));
-    let mut renderer = Renderer::new(project, ctx.footage).with_accel(ctx.accel);
+    let mut renderer = Renderer::new(project, ctx.footage).with_accel(ctx.accel).with_composite(ctx.composite);
     if let Some(r) = ctx.resolver {
         renderer = renderer.with_resolver(r);
     }

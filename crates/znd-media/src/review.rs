@@ -10,7 +10,7 @@ use znd_render::safety::{analyze, frame_stats, FlashWarning};
 use znd_render::{FootageSource, FrameBuf, RenderError, RenderOptions, Renderer};
 
 fn renderer<'a>(project: &'a Project, ctx: &'a ExportContext<'a>) -> Renderer<'a> {
-    let mut r = Renderer::new(project, ctx.footage).with_accel(ctx.accel);
+    let mut r = Renderer::new(project, ctx.footage).with_accel(ctx.accel).with_composite(ctx.composite);
     if let Some(res) = ctx.resolver {
         r = r.with_resolver(res);
     }
