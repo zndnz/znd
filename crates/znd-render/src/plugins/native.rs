@@ -66,6 +66,8 @@ pub struct Host {
     pub audio: unsafe extern "C" fn(*mut c_void, u32, *mut f32, u32) -> i32,
     pub apply_effect: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut Image) -> i32,
     pub set_output: unsafe extern "C" fn(*mut c_void, u32, u32, i32, i32, *mut Image) -> i32,
+    pub mask_count: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub mask_points: unsafe extern "C" fn(*mut c_void, u32, *mut f64, u32, *mut u32) -> u32,
 }
 
 #[repr(C)]
@@ -412,6 +414,28 @@ unsafe extern "C" fn host_set_output(ctx: *mut c_void, w: u32, h: u32, ox: i32, 
     0
 }
 
+unsafe extern "C" fn host_mask_count(ctx: *mut c_void) -> u32 {
+    state(ctx).ctx.masks.len() as u32
+}
+
+/// index 番目のマスクを折れ線にして、(x, y) の組を out に最大 cap 組書く。戻り値は全体の点の数（cap より大きければ足りない）。
+unsafe extern "C" fn host_mask_points(ctx: *mut c_void, index: u32, out: *mut f64, cap: u32, closed: *mut u32) -> u32 {
+    let s = state(ctx);
+    let Some(path) = s.ctx.masks.get(index as usize) else { return 0 };
+    let line = crate::path::flatten(path, 0.25);
+    if !closed.is_null() {
+        closed.write(line.closed as u32);
+    }
+    if !out.is_null() {
+        let dst = std::slice::from_raw_parts_mut(out, cap as usize * 2);
+        for (i, p) in line.pts.iter().take(cap as usize).enumerate() {
+            dst[i * 2] = p[0];
+            dst[i * 2 + 1] = p[1];
+        }
+    }
+    line.pts.len() as u32
+}
+
 impl Effect for NativeEffect {
     fn info(&self) -> &PluginInfo {
         &self.info
@@ -436,6 +460,8 @@ impl Effect for NativeEffect {
             audio: host_audio,
             apply_effect: host_apply_effect,
             set_output: host_set_output,
+            mask_count: host_mask_count,
+            mask_points: host_mask_points,
         };
         let abi3 = self.lib.abi >= 3;
         let args = RenderArgs {

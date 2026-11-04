@@ -103,6 +103,11 @@ typedef struct ZndHost {
    * （入力の args->rgba は読み続けてよい）。(offset_x, offset_y) は出力の左上の位置を入力の画素座標で表したもの。
    * 例: 四方に 10px 広げるなら (w+20, h+20, -10, -10)。呼んだ場合、args->rgba への書き込みは捨てられる */
   int32_t (*set_output)(void *ctx, uint32_t width, uint32_t height, int32_t offset_x, int32_t offset_y, ZndImage *out);
+  /* レイヤーのマスクの数（マスクで描くパスを受け取るエフェクト用。マスクのモードが「なし」でも数える） */
+  uint32_t (*mask_count)(void *ctx);
+  /* index 番目のマスクを折れ線にして、バッファ画素座標の (x, y) を out に最大 cap 組書く。
+   * 戻り値は折れ線の点の数（cap より大きければ足りない）。closed には閉じたパスなら 1 */
+  uint32_t (*mask_points)(void *ctx, uint32_t index, double *out, uint32_t cap, uint32_t *closed);
 } ZndHost;
 
 typedef struct ZndRenderArgs {
