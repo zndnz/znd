@@ -5,7 +5,7 @@ members = ["crates/znd-core", "crates/znd-text", "crates/znd-render", "crates/zn
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
