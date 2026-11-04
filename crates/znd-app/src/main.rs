@@ -2,6 +2,7 @@
 
 mod audio;
 mod icons;
+mod keyops;
 mod panels;
 mod plugin_host;
 mod preview;
@@ -288,8 +289,14 @@ pub struct App {
     /// タイムラインで開閉を既定から切り替えた行（レイヤー ID、または `レイヤー ID/グループ`）。
     pub(crate) tl_open: std::collections::HashSet<String>,
     pub(crate) tl_search: String,
-    /// タイムラインで選択中のキーフレーム。
-    pub(crate) selected_key: Option<timeline::KeySel>,
+    /// タイムラインで選択中のキーフレーム（複数可。レイヤーをまたいでもよい）。
+    pub(crate) selected_keys: Vec<timeline::KeySel>,
+    /// 矩形選択の途中で、今のフレームに行が拾ったキー。
+    pub(crate) marquee_hits: Vec<timeline::KeySel>,
+    /// コピーしたキーフレーム。
+    pub(crate) key_clip: Option<znd_core::keys::KeyClipboard>,
+    /// 最後にクリックしたプロパティの行（キーの貼り付け先）。
+    pub(crate) key_target: Option<(LayerId, String)>,
     /// 各パネルで開いているタブ。
     pub(crate) left_tab: usize,
     pub(crate) right_tab: usize,
@@ -393,7 +400,10 @@ impl App {
             tl_left: timeline::LEFT_DEFAULT,
             tl_open: Default::default(),
             tl_search: String::new(),
-            selected_key: None,
+            selected_keys: Vec::new(),
+            marquee_hits: Vec::new(),
+            key_clip: None,
+            key_target: None,
             left_tab: 0,
             right_tab: 0,
             lower_tab: 0,
@@ -445,7 +455,8 @@ impl App {
         self.last_edit = None;
         self.selected = None;
         self.selected_footage = None;
-        self.selected_key = None;
+        self.selected_keys.clear();
+        self.key_target = None;
         self.tl_open.clear();
         self.frame = 0;
         self.stop();
@@ -842,6 +853,8 @@ impl App {
         if ctx.wants_keyboard_input() {
             return;
         }
+        // キーフレームのコピー・貼り付け
+        self.key_clipboard_events(ctx);
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
         if pressed(Key::Space) {
             self.toggle_play();
@@ -874,8 +887,8 @@ impl App {
         }
         // 選択中のキーフレームを削除（キーフレームを選んでいなければ、選択中のレイヤーを削除）
         if (pressed(Key::Delete) || pressed(Key::Backspace)) && self.active_vertex.is_none() && self.pen.is_none() {
-            if self.selected_key.is_some() {
-                self.delete_selected_key();
+            if !self.selected_keys.is_empty() {
+                self.delete_selected_keys();
             } else if let Some(id) = self.selected.clone().filter(|_| self.selected_footage.is_none()) {
                 self.delete_layer(&id);
             }
@@ -884,6 +897,15 @@ impl App {
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::D))) {
             if let Some(id) = self.selected.clone() {
                 self.duplicate_layer(&id);
+            }
+        }
+        // コマ打ち（⌥1 = なし、⌥2〜⌥4 = 2〜4 コマ打ち）
+        for (n, key) in [(1u32, Key::Num1), (2, Key::Num2), (3, Key::Num3), (4, Key::Num4)] {
+            if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::ALT, key))) {
+                if let Some(id) = self.selected.clone() {
+                    self.edit_layer("コマ打ち", false, &id, |l| l.hold_frames = n);
+                    self.status = if n == 1 { "コマ打ちを解除しました".into() } else { format!("{n} コマ打ちにしました") };
+                }
             }
         }
         // マーカー（再生中に叩けばタップ入力になる）

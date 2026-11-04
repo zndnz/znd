@@ -38,7 +38,7 @@ impl KeyKind {
         }
     }
 
-    fn of<V>(k: &Keyframe<V>) -> KeyKind {
+    pub(crate) fn of<V>(k: &Keyframe<V>) -> KeyKind {
         match (k.interp_in, k.interp_out, k.bezier_mode) {
             (_, Interp::Hold, _) => KeyKind::Hold,
             (Interp::Bezier, Interp::Bezier, BezierMode::Auto) => KeyKind::AutoBezier,
@@ -96,17 +96,11 @@ pub(crate) enum PropEdit {
         from: Time,
         to: Time,
     },
-    /// 現在時刻のキーのイーズ（速度・影響度）を数値で指定する。
-    Ease {
-        incoming: bool,
-        speed: f64,
-        influence: f64,
-    },
 }
 
 impl PropEdit {
     pub fn coalesce(&self) -> bool {
-        matches!(self, PropEdit::Set(_) | PropEdit::MoveKey { .. } | PropEdit::Ease { .. })
+        matches!(self, PropEdit::Set(_) | PropEdit::MoveKey { .. })
     }
 }
 
@@ -145,21 +139,6 @@ fn apply_to<V: Animatable>(p: &mut Property<V>, t: Time, edit: &PropEdit) {
                 if p.key_index_at(*to).is_none() {
                     p.keyframes[i].time = *to;
                     p.normalize_keys();
-                }
-            }
-        }
-        PropEdit::Ease { incoming, speed, influence } => {
-            if let Some(i) = p.key_index_at(t) {
-                let dims = if p.spatial { 1 } else { p.keyframes[i].value.dims() };
-                let k = &mut p.keyframes[i];
-                let ease = vec![Ease { speed: *speed, influence: influence.clamp(0.001, 1.0) }; dims.max(1)];
-                k.bezier_mode = BezierMode::Manual;
-                if *incoming {
-                    k.interp_in = Interp::Bezier;
-                    k.ease_in = ease;
-                } else {
-                    k.interp_out = Interp::Bezier;
-                    k.ease_out = ease;
                 }
             }
         }
@@ -649,7 +628,8 @@ impl App {
         if id != self.comp_id {
             self.comp_id = id;
             self.selected = None;
-            self.selected_key = None;
+            self.selected_keys.clear();
+            self.key_target = None;
             self.frame = 0;
             self.stop();
             self.audio_sig = 0;
@@ -709,30 +689,11 @@ impl App {
     }
 
     fn animation_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let key = self.selected_key.clone();
-        ui.add_enabled_ui(key.is_some(), |ui| {
-            ui.menu_button("キーフレーム補間", |ui| {
-                for k in KeyKind::ALL {
-                    if ui.button(k.label()).clicked() {
-                        ui.close_menu();
-                        if let Some(sel) = &key {
-                            self.edit_layer("キーフレーム補間", false, &sel.layer, |l| {
-                                // プロパティを指定していなければ、その時刻にキーを持つ全プロパティに適用する
-                                let mut paths = Vec::new();
-                                visit_layer(l, &mut |p, _| paths.push(p.to_string()));
-                                for p in paths.iter().filter(|p| sel.path.as_ref().is_none_or(|s| s == *p)) {
-                                    apply_edit(l, p, sel.at, &PropEdit::Kind(k));
-                                }
-                            });
-                        }
-                    }
-                }
-            });
-            if ui.button("選択中のキーフレームを削除").clicked() {
-                ui.close_menu();
-                self.delete_selected_key();
-            }
-        });
+        self.key_menu(ui);
+        if ui.add_enabled(self.selected.is_some(), egui::Button::new("選択レイヤーのキーフレームをすべて選択")).clicked() {
+            ui.close_menu();
+            self.select_all_keys();
+        }
         ui.separator();
         if ui.button("グラフエディター").clicked() {
             ui.close_menu();
@@ -742,17 +703,6 @@ impl App {
         ui.checkbox(&mut self.snap, "スナップ");
         ui.separator();
         ui.menu_button("オーディオから生成", |ui| self.audio_menu(ctx, ui));
-    }
-
-    /// 選択中のキーフレームを消す（プロパティの指定が無ければ、その時刻の全プロパティのキー）。
-    pub(crate) fn delete_selected_key(&mut self) {
-        let Some(sel) = self.selected_key.take() else { return };
-        self.edit_layer("キーフレーム削除", false, &sel.layer, |l| match &sel.path {
-            Some(path) => apply_edit(l, path, sel.at, &PropEdit::RemoveKey),
-            None => {
-                edit::delete_keys(l, sel.at);
-            }
-        });
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui) {

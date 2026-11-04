@@ -14,6 +14,7 @@ use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Rec
 use znd_audio::analysis::spectrogram;
 use znd_audio::SAMPLE_RATE;
 use znd_core::*;
+use znd_core::keys;
 
 /// 左ペイン（レイヤーの列）の既定の幅。
 pub(crate) const LEFT_DEFAULT: f32 = 520.0;
@@ -52,11 +53,11 @@ impl TlView {
     }
 }
 
-/// 選択中のキーフレーム。`path` が `None` なら、その時刻にあるレイヤーの全プロパティのキー。
-#[derive(Clone, PartialEq)]
+/// 選択中のキーフレーム 1 つ（レイヤー・プロパティのパス・時刻）。
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) struct KeySel {
     pub layer: LayerId,
-    pub path: Option<String>,
+    pub path: String,
     pub at: Time,
 }
 
@@ -73,11 +74,19 @@ pub(crate) enum TlDrag {
     TrimOut {
         layer: LayerId,
     },
-    /// 時刻 `at` にあるキーフレームの移動。`path` が `None` なら全プロパティ。
+    /// 選択中のキーフレームの移動（`pivot` があれば、そこを中心にした伸縮）。
+    /// `grab` は掴んだキーの元の時刻、`last` はいまの時刻。`orig` / `base` はドラッグを始めたときの選択とレイヤー。
     Keys {
-        layer: LayerId,
-        path: Option<String>,
-        at: Time,
+        grab: Time,
+        last: Time,
+        pivot: Option<Time>,
+        orig: Vec<KeySel>,
+        base: Vec<Layer>,
+    },
+    /// 何もないところからドラッグして、矩形の中のキーフレームを選ぶ。`base` は始めたときの選択（Shift / ⌘ で足す場合）。
+    Marquee {
+        start: egui::Pos2,
+        base: Vec<KeySel>,
     },
     /// 左の行を掴んで、重ね順を並び替える。
     Reorder {
@@ -400,6 +409,7 @@ impl App {
         }
 
         // レイヤーの行
+        self.marquee_hits.clear();
         // 表示されていない行の位置は覚えておかない
         self.anchors.retain(|k, _| !k.starts_with("row:"));
         let search = self.tl_search.trim().to_lowercase();
@@ -467,6 +477,7 @@ impl App {
                 }
             });
         self.tl_reorder(ui, comp, left_of(area), &blocks, rows_end);
+        self.tl_marquee(ui, Rect::from_min_max(pos2(time_l, area.top()), pos2(time_r, area.bottom())));
 
         // 現在時刻インジケーター（ルーラーから行の下端まで）
         let lanes = Rect::from_min_max(pos2(time_l, head.top() + WORK_H), pos2(time_r, area.bottom()));
@@ -537,6 +548,101 @@ impl App {
             // ドラッグごとに取り消しの単位を分ける
             self.last_edit = None;
         }
+    }
+
+    /// 矩形選択: 行が拾ったキーで選択を置き換え、矩形を描く。
+    fn tl_marquee(&mut self, ui: &egui::Ui, lanes: Rect) {
+        let Some(TlDrag::Marquee { start, base }) = &self.tl_drag else { return };
+        let Some(pos) = ui.input(|i| i.pointer.latest_pos()) else { return };
+        let r = Rect::from_two_pos(*start, pos).intersect(lanes);
+        let mut sel = base.clone();
+        for k in self.marquee_hits.drain(..) {
+            if !sel.contains(&k) {
+                sel.push(k);
+            }
+        }
+        self.selected_keys = sel;
+        let p = ui.painter().with_clip_rect(lanes);
+        p.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(120, 170, 255, 28));
+        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(120, 170, 255)));
+    }
+
+    /// キーの並ぶ段に共通の操作。`times` は段に描いたキーの時刻、`prefix` はキーを拾うプロパティ（`None` で全部）。
+    /// 矩形選択の当たり判定、キーを掴んだときのドラッグ開始（Alt で伸縮）、ドラッグ中の移動、クリックでの選択を行う。
+    /// `marquee_from_empty` なら、キーの無いところから始めたドラッグを矩形選択にする。
+    /// キーを掴んだ・矩形選択を始めたなど、この段がポインタ操作を受け持ったら true。
+    #[allow(clippy::too_many_arguments)]
+    fn key_lane(
+        &mut self,
+        ui: &egui::Ui,
+        comp: &Composition,
+        layer: &Layer,
+        resp: &egui::Response,
+        lane: Rect,
+        times: &[Time],
+        prefix: Option<&str>,
+        view: TlView,
+        marquee_from_empty: bool,
+    ) -> bool {
+        let fr = comp.frame_rate;
+        let x_of = |t: Time| view.x(t.seconds() * fr.fps());
+        let key_at = |px: f32| {
+            times
+                .iter()
+                .copied()
+                .filter(|t| (x_of(*t) - px).abs() <= GRAB)
+                .min_by(|a, b| (x_of(*a) - px).abs().total_cmp(&(x_of(*b) - px).abs()))
+        };
+        // 矩形選択の当たり判定
+        if let (Some(TlDrag::Marquee { start, .. }), Some(pos)) = (&self.tl_drag, ui.input(|i| i.pointer.latest_pos())) {
+            let r = Rect::from_two_pos(*start, pos);
+            if r.bottom() >= lane.top() && r.top() <= lane.bottom() {
+                for t in times.iter().filter(|t| x_of(**t) >= r.left() - 2.0 && x_of(**t) <= r.right() + 2.0) {
+                    let picked = crate::keyops::expand(layer, prefix, *t);
+                    self.marquee_hits.extend(picked);
+                }
+            }
+        }
+        let (additive, alt) = ui.input(|i| (i.modifiers.shift || i.modifiers.command, i.modifiers.alt));
+        let mut handled = false;
+        if resp.drag_started() && !layer.locked && self.tl_drag.is_none() {
+            if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                if let Some(at) = key_at(origin.x) {
+                    self.select_layer(&layer.id);
+                    self.begin_key_drag(comp, crate::keyops::expand(layer, prefix, at), at, alt);
+                    handled = true;
+                } else if marquee_from_empty {
+                    let base = if additive { self.selected_keys.clone() } else { Vec::new() };
+                    self.tl_drag = Some(TlDrag::Marquee { start: origin, base });
+                    handled = true;
+                }
+            }
+        }
+        if resp.dragged() && matches!(self.tl_drag, Some(TlDrag::Keys { .. })) {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                // Alt は伸縮の開始に使うので、吸着の解除は Shift だけ
+                let snap = self.snap && !ui.input(|i| i.modifiers.shift);
+                self.drag_keys(comp, view, pos.x, snap);
+                handled = true;
+            }
+        }
+        let hit = resp.interact_pointer_pos().and_then(|p| key_at(p.x));
+        if resp.clicked() {
+            self.select_layer(&layer.id);
+            let picked = hit.map(|at| crate::keyops::expand(layer, prefix, at)).unwrap_or_default();
+            if hit.is_some() || !additive {
+                self.click_keys(picked, additive);
+            }
+            handled |= hit.is_some();
+        }
+        if resp.secondary_clicked() {
+            self.select_layer(&layer.id);
+            // 選択に入っていないキーを右クリックしたら、それだけを選ぶ
+            if let Some(at) = hit.filter(|at| !self.is_key_selected(&layer.id, prefix, *at)) {
+                self.selected_keys = crate::keyops::expand(layer, prefix, at);
+            }
+        }
+        handled
     }
 
     /// 再生ヘッドをポインタの位置へ（ルーラー・マーカーの段・波形で共通）。Shift を押している間はスナップしない。
@@ -952,7 +1058,7 @@ impl App {
     }
 
     /// ポインタの位置 `x` を時刻にする。`snap` なら、ビートグリッド・マーカー・再生ヘッド・他のレイヤーの端に吸着する。
-    fn pointer_time(&self, comp: &Composition, view: TlView, x: f32, exclude: &LayerId, snap: bool) -> Time {
+    pub(crate) fn pointer_time(&self, comp: &Composition, view: TlView, x: f32, exclude: &LayerId, snap: bool) -> Time {
         let fr = comp.frame_rate;
         let t = Time::from_seconds(view.frame(x) / fr.fps());
         if !snap {
@@ -963,7 +1069,7 @@ impl App {
         edit::snap_time(comp, t, Some(exclude), &[fr.frame_to_time(self.frame)], tolerance)
     }
 
-    fn select_layer(&mut self, id: &LayerId) {
+    pub(crate) fn select_layer(&mut self, id: &LayerId) {
         self.selected = Some(id.clone());
         self.selected_footage = None;
     }
@@ -977,7 +1083,7 @@ impl App {
         });
         if self.shared.comp(&self.comp_id).is_some_and(|c| c.layer(&created).is_some()) {
             self.select_layer(&created);
-            self.selected_key = None;
+            self.selected_keys.clear();
         }
     }
 
@@ -1000,9 +1106,7 @@ impl App {
         if self.selected.as_ref() == Some(id) {
             self.selected = None;
         }
-        if self.selected_key.as_ref().is_some_and(|k| &k.layer == id) {
-            self.selected_key = None;
-        }
+        self.selected_keys.retain(|k| &k.layer != id);
         self.status = format!("「{}」を削除しました（⌘Z で元に戻せます）", layer.name);
     }
 
@@ -1078,6 +1182,16 @@ impl App {
                 self.reorder_layer(id, to);
             }
         }
+        ui.menu_button("コマ打ち", |ui| {
+            for n in 1..=4u32 {
+                let label = if n == 1 { "なし（1 コマ）".to_string() } else { format!("{n} コマ打ち") };
+                let shortcut = format!("⌥{n}");
+                if ui.add(egui::SelectableLabel::new(layer.hold_frames == n, label)).on_hover_text(shortcut).clicked() {
+                    ui.close_menu();
+                    self.edit_layer("コマ打ち", false, id, |l| l.hold_frames = n);
+                }
+            }
+        });
         ui.separator();
         if ui.button(if layer.locked { "ロックを解除" } else { "ロック" }).clicked() {
             ui.close_menu();
@@ -1285,7 +1399,7 @@ impl App {
         // 畳んでいる間は、キーフレームのある時刻を小さな点で示す（掴むと、その時刻の全プロパティのキーが動く）
         let keys = if open { Vec::new() } else { key_times(layer) };
         for t in &keys {
-            let picked = self.selected_key.as_ref().is_some_and(|k| k.layer == id && k.path.is_none() && k.at == *t);
+            let picked = self.is_key_selected(&id, None, *t);
             let c = pos2(x_of(*t), bar.center().y);
             p.circle(
                 c,
@@ -1320,16 +1434,21 @@ impl App {
                 ui.ctx().set_cursor_icon(icon);
             }
         }
-        if resp.drag_started() && !locked {
-            if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+        // バーの端にキーフレームが重なっているときは、バーの外側を掴めばトリム、内側ならキーフレーム
+        let origin = ui.input(|i| i.pointer.press_origin());
+        let outside_edge = origin.is_some_and(|o| {
+            let x = o.x;
+            (x <= x0 && x0 - x <= GRAB) || (x >= x1 && x - x1 <= GRAB)
+        });
+        let off_bar = origin.is_some_and(|o| o.x < x0 - GRAB || o.x > x1 + GRAB);
+        // キーフレームの操作と矩形選択（バーの外から始めたとき）
+        let lane_keys = if outside_edge && resp.drag_started() { Vec::new() } else { keys.clone() };
+        let by_lane = self.key_lane(ui, comp, layer, &resp, time, &lane_keys, None, view, off_bar);
+        if resp.drag_started() && !locked && !by_lane && self.tl_drag.is_none() {
+            if let Some(origin) = origin {
                 let x = origin.x;
                 self.select_layer(&id);
-                // バーの端にキーフレームが重なっているときは、バーの外側を掴めばトリム、内側ならキーフレーム
-                let outside_edge = (x <= x0 && x0 - x <= GRAB) || (x >= x1 && x - x1 <= GRAB);
-                self.tl_drag = if let Some(at) = key_at(x).filter(|_| !outside_edge) {
-                    self.selected_key = Some(KeySel { layer: id.clone(), path: None, at });
-                    Some(TlDrag::Keys { layer: id.clone(), path: None, at })
-                } else if (x - x0).abs() <= GRAB {
+                self.tl_drag = if (x - x0).abs() <= GRAB {
                     Some(TlDrag::TrimIn { layer: id.clone() })
                 } else if (x - x1).abs() <= GRAB {
                     Some(TlDrag::TrimOut { layer: id.clone() })
@@ -1360,6 +1479,10 @@ impl App {
                         let dt = target - layer.in_point;
                         if dt != Time::ZERO {
                             self.edit_layer("レイヤーを移動", true, lid, |l| edit::shift_layer(l, dt));
+                            // 一緒に動いたキーの選択も追従させる
+                            for k in self.selected_keys.iter_mut().filter(|k| k.layer == *lid) {
+                                k.at += dt;
+                            }
                         }
                     }
                     Some(TlDrag::TrimIn { layer: lid }) => {
@@ -1374,30 +1497,19 @@ impl App {
                             self.edit_layer("アウト点を変更", true, lid, |l| edit::trim_out(l, t, fr));
                         }
                     }
-                    Some(TlDrag::Keys { layer: lid, path: None, at }) => {
-                        let t = self.pointer_time(comp, view, pos.x, lid, snap);
-                        if t != *at {
-                            let from = *at;
-                            self.edit_layer("キーフレームを移動", true, lid, |l| {
-                                edit::move_keys(l, from, t);
-                            });
-                            *at = t;
-                            self.selected_key = Some(KeySel { layer: lid.clone(), path: None, at: t });
-                        }
-                    }
                     _ => {}
                 }
                 self.tl_drag = drag;
             }
         }
-        if resp.clicked() {
-            self.select_layer(&id);
-            // キーフレームをクリックしたら選択する（Delete で削除、ドラッグで移動）
-            self.selected_key =
-                resp.interact_pointer_pos().and_then(|pos| key_at(pos.x)).map(|at| KeySel { layer: id.clone(), path: None, at });
-        }
+        let on_selected_key = resp.interact_pointer_pos().and_then(|p| key_at(p.x)).is_some_and(|t| self.is_key_selected(&id, None, t));
         if resp.secondary_clicked() {
-            self.select_layer(&id);
+            ui.data_mut(|d| d.insert_temp(rid.with("menu-keys"), on_selected_key));
+        }
+        let menu_keys: bool = ui.data(|d| d.get_temp(rid.with("menu-keys"))).unwrap_or(false);
+        if menu_keys {
+            resp.context_menu(|ui| self.key_menu(ui));
+            return rect;
         }
         resp.context_menu(|ui| self.layer_context_menu(ui, comp, layer));
         rect
@@ -1459,15 +1571,27 @@ impl App {
         }
         p.text(pos2(x + 15.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.0), color);
 
-        // 畳んでいるグループは、配下のキーフレームの時刻を点で示す
+        // 畳んでいるグループは、配下のキーフレームの時刻を点で示す（掴むと配下のキーがまとめて動く）
+        let fr = comp.frame_rate;
+        let time = Rect::from_min_max(pos2(view.left, rect.top()), pos2(view.left + view.width, rect.bottom()));
+        let resp = ui.interact(time, rid.with("keys"), Sense::click_and_drag());
+        let prefix = key.split_once('/').map(|(_, p)| p).unwrap_or(key);
+        let shown: &[Time] = if open { &[] } else { times };
         if !open {
-            let fr = comp.frame_rate;
-            let time = Rect::from_min_max(pos2(view.left, rect.top()), pos2(view.left + view.width, rect.bottom()));
             // 先頭フレームのキーフレームが欠けないよう、左の余白まで描く
             let p = ui.painter_at(time.expand2(vec2(6.0, 0.0)));
-            for t in times {
-                p.circle_filled(pos2(view.x(t.seconds() * fr.fps()), rect.center().y), 2.2, Color32::from_gray(0x9a));
+            for t in shown {
+                let picked = self.is_key_selected(&id, Some(prefix), *t);
+                p.circle_filled(
+                    pos2(view.x(t.seconds() * fr.fps()), rect.center().y),
+                    if picked { 2.8 } else { 2.2 },
+                    if picked { theme::KEY_SELECTED } else { Color32::from_gray(0x9a) },
+                );
             }
+        }
+        self.key_lane(ui, comp, layer, &resp, time, shown, Some(prefix), view, true);
+        if self.selected_keys.iter().any(|k| k.layer == id && keys::path_matches(&k.path, prefix)) {
+            resp.context_menu(|ui| self.key_menu(ui));
         }
     }
 
@@ -1562,6 +1686,7 @@ impl App {
         // ---------- 右: キーフレーム ----------
         let time = Rect::from_min_max(pos2(view.left, rect.top()), pos2(view.left + view.width, rect.bottom()));
         let resp = ui.interact(time, rid.with("keys"), Sense::click_and_drag());
+        self.anchors.insert(format!("row:prop:{}:{}", id.0, row.path), time);
         // 先頭フレームのキーフレームが欠けないよう、左の余白まで描く
         let p = ui.painter_at(time.expand2(vec2(6.0, 0.0)));
         let x_of = |t: Time| view.x(t.seconds() * fr.fps());
@@ -1570,83 +1695,39 @@ impl App {
             // 最初と最後のキーの間を線で結ぶ（アニメーションしている区間）
             p.hline(x_of(a.0)..=x_of(b.0), cy, Stroke::new(1.0_f32, Color32::from_gray(0x48)));
         }
-        let is_sel = |t: Time| {
-            self.selected_key.as_ref().is_some_and(|k| k.layer == id && k.at == t && k.path.as_deref().is_none_or(|p| p == row.path))
-        };
         for (t, kind) in &row.keys {
-            key_shape(&p, pos2(x_of(*t), cy), *kind, is_sel(*t));
+            key_shape(&p, pos2(x_of(*t), cy), *kind, self.is_key_selected(&id, Some(&row.path), *t));
         }
-        let key_at = |px: f32| {
-            row.keys
-                .iter()
-                .map(|k| k.0)
-                .filter(|t| (x_of(*t) - px).abs() <= GRAB)
-                .min_by(|a, b| (x_of(*a) - px).abs().total_cmp(&(x_of(*b) - px).abs()))
-        };
-        let pick = |at: Time| KeySel { layer: id.clone(), path: Some(row.path.clone()), at };
-        if resp.hover_pos().is_some_and(|h| key_at(h.x).is_some()) && self.tl_drag.is_none() {
+        let key_at = |px: f32| row.keys.iter().map(|k| k.0).any(|t| (x_of(t) - px).abs() <= GRAB);
+        if resp.hover_pos().is_some_and(|h| key_at(h.x)) && self.tl_drag.is_none() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if resp.drag_started() && !layer.locked {
-            if let Some(at) = ui.input(|i| i.pointer.press_origin()).and_then(|o| key_at(o.x)) {
-                self.select_layer(&id);
-                self.selected_key = Some(pick(at));
-                self.tl_drag = Some(TlDrag::Keys { layer: id.clone(), path: Some(row.path.clone()), at });
-            }
+        let times: Vec<Time> = row.keys.iter().map(|k| k.0).collect();
+        if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
+            // 貼り付け先のプロパティ
+            self.key_target = Some((id.clone(), row.path.clone()));
         }
-        if resp.dragged() {
-            if let (Some(pos), Some(TlDrag::Keys { layer: lid, path: Some(path), at })) = (resp.interact_pointer_pos(), &self.tl_drag) {
-                if *lid == id && *path == row.path {
-                    let from = *at;
-                    let snap = self.snap && !ui.input(|i| i.modifiers.shift);
-                    let to = self.pointer_time(comp, view, pos.x, &id, snap);
-                    // 既にキーがある時刻へは重ねない
-                    if to != from && !row.keys.iter().any(|k| k.0 == to) {
-                        edit = Some((from, PropEdit::MoveKey { from, to }));
-                        self.tl_drag = Some(TlDrag::Keys { layer: id.clone(), path: Some(row.path.clone()), at: to });
-                        self.selected_key = Some(pick(to));
-                    }
-                }
-            }
-        }
-        if resp.clicked() || resp.secondary_clicked() {
-            self.select_layer(&id);
-            // キーフレームをクリックしたら選択する（Delete で削除、ドラッグで移動、右クリックで補間の変更）
-            self.selected_key = resp.interact_pointer_pos().and_then(|pos| key_at(pos.x)).map(pick);
-        }
-        let target = self.selected_key.clone().filter(|k| k.layer == id && k.path.as_deref() == Some(row.path.as_str()));
-        resp.context_menu(|ui| match &target {
-            Some(sel) => {
-                let current = row.keys.iter().find(|k| k.0 == sel.at).map(|k| k.1);
-                ui.label(egui::RichText::new("キーフレーム補間").size(10.0).color(dim));
-                for k in KeyKind::ALL {
-                    if ui.selectable_label(current == Some(k), k.label()).clicked() {
-                        edit = Some((sel.at, PropEdit::Kind(k)));
-                        ui.close_menu();
-                    }
-                }
+        self.key_lane(ui, comp, layer, &resp, time, &times, Some(&row.path), view, true);
+        let has_sel = self.selected_keys.iter().any(|k| k.layer == id && k.path == row.path);
+        resp.context_menu(|ui| {
+            if has_sel {
+                self.key_menu(ui);
                 ui.separator();
-                if ui.button("キーフレームを削除").clicked() {
-                    edit = Some((sel.at, PropEdit::RemoveKey));
-                    ui.close_menu();
-                }
             }
-            None => {
-                if ui.button("現在の時刻にキーフレームを追加").clicked() {
-                    edit = Some((now, PropEdit::AddKey));
-                    ui.close_menu();
-                }
-                if !row.is_path && ui.button("グラフエディターで開く").clicked() {
-                    self.graph_path = Some(row.path.clone());
-                    self.show.graph = true;
-                    ui.close_menu();
-                }
+            if ui.button("現在の時刻にキーフレームを追加").clicked() {
+                edit = Some((now, PropEdit::AddKey));
+                ui.close_menu();
+            }
+            if !row.is_path && ui.button("グラフエディターで開く").clicked() {
+                self.graph_path = Some(row.path.clone());
+                self.show.graph = true;
+                ui.close_menu();
             }
         });
 
         if let Some((at, e)) = edit {
-            if matches!(e, PropEdit::RemoveKey) && target.as_ref().is_some_and(|k| k.at == at) {
-                self.selected_key = None;
+            if matches!(e, PropEdit::RemoveKey) {
+                self.selected_keys.retain(|k| !(k.layer == id && k.path == row.path && k.at == at));
             }
             let path = row.path.clone();
             self.edit_layer(&label, e.coalesce(), &id, |l| apply_edit(l, &path, at, &e));

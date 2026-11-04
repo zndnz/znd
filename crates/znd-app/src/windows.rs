@@ -1,8 +1,10 @@
 //! フローティングウィンドウ: 書き出し・レンダーキュー、提出前チェック、履歴、版、レビュー、グラフエディター、スクリプト。
 
 use crate::panels::{apply_edit, path_label, KeyKind, PropEdit};
+use crate::timeline::KeySel;
 use crate::{base_dir, unix_now, App, Task};
 use eframe::egui::{self, pos2, Color32, Sense, Stroke};
+use znd_core::keys;
 use znd_core::visit::find_prop;
 use znd_core::*;
 use znd_media::{ExportContext, ExportSettings, Format, QueueJob};
@@ -515,13 +517,28 @@ impl App {
                 ui.selectable_value(&mut self.export_ui.speed_graph, false, "値グラフ");
                 ui.selectable_value(&mut self.export_ui.speed_graph, true, "速度グラフ");
             });
-            ui.horizontal(|ui| {
-                ui.label("現在のキー:");
+            // 操作の対象: このプロパティで選択中のキー。無ければ再生ヘッドの位置のキー
+            let mut targets: Vec<KeySel> =
+                self.selected_keys.iter().filter(|k| k.layer == id && k.path == path).cloned().collect();
+            if targets.is_empty() && prop.key_times().contains(&t_now) {
+                targets.push(KeySel { layer: id.clone(), path: path.clone(), at: t_now });
+            }
+            let mut style: Option<(&str, keys::KeyStyle)> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("対象のキー {} 個:", targets.len()));
                 for k in KeyKind::ALL {
                     if ui.small_button(k.label()).clicked() {
-                        edit = Some(PropEdit::Kind(k));
+                        style = Some(("キーフレーム補間", k.style()));
                     }
                 }
+                ui.menu_button("イージングプリセット", |ui| {
+                    for p in keys::EASE_PRESETS {
+                        if ui.button(p.name).clicked() {
+                            style = Some(("イージング", p.style));
+                            ui.close_menu();
+                        }
+                    }
+                });
             });
             ui.horizontal(|ui| {
                 // ハンドルの数値入力（速度と影響度）
@@ -529,23 +546,47 @@ impl App {
                 let id_out = ui.id().with("ease-out");
                 let mut e_in: (f64, f64) = ui.data_mut(|d| *d.get_temp_mut_or(id_in, (0.0, 33.3)));
                 let mut e_out: (f64, f64) = ui.data_mut(|d| *d.get_temp_mut_or(id_out, (0.0, 33.3)));
+                let ease = |e: (f64, f64)| Ease { speed: e.0, influence: (e.1 / 100.0).clamp(0.001, 1.0) };
                 ui.label("入る側");
                 ui.add(egui::DragValue::new(&mut e_in.0).prefix("速度 "));
                 ui.add(egui::DragValue::new(&mut e_in.1).range(0.1..=100.0).prefix("影響 ").suffix("%"));
                 if ui.small_button("適用").clicked() {
-                    edit = Some(PropEdit::Ease { incoming: true, speed: e_in.0, influence: e_in.1 / 100.0 });
+                    style = Some((
+                        "イーズ",
+                        keys::KeyStyle {
+                            interp_in: Some(Interp::Bezier),
+                            bezier_mode: Some(BezierMode::Manual),
+                            ease_in: Some(ease(e_in)),
+                            ..keys::KeyStyle::new()
+                        },
+                    ));
                 }
                 ui.label("出る側");
                 ui.add(egui::DragValue::new(&mut e_out.0).prefix("速度 "));
                 ui.add(egui::DragValue::new(&mut e_out.1).range(0.1..=100.0).prefix("影響 ").suffix("%"));
                 if ui.small_button("適用").clicked() {
-                    edit = Some(PropEdit::Ease { incoming: false, speed: e_out.0, influence: e_out.1 / 100.0 });
+                    style = Some((
+                        "イーズ",
+                        keys::KeyStyle {
+                            interp_out: Some(Interp::Bezier),
+                            bezier_mode: Some(BezierMode::Manual),
+                            ease_out: Some(ease(e_out)),
+                            ..keys::KeyStyle::new()
+                        },
+                    ));
                 }
                 ui.data_mut(|d| {
                     d.insert_temp(id_in, e_in);
                     d.insert_temp(id_out, e_out);
                 });
             });
+            if let Some((label, st)) = style {
+                if targets.is_empty() {
+                    self.status = "キーフレームを選択するか、再生ヘッドをキーに合わせてください".into();
+                } else {
+                    self.style_keys(label, &targets, st);
+                }
+            }
 
             let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(200.0, 160.0)), Sense::click_and_drag());
             let p = ui.painter_at(rect);
@@ -623,6 +664,11 @@ impl App {
                         .min_by(|a, b| (x_of(*a) - pos.x).abs().total_cmp(&(x_of(*b) - pos.x).abs()))
                         .filter(|t| (x_of(*t) - pos.x).abs() < 10.0);
                     ui.data_mut(|d| d.insert_temp(drag_id, nearest));
+                    if let Some(t) = nearest {
+                        let k = KeySel { layer: id.clone(), path: path.clone(), at: t };
+                        let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+                        self.click_keys(vec![k], additive && resp.clicked());
+                    }
                     match nearest {
                         Some(t) => self.set_frame(fr.time_to_frame(t), false),
                         None => self.set_frame(((pos.x - rect.left()) / rect.width() * total as f32) as i64, true),
@@ -637,6 +683,9 @@ impl App {
                     let to = fr.frame_to_time(frame);
                     if to != from && !keys.contains(&to) {
                         edit = Some(PropEdit::MoveKey { from, to });
+                        for k in self.selected_keys.iter_mut().filter(|k| k.layer == id && k.path == path && k.at == from) {
+                            k.at = to;
+                        }
                         ui.data_mut(|d| d.insert_temp(drag_id, Some(to)));
                         self.frame = frame;
                     } else if !self.export_ui.speed_graph && dims == 1 {
@@ -720,6 +769,12 @@ impl App {
                     ("Option + クリック", "マスクの頂点: 角 ⇄ 滑らか"),
                     ("Delete", "選択中のマスクの頂点／キーフレームを削除（どちらも選んでいなければ選択中のレイヤー）"),
                     ("⌘D", "選択中のレイヤーを複製"),
+                    ("キーをクリック / Shift・⌘ + クリック", "キーフレームを選択 / 選択に足す・外す"),
+                    ("空いたところからドラッグ", "矩形でキーフレームを選択（Shift・⌘ で追加）"),
+                    ("選択キーをドラッグ", "まとめて移動（ビートグリッド等に吸着）"),
+                    ("Alt + 選択の先頭／末尾のキーをドラッグ", "選択キーの時間を伸縮（反対の端が中心）"),
+                    ("⌘C / ⌘V", "キーフレームをコピー／再生ヘッドの位置に貼り付け"),
+                    ("⌥1 / ⌥2 / ⌥3 / ⌥4", "コマ打ち: なし / 2 / 3 / 4 コマ"),
                     ("レイヤーの行をドラッグ", "重ね順を並び替え（右クリックで複製・削除などのメニュー）"),
                     ("⌘ + ホイール", "タイムラインを拡大・縮小（ホイールだけで横スクロール）"),
                     ("⌘Z / ⇧⌘Z", "取り消す／やり直す"),

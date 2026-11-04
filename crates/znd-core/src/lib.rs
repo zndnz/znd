@@ -9,6 +9,7 @@ pub mod edit;
 pub mod effect;
 pub mod eval;
 pub mod io;
+pub mod keys;
 pub mod licenses;
 pub mod log;
 pub mod lyrics;

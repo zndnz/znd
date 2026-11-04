@@ -11,6 +11,9 @@
 //! tmove LAYER_ID FRAME   タイムラインの、そのレイヤーの行のフレーム位置へ
 //! lmove LAYER_ID [DY]    タイムラインの左の、そのレイヤーの名前の上へ（DY は行の中心からの上下のずれ）
 //! rmove FRAME            タイムラインのルーラーのフレーム位置へ
+//! pmove LAYER_ID PATH FRAME  タイムラインの、そのプロパティの行のフレーム位置へ（レイヤーを展開しておくこと）
+//! open LAYER_ID          タイムラインでそのレイヤーを展開する
+//! copy / paste           ⌘C / ⌘V（キーフレームのコピー・貼り付け）
 //! move X Y               画面座標へ
 //! down / up              左ボタンを押す／離す
 //! click / dclick         その場でクリック／ダブルクリック
@@ -121,6 +124,19 @@ impl App {
                 Some(r) => script.move_to(pos2(r.left() + 20.0, r.center().y + num(1))),
                 None => fail("そのレイヤーの行がタイムラインにありません"),
             },
+            "pmove" => match (args.get(1).and_then(|p| self.anchors.get(&format!("row:prop:{}:{p}", args[0]))), self.tl_view) {
+                (Some(r), Some(view)) => script.move_to(pos2(view.x(num(2) as f64), r.center().y)),
+                _ => fail("そのプロパティの行がタイムラインにありません"),
+            },
+            "open" => {
+                if let Some(id) = args.first() {
+                    if !self.tl_is_open(id, false) {
+                        self.tl_open.insert(id.to_string());
+                    }
+                }
+            }
+            "copy" => script.pending.push(Event::Copy),
+            "paste" => script.pending.push(Event::Paste(String::new())),
             "rmove" => match (self.anchors.get("ruler"), self.tl_view) {
                 (Some(r), Some(view)) => script.move_to(pos2(view.x(num(0) as f64), r.center().y)),
                 _ => fail("タイムラインがまだ表示されていません"),
