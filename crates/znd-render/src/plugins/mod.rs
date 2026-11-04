@@ -16,6 +16,7 @@
 //! `plugin.json` を持つフォルダ（パッケージ、`package`）は、エフェクトに加えてコマンド・パネル・
 //! 出力フィルター・エクスプレッション用ライブラリを提供できる（`hooks`）。
 
+pub mod guard;
 pub mod hooks;
 pub mod native;
 pub mod ofx;
@@ -375,12 +376,14 @@ pub fn missing(project: &Project) -> Vec<(String, String)> {
     out
 }
 
-/// プラグインのエフェクトを適用する。読み込まれていなければ元の画像のまま返す。
+/// プラグインのエフェクトを適用する。読み込まれていない・無効にした・不具合で止めたものは元の画像のまま返す。
 pub fn apply(kind: &str, p: &EvalParams, buf: FrameBuf, ctx: &FxContext) -> FrameBuf {
     let effect = registry().lock().unwrap().effects.get(kind).cloned();
     match effect {
         Some(e) => {
-            let mut out = e.apply(p, buf, ctx);
+            // パニックしたら元の画像を通す（そのために、入力を先に複製しておく）
+            let fallback = buf.clone();
+            let mut out = guard::call(kind, || fallback, || e.apply(p, buf, ctx));
             // アルファが 0..1 を外れると後段の合成が破綻するので、ここで収める
             out.data.chunks_exact_mut(4).for_each(|px| px[3] = px[3].clamp(0.0, 1.0));
             out

@@ -7,6 +7,7 @@ mod keyops;
 mod panels;
 mod plugin_host;
 mod preview;
+mod rescue;
 mod theme;
 mod timeline;
 mod tools;
@@ -36,6 +37,7 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(800);
 const IDLE_LIMIT: Duration = Duration::from_secs(120);
 
 fn main() -> eframe::Result<()> {
+    rescue::install_panic_hook();
     // 使い方: znd-app [プロジェクト.znd.json] [--frame N] [--select レイヤーID] [--show ウィンドウ名] [--screenshot 出力.png]
     // （--select / --show / --screenshot は、画面の自動確認用）
     let mut project_path = None;
@@ -183,15 +185,17 @@ impl<T: Send + 'static> Task<T> {
                 ctx.request_repaint();
                 !cancel.load(Ordering::Relaxed)
             };
-            let r = f(&mut report);
-            *result.lock().unwrap() = Some(r);
+            // 書き出しなどが内部エラーでパニックしても、作業中のアプリは止めず、失敗として伝える
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut report)))
+                .unwrap_or_else(|e| Err(format!("内部エラーで中断しました: {}", preview::panic_text(&*e))));
+            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
             ctx.request_repaint();
         });
         task
     }
 
     pub fn take(&self) -> Option<Result<T, String>> {
-        self.result.lock().unwrap().take()
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn fraction(&self) -> f32 {
@@ -327,6 +331,8 @@ pub struct App {
     pub(crate) plugins: plugin_host::PluginHost,
 
     recovery: Option<PathBuf>,
+    /// 前回の起動で、処理中に異常終了したプラグイン（種類名）。
+    pub(crate) plugin_crash: Option<String>,
     show: windows::Shown,
     screenshot: Option<Screenshot>,
 
@@ -432,6 +438,7 @@ impl App {
             plugin_report: znd_render::plugins::scan_default().errors,
             plugins: Default::default(),
             recovery: None,
+            plugin_crash: None,
             show: windows::Shown::default(),
             screenshot: screenshot.map(|path| Screenshot { path, started: Instant::now(), requested: false }),
             session_start: unix_now(),
@@ -441,6 +448,11 @@ impl App {
             timelapse: false,
             last_capture: Instant::now(),
         };
+        // 前回プラグインの処理中に落ちていたら尋ねる。記録を読んでから、今回の記録を始める
+        app.plugin_crash = znd_render::plugins::guard::take_crash_record();
+        if let Err(e) = znd_render::plugins::guard::install_crash_journal() {
+            eprintln!("プラグインの異常終了の記録を始められません: {e}");
+        }
         let (keymap, warnings) = keymap::Keymap::load();
         app.keymap = keymap;
         if !warnings.is_empty() {
@@ -560,6 +572,11 @@ impl App {
     fn publish(&mut self) {
         self.revision += 1;
         self.shared = Arc::new(self.project.clone());
+    }
+
+    /// プロジェクトは変えずに、プレビューを作り直させる（プラグインの有効・無効を切り替えたときなど）。
+    pub(crate) fn publish_refresh(&mut self) {
+        self.publish();
     }
 
     /// プロジェクトを変更する唯一の入口。`coalesce` が true なら、直前の同名編集と取り消し単位をまとめる。
@@ -1267,6 +1284,8 @@ impl eframe::App for App {
             ctx.request_repaint_after(AUTOSAVE_INTERVAL);
         }
         self.engine.request(&self.shared, self.revision, &self.comp_id, self.frame, self.downsample);
+        // 異常終了したときの退避先（保存先が変わることもあるので毎フレーム覚え直す。Arc の複製なので軽い）
+        rescue::remember(&self.shared, &self.autosave_base());
 
         // エクスプレッションのエラーは、編集があったときだけ検査し直す
         if self.expr_errors.0 != self.revision {

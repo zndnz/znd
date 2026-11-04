@@ -5384,6 +5384,7 @@ dependencies = [
  "cc",
  "gltf",
  "image",
+ "libc",
  "libloading",
  "rayon",
  "serde",

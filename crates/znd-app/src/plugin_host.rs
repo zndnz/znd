@@ -467,7 +467,63 @@ impl App {
         self.publish();
     }
 
+    /// 前回の起動でプラグインの処理中に異常終了していたら、そのプラグインを無効にするか尋ねる。
+    pub(crate) fn plugin_crash_window(&mut self, ctx: &egui::Context) {
+        let Some(kind) = self.plugin_crash.clone() else { return };
+        let label = plugins::loaded().into_iter().find(|i| i.kind == kind).map(|i| i.label).unwrap_or_else(|| kind.clone());
+        egui::Window::new("プラグインによる異常終了").collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(format!("前回、プラグイン「{label}」の処理中にアプリが異常終了しました。"));
+            ui.weak("無効にすると、このエフェクトは元の画像をそのまま通します（プロジェクトの設定は残ります）。プラグインのウィンドウからいつでも戻せます。");
+            ui.horizontal(|ui| {
+                if ui.button("このプラグインを無効にする").clicked() {
+                    match plugins::guard::set_disabled(&kind, true) {
+                        Ok(()) => self.status = format!("「{label}」を無効にしました"),
+                        Err(e) => self.status = format!("無効にできません: {e}"),
+                    }
+                    self.plugin_crash = None;
+                    self.publish_refresh();
+                }
+                if ui.button("そのまま使う").clicked() {
+                    self.plugin_crash = None;
+                }
+            });
+        });
+    }
+
     fn plugin_lists(&mut self, ui: &mut egui::Ui) {
+        // 無効にしたもの・不具合で止めたもの
+        let disabled = plugins::guard::disabled();
+        let faults = plugins::guard::faults();
+        if !disabled.is_empty() || !faults.is_empty() {
+            ui.colored_label(theme::WARN, egui::RichText::new("使っていないプラグイン").strong());
+            for kind in &disabled {
+                ui.horizontal(|ui| {
+                    ui.label(format!("無効: {kind}"));
+                    if ui.small_button("有効に戻す").clicked() {
+                        if let Err(e) = plugins::guard::set_disabled(kind, false) {
+                            self.status = format!("戻せません: {e}");
+                        }
+                        self.publish_refresh();
+                    }
+                });
+            }
+            for (kind, why) in &faults {
+                ui.horizontal(|ui| {
+                    ui.label(format!("停止中: {kind}"));
+                    if plugins::guard::is_quarantined(kind) && ui.small_button("もう一度使う").clicked() {
+                        plugins::guard::release(kind);
+                        self.publish_refresh();
+                    }
+                    if !plugins::guard::is_disabled(kind) && ui.small_button("無効にする").clicked() {
+                        if let Err(e) = plugins::guard::set_disabled(kind, true) {
+                            self.status = format!("無効にできません: {e}");
+                        }
+                    }
+                });
+                ui.weak(why);
+            }
+            ui.separator();
+        }
         // 止めているもの
         let blocked = plugins::blocked();
         if !blocked.is_empty() {

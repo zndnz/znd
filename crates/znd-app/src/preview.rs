@@ -17,6 +17,11 @@ use znd_render::fingerprint::Fingerprinter;
 use znd_render::{encode_rgba8, RenderOptions, Renderer};
 use znd_script::ExprEngine;
 
+/// 他のスレッドがパニックしてもロックを取れるようにする（キャッシュの中身は壊れないので、そのまま使う）。
+fn relock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 表示用に 8bit へ変換済みのフレーム。
 pub struct Preview {
     pub width: usize,
@@ -124,7 +129,7 @@ impl PreviewEngine {
     /// 表示したい状態を伝える。リビジョンが変わったら指紋を計算し直す（キャッシュ自体は残す）。
     pub fn request(&self, project: &Arc<Project>, revision: u64, comp: &CompId, frame: i64, downsample: u32) {
         let (lock, cvar) = &*self.shared;
-        let mut s = lock.lock().unwrap();
+        let mut s = relock(lock);
         let stale = s.job.as_ref().is_none_or(|j| j.revision != revision || &j.comp != comp);
         let changed = stale || s.job.as_ref().is_none_or(|j| j.frame != frame || j.downsample != downsample);
         if !changed {
@@ -157,7 +162,7 @@ impl PreviewEngine {
     }
 
     pub fn get(&self, frame: i64, downsample: u32) -> Option<Arc<Preview>> {
-        let mut s = self.shared.0.lock().unwrap();
+        let mut s = relock(&self.shared.0);
         let k = Self::key(&mut s, frame, downsample)?;
         s.cache.get(&k).cloned()
     }
@@ -168,19 +173,19 @@ impl PreviewEngine {
 
     /// `frames` のうちキャッシュ済みのもの（タイムラインの緑のバー用）。
     pub fn cached_frames(&self, total: i64, downsample: u32) -> Vec<i64> {
-        let mut s = self.shared.0.lock().unwrap();
+        let mut s = relock(&self.shared.0);
         (0..total).filter(|f| Self::key(&mut s, *f, downsample).is_some_and(|k| s.cache.contains_key(&k))).collect()
     }
 
     pub fn error(&self) -> Option<String> {
-        self.shared.0.lock().unwrap().error.clone()
+        relock(&self.shared.0).error.clone()
     }
 }
 
 impl Drop for PreviewEngine {
     fn drop(&mut self) {
         let (lock, cvar) = &*self.shared;
-        lock.lock().unwrap().shutdown = true;
+        relock(lock).shutdown = true;
         cvar.notify_all();
     }
 }
@@ -221,7 +226,7 @@ fn worker(
     loop {
         // やることができるまで待つ
         let (job, frames) = {
-            let mut s = lock.lock().unwrap();
+            let mut s = relock(lock);
             loop {
                 if s.shutdown {
                     return;
@@ -235,7 +240,7 @@ fn worker(
                         }
                     }
                 }
-                s = cvar.wait(s).unwrap();
+                s = cvar.wait(s).unwrap_or_else(|e| e.into_inner());
             }
         };
 
@@ -256,15 +261,19 @@ fn worker(
                     let screening = ScreeningReport { clipped_white: 0.0, crushed_black: 0.0, banding_risk: 0.0, overlay: Vec::new() };
                     return (*key, Ok(Preview { width, height, rgba, screening }));
                 }
-                let r = renderer
-                    .render_frame(&job.comp, comp.frame_rate.frame_to_time(*f), opts)
-                    .map(|buf| Preview {
-                        width: buf.width,
-                        height: buf.height,
-                        rgba: encode_rgba8(&buf, Some(*f as u32), &xf),
-                        screening: screening_report(&buf, &xf),
-                    })
-                    .map_err(|e| e.to_string());
+                // エフェクトなどの内部エラーでパニックしても、プレビューのスレッドとアプリは止めない
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    renderer
+                        .render_frame(&job.comp, comp.frame_rate.frame_to_time(*f), opts)
+                        .map(|buf| Preview {
+                            width: buf.width,
+                            height: buf.height,
+                            rgba: encode_rgba8(&buf, Some(*f as u32), &xf),
+                            screening: screening_report(&buf, &xf),
+                        })
+                        .map_err(|e| e.to_string())
+                }))
+                .unwrap_or_else(|e| Err(format!("フレーム {f} のレンダリング中に内部エラーが起きました: {}", panic_text(&*e))));
                 if let (Some(d), Ok(p)) = (&disk, &r) {
                     d.put(*key, p);
                 }
@@ -272,7 +281,7 @@ fn worker(
             })
             .collect();
 
-        let mut s = lock.lock().unwrap();
+        let mut s = relock(lock);
         for (key, r) in results {
             match r {
                 Ok(p) => {
@@ -301,4 +310,9 @@ fn worker(
         drop(s);
         repaint();
     }
+}
+
+/// パニックの内容を文字列にする。
+pub(crate) fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_else(|| "不明なエラー".into())
 }

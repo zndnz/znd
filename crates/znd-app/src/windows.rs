@@ -167,6 +167,7 @@ impl App {
 
     pub(crate) fn windows(&mut self, ctx: &egui::Context) {
         self.recovery_window(ctx);
+        self.plugin_crash_window(ctx);
         self.export_window(ctx);
         self.check_window(ctx);
         self.history_window(ctx);

@@ -150,6 +150,27 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_save_and_broken_files_do_not_lose_work() {
+        let dir = temp_dir("broken");
+        let path = dir.join("p.znd.json");
+        let mut p = demo_project();
+        save(&p, &path).unwrap();
+        // 書き込み途中で落ちた: 一時ファイルだけが中途半端に残る。元のファイルは無傷
+        fs::write(path.with_extension("tmp-save"), "{\"format_version\": 1, \"compo").unwrap();
+        assert_eq!(load(&path).unwrap(), p);
+        // 次の保存は残骸を上書きして成功する
+        p.compositions[0].name = "2 次提出".into();
+        save(&p, &path).unwrap();
+        assert_eq!(load(&path).unwrap().compositions[0].name, "2 次提出");
+        // 途中で切れたファイルは、パニックせずにエラーになる
+        let text = to_json(&p);
+        let cut = dir.join("cut.znd.json");
+        fs::write(&cut, &text[..text.len() / 2]).unwrap();
+        assert!(matches!(load(&cut), Err(IoError::Parse { .. })));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_load_and_version_check() {
         let dir = temp_dir("save");
         let path = dir.join("p.znd.json");
