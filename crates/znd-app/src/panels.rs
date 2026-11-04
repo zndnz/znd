@@ -369,7 +369,7 @@ impl App {
                         self.open(ctx, &p);
                     }
                 }
-                if ui.button("保存　⌘S").clicked() {
+                if ui.add(egui::Button::new("保存").shortcut_text(self.shortcut_text(crate::keymap::Action::Save))).clicked() {
                     ui.close_menu();
                     self.save();
                 }
@@ -466,11 +466,11 @@ impl App {
                 }
             });
             ui.menu_button("編集", |ui| {
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("取り消す　⌘Z")).clicked() {
+                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("取り消す").shortcut_text(self.shortcut_text(crate::keymap::Action::Undo))).clicked() {
                     self.undo();
                     ui.close_menu();
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("やり直す　⇧⌘Z")).clicked() {
+                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("やり直す").shortcut_text(self.shortcut_text(crate::keymap::Action::Redo))).clicked() {
                     self.redo();
                     ui.close_menu();
                 }
@@ -541,7 +541,7 @@ impl App {
                     self.show.licenses = true;
                     ui.close_menu();
                 }
-                if ui.button("ショートカット一覧").clicked() {
+                if ui.button("キーボードショートカット…").clicked() {
                     self.show.shortcuts = true;
                     ui.close_menu();
                 }

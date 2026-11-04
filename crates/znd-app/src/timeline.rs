@@ -8,6 +8,7 @@
 //! 左のレイヤーの行は、上下にドラッグで重ね順の並び替え、右クリックで複製・削除などのメニュー。
 
 use crate::icons::{self, Icon};
+use crate::keymap::Action;
 use crate::panels::{apply_edit, collect_rows, path_label, value_widgets, KeyKind, PropEdit, Row};
 use crate::{theme, widgets, App};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Rect, Sense, Shape, Stroke, UiBuilder};
@@ -1155,7 +1156,6 @@ impl App {
 
     /// レイヤーの行・バーを右クリックしたときのメニュー。
     fn layer_context_menu(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer) {
-        use egui::{Key, KeyboardShortcut, Modifiers};
         let id = &layer.id;
         let Some(index) = comp.layer_index(id) else {
             ui.close_menu();
@@ -1165,10 +1165,14 @@ impl App {
         ui.set_min_width(170.0);
         ui.label(egui::RichText::new(&layer.name).size(10.0).color(theme::TEXT_DIM));
         ui.separator();
-        let duplicate = ui.ctx().format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::D));
-        if ui.add(egui::Button::new("複製").shortcut_text(duplicate)).clicked() {
+        if ui.add(egui::Button::new("複製").shortcut_text(self.shortcut_text(Action::Duplicate))).clicked() {
             ui.close_menu();
             self.duplicate_layer(id);
+        }
+        if ui.add_enabled(!layer.locked, egui::Button::new("再生ヘッドで分割").shortcut_text(self.shortcut_text(Action::SplitLayer))).clicked() {
+            ui.close_menu();
+            self.selected = Some(id.clone());
+            self.run_action(Action::SplitLayer);
         }
         ui.separator();
         for (label, enabled, to) in [
@@ -1185,7 +1189,8 @@ impl App {
         ui.menu_button("コマ打ち", |ui| {
             for n in 1..=4u32 {
                 let label = if n == 1 { "なし（1 コマ）".to_string() } else { format!("{n} コマ打ち") };
-                let shortcut = format!("⌥{n}");
+                let action = [Action::Hold1, Action::Hold2, Action::Hold3, Action::Hold4][n as usize - 1];
+                let shortcut = self.shortcut_text(action);
                 if ui.add(egui::SelectableLabel::new(layer.hold_frames == n, label)).on_hover_text(shortcut).clicked() {
                     ui.close_menu();
                     self.edit_layer("コマ打ち", false, id, |l| l.hold_frames = n);
@@ -1204,7 +1209,7 @@ impl App {
             self.edit_layer("表示", false, id, |l| l.visible = v);
         }
         ui.separator();
-        if ui.add_enabled(!layer.locked, egui::Button::new("削除").shortcut_text("Delete")).clicked() {
+        if ui.add_enabled(!layer.locked, egui::Button::new("削除").shortcut_text(self.shortcut_text(Action::Delete))).clicked() {
             ui.close_menu();
             self.delete_layer(id);
         }

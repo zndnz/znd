@@ -14,6 +14,7 @@ znd-script.workspace = true
 znd-text.workspace = true
 rayon.workspace = true
 image.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 eframe = "0.29"
 rfd = "0.15"

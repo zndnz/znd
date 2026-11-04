@@ -145,6 +145,28 @@ pub fn duplicate_layer(comp: &mut Composition, id: &LayerId, new_id: LayerId) ->
     true
 }
 
+/// レイヤーを時刻 `t` で 2 つに分ける（前半は元のレイヤー、後半は `new_id` で元のすぐ上に置く）。
+/// 音MAD の細切れ配置のため、映像も音声もソースの位置はそのまま（後半はソースの続きから始まる）。
+/// `t` がイン点・アウト点の間（フレーム境界）に無ければ何もしない。分けたら true。
+pub fn split_layer(comp: &mut Composition, id: &LayerId, t: Time, new_id: LayerId) -> bool {
+    let Some(i) = comp.layer_index(id) else { return false };
+    let t = crate::beat::nearest_frame(t, comp.frame_rate);
+    let l = &comp.layers[i];
+    if t <= l.in_point || t >= l.out_point {
+        return false;
+    }
+    let mut tail = l.clone();
+    tail.name = copy_name(comp, &l.name);
+    tail.id = new_id;
+    tail.in_point = t;
+    tail.markers.retain(|m| m.time >= t);
+    let head = &mut comp.layers[i];
+    head.out_point = t;
+    head.markers.retain(|m| m.time < t);
+    comp.layers.insert(i, tail);
+    true
+}
+
 /// レイヤーを削除する。このレイヤーを指していた親・トラックマット・エフェクトのレイヤー引数は「なし」に戻す。
 pub fn remove_layer(comp: &mut Composition, id: &LayerId) -> Option<Layer> {
     let i = comp.layer_index(id)?;
@@ -566,6 +588,24 @@ pub fn has_bounds(project: &Project, kind: &LayerKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_layer_at_time() {
+        use crate::demo::demo_project;
+        let mut p = demo_project();
+        let comp = &mut p.compositions[0];
+        let id = comp.layers[0].id.clone();
+        let fr = comp.frame_rate;
+        let n = comp.layers.len();
+        assert!(!super::split_layer(comp, &id, Time::ZERO, crate::LayerId::new("x")));
+        assert!(super::split_layer(comp, &id, fr.frame_to_time(40), crate::LayerId::new("x")));
+        assert_eq!(comp.layers.len(), n + 1);
+        let (tail, head) = (&comp.layers[0], &comp.layers[1]);
+        assert_eq!(tail.id.0, "x");
+        assert_eq!(tail.in_point, fr.frame_to_time(40));
+        assert_eq!(head.out_point, fr.frame_to_time(40));
+        assert_eq!(tail.start_time, head.start_time);
+    }
+
     use super::*;
     use crate::beat::BeatGrid;
     use crate::model::{Marker, Transform};

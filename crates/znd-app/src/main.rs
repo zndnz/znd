@@ -2,6 +2,7 @@
 
 mod audio;
 mod icons;
+mod keymap;
 mod keyops;
 mod panels;
 mod plugin_host;
@@ -82,6 +83,7 @@ fn main() -> eframe::Result<()> {
                     }
                     "script" => app.show.script = true,
                     "plugins" => app.show.plugins = true,
+                    "shortcuts" => app.show.shortcuts = true,
                     "screening" => app.screening = true,
                     _ => {}
                 }
@@ -92,6 +94,10 @@ fn main() -> eframe::Result<()> {
 }
 
 /// egui 同梱フォントには日本語が無いので、OS のフォントを先頭に差し込む。
+fn info_label(action: keymap::Action) -> &'static str {
+    keymap::info(action).label
+}
+
 fn install_japanese_font(ctx: &egui::Context) {
     const CANDIDATES: [&str; 7] = [
         "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
@@ -293,6 +299,10 @@ pub struct App {
     pub(crate) selected_keys: Vec<timeline::KeySel>,
     /// 矩形選択の途中で、今のフレームに行が拾ったキー。
     pub(crate) marquee_hits: Vec<timeline::KeySel>,
+    /// キーボードショートカットの割り当て。
+    pub(crate) keymap: keymap::Keymap,
+    /// 割り当てを変更中の操作（次に押したキーを割り当てる）。
+    pub(crate) keymap_capture: Option<keymap::Action>,
     /// コピーしたキーフレーム。
     pub(crate) key_clip: Option<znd_core::keys::KeyClipboard>,
     /// 最後にクリックしたプロパティの行（キーの貼り付け先）。
@@ -403,6 +413,8 @@ impl App {
             selected_keys: Vec::new(),
             marquee_hits: Vec::new(),
             key_clip: None,
+            keymap: keymap::Keymap::default(),
+            keymap_capture: None,
             key_target: None,
             left_tab: 0,
             right_tab: 0,
@@ -429,6 +441,11 @@ impl App {
             timelapse: false,
             last_capture: Instant::now(),
         };
+        let (keymap, warnings) = keymap::Keymap::load();
+        app.keymap = keymap;
+        if !warnings.is_empty() {
+            app.status = format!("ショートカットの設定: {}", warnings.join(" / "));
+        }
         match path {
             Some(p) => {
                 app.open(ctx, &p);
@@ -838,105 +855,182 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        use egui::{Key, KeyboardShortcut, Modifiers};
-        let cmd = Modifiers::COMMAND;
-        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Z))) {
-            self.redo();
+        // 割り当ての変更中は、次に押したキーを割り当てに使う
+        if let Some(action) = self.keymap_capture {
+            let hit = ctx.input_mut(|i| {
+                let mut hit = None;
+                i.events.retain(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if hit.is_none() => {
+                        hit = Some((*key, *modifiers));
+                        false
+                    }
+                    _ => true,
+                });
+                hit
+            });
+            if let Some((key, m)) = hit {
+                self.keymap_capture = None;
+                if key != egui::Key::Escape || m.any() {
+                    let chord = keymap::Chord::from_event(key, m);
+                    let mut chords = self.keymap.chords(action);
+                    if !chords.contains(&chord) {
+                        chords.push(chord);
+                    }
+                    self.keymap.set(action, chords);
+                    self.save_keymap();
+                }
+            }
+            return;
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Z))) {
-            self.undo();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::S))) {
-            self.save();
+        let typing = ctx.wants_keyboard_input();
+        let actions = ctx.input_mut(|i| keymap::take_actions(&self.keymap, &mut i.events, typing));
+        for a in actions {
+            self.run_action(a);
         }
         // 文字入力中は再生・コマ送りキーを奪わない
-        if ctx.wants_keyboard_input() {
+        if typing {
             return;
         }
         // キーフレームのコピー・貼り付け
         self.key_clipboard_events(ctx);
-        let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-        if pressed(Key::Space) {
-            self.toggle_play();
+    }
+
+    /// メニューに添える、操作のショートカットの表記（割り当てが無ければ空）。
+    pub(crate) fn shortcut_text(&self, action: keymap::Action) -> String {
+        self.keymap.chords(action).first().map(|c| c.display()).unwrap_or_default()
+    }
+
+    pub(crate) fn save_keymap(&mut self) {
+        match self.keymap.save() {
+            Ok(p) => self.status = format!("ショートカットを保存しました（{}）", p.display()),
+            Err(e) => self.status = format!("ショートカットを保存できません: {e}"),
         }
-        if pressed(Key::ArrowRight) || pressed(Key::PageDown) {
-            self.set_frame(self.frame + 1, false);
-        }
-        if pressed(Key::ArrowLeft) || pressed(Key::PageUp) {
-            self.set_frame(self.frame - 1, false);
-        }
-        if pressed(Key::Home) {
-            self.set_frame(0, false);
-        }
-        if pressed(Key::End) {
-            self.set_frame(i64::MAX, false);
-        }
-        // ビューアのツール
-        for (key, tool) in [
-            (Key::V, tools::Tool::Select),
-            (Key::H, tools::Tool::Hand),
-            (Key::Z, tools::Tool::Zoom),
-            (Key::W, tools::Tool::Rotate),
-            (Key::G, tools::Tool::Pen),
-            (Key::R, tools::Tool::RectMask),
-            (Key::O, tools::Tool::EllipseMask),
-        ] {
-            if pressed(key) && !ctx.input(|i| i.modifiers.any()) {
-                self.set_tool(tool);
+    }
+
+    /// ショートカット・メニューから呼ばれる操作。
+    pub(crate) fn run_action(&mut self, action: keymap::Action) {
+        use keymap::Action::*;
+        let fr = self.frame_rate();
+        let now = fr.frame_to_time(self.frame);
+        let layer = self.selected.as_ref().and_then(|id| self.shared.comp(&self.comp_id)?.layer(id).cloned());
+        match action {
+            Undo => self.undo(),
+            Redo => self.redo(),
+            Save => self.save(),
+            Play => self.toggle_play(),
+            NextFrame => self.set_frame(self.frame + 1, false),
+            PrevFrame => self.set_frame(self.frame - 1, false),
+            NextFrame10 => self.set_frame(self.frame + 10, false),
+            PrevFrame10 => self.set_frame(self.frame - 10, false),
+            FirstFrame => self.set_frame(0, false),
+            LastFrame => self.set_frame(i64::MAX, false),
+            PrevKey | NextKey => {
+                let mut times: Vec<i64> = Vec::new();
+                if let Some(l) = &layer {
+                    visit::visit_layer(l, &mut |_, p| times.extend(p.key_times().iter().map(|t| fr.time_to_frame(*t))));
+                }
+                let target = if action == PrevKey {
+                    times.iter().filter(|f| **f < self.frame).max()
+                } else {
+                    times.iter().filter(|f| **f > self.frame).min()
+                };
+                if let Some(f) = target {
+                    self.set_frame(*f, false);
+                }
             }
-        }
-        // 選択中のキーフレームを削除（キーフレームを選んでいなければ、選択中のレイヤーを削除）
-        if (pressed(Key::Delete) || pressed(Key::Backspace)) && self.active_vertex.is_none() && self.pen.is_none() {
-            if !self.selected_keys.is_empty() {
-                self.delete_selected_keys();
-            } else if let Some(id) = self.selected.clone().filter(|_| self.selected_footage.is_none()) {
-                self.delete_layer(&id);
+            GoInPoint => {
+                if let Some(l) = &layer {
+                    self.set_frame(fr.time_to_frame(l.in_point), false);
+                }
             }
-        }
-        // 選択中のレイヤーを複製
-        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::D))) {
-            if let Some(id) = self.selected.clone() {
-                self.duplicate_layer(&id);
+            GoOutPoint => {
+                if let Some(l) = &layer {
+                    self.set_frame(fr.frame_count(l.out_point) - 1, false);
+                }
             }
-        }
-        // コマ打ち（⌥1 = なし、⌥2〜⌥4 = 2〜4 コマ打ち）
-        for (n, key) in [(1u32, Key::Num1), (2, Key::Num2), (3, Key::Num3), (4, Key::Num4)] {
-            if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::ALT, key))) {
+            Marker => self.add_marker(""),
+            WorkStart => {
+                let end = self.work_area.map(|w| w.1).unwrap_or(self.total_frames()).max(self.frame + 1);
+                self.work_area = Some((self.frame, end));
+            }
+            WorkEnd => {
+                let start = self.work_area.map(|w| w.0).unwrap_or(0).min(self.frame);
+                self.work_area = Some((start, self.frame + 1));
+            }
+            ToolSelect => self.set_tool(tools::Tool::Select),
+            ToolHand => self.set_tool(tools::Tool::Hand),
+            ToolZoom => self.set_tool(tools::Tool::Zoom),
+            ToolRotate => self.set_tool(tools::Tool::Rotate),
+            ToolPen => self.set_tool(tools::Tool::Pen),
+            ToolRect => self.set_tool(tools::Tool::RectMask),
+            ToolEllipse => self.set_tool(tools::Tool::EllipseMask),
+            Delete => {
+                // 選択中のキーフレームを削除（キーフレームを選んでいなければ、選択中のレイヤーを削除）
+                if self.active_vertex.is_none() && self.pen.is_none() {
+                    if !self.selected_keys.is_empty() {
+                        self.delete_selected_keys();
+                    } else if let Some(id) = self.selected.clone().filter(|_| self.selected_footage.is_none()) {
+                        self.delete_layer(&id);
+                    }
+                }
+            }
+            Duplicate => {
+                if let Some(id) = self.selected.clone() {
+                    self.duplicate_layer(&id);
+                }
+            }
+            SplitLayer => {
+                if let Some(l) = layer.filter(|l| !l.locked) {
+                    let new_id = LayerId::new(self.shared.fresh_id("layer"));
+                    let (id, created) = (l.id.clone(), new_id.clone());
+                    let mut done = false;
+                    self.edit_comp("レイヤーを分割", false, |c| done = edit::split_layer(c, &id, now, new_id));
+                    if done {
+                        self.selected = Some(created);
+                        self.selected_keys.clear();
+                        self.status = format!("「{}」を再生ヘッドで分割しました", l.name);
+                    } else {
+                        self.status = "再生ヘッドがレイヤーのイン点とアウト点の間にありません".into();
+                    }
+                }
+            }
+            TrimInToPlayhead | TrimOutToPlayhead | MoveInToPlayhead | MoveOutToPlayhead => {
+                if let Some(l) = layer.filter(|l| !l.locked) {
+                    let label = info_label(action);
+                    self.edit_layer(label, false, &l.id, |l| match action {
+                        TrimInToPlayhead => edit::trim_in(l, now, fr),
+                        TrimOutToPlayhead => edit::trim_out(l, now + fr.frame_to_time(1), fr),
+                        MoveInToPlayhead => edit::shift_layer(l, now - l.in_point),
+                        _ => edit::shift_layer(l, now + fr.frame_to_time(1) - l.out_point),
+                    });
+                }
+            }
+            Hold1 | Hold2 | Hold3 | Hold4 => {
+                let n = match action {
+                    Hold1 => 1,
+                    Hold2 => 2,
+                    Hold3 => 3,
+                    _ => 4,
+                };
                 if let Some(id) = self.selected.clone() {
                     self.edit_layer("コマ打ち", false, &id, |l| l.hold_frames = n);
                     self.status = if n == 1 { "コマ打ちを解除しました".into() } else { format!("{n} コマ打ちにしました") };
                 }
             }
-        }
-        // マーカー（再生中に叩けばタップ入力になる）
-        if pressed(Key::M) {
-            self.add_marker("");
-        }
-        // ワークエリアの開始・終了
-        if pressed(Key::B) {
-            let end = self.work_area.map(|w| w.1).unwrap_or(self.total_frames()).max(self.frame + 1);
-            self.work_area = Some((self.frame, end));
-        }
-        if pressed(Key::N) {
-            let start = self.work_area.map(|w| w.0).unwrap_or(0).min(self.frame);
-            self.work_area = Some((start, self.frame + 1));
-        }
-        // 前後のキーフレームへ（J / K）
-        if pressed(Key::J) || pressed(Key::K) {
-            let fr = self.frame_rate();
-            let shared = self.shared.clone();
-            let mut times: Vec<i64> = Vec::new();
-            if let Some(l) = shared.comp(&self.comp_id).and_then(|c| self.selected.as_ref().and_then(|id| c.layer(id))) {
-                visit::visit_layer(l, &mut |_, p| times.extend(p.key_times().iter().map(|t| fr.time_to_frame(*t))));
+            SelectAllKeys => self.select_all_keys(),
+            EasyEase => self.style_selected_keys("イージーイーズ", panels::KeyKind::EasyEase.style()),
+            EaseIn => self.style_selected_keys("イーズイン", panels::KeyKind::EaseIn.style()),
+            EaseOut => self.style_selected_keys("イーズアウト", panels::KeyKind::EaseOut.style()),
+            LinearKeys => self.style_selected_keys("リニア", panels::KeyKind::Linear.style()),
+            HoldKeys => self.style_selected_keys("停止", panels::KeyKind::Hold.style()),
+            ReverseKeys => self.reverse_selected_keys(),
+            ToggleSnap => {
+                self.snap = !self.snap;
+                self.status = if self.snap { "スナップ: オン".into() } else { "スナップ: オフ".into() };
             }
-            let target = if pressed(Key::J) {
-                times.iter().filter(|f| **f < self.frame).max()
-            } else {
-                times.iter().filter(|f| **f > self.frame).min()
-            };
-            if let Some(f) = target {
-                self.set_frame(*f, false);
-            }
+            TimelineZoomIn => self.tl_zoom *= 1.25,
+            TimelineZoomOut => self.tl_zoom /= 1.25,
+            ShowShortcuts => self.show.shortcuts = !self.show.shortcuts,
         }
     }
 

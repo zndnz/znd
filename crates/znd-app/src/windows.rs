@@ -754,31 +754,102 @@ impl App {
         });
         self.show.licenses = open;
         let mut open = self.show.shortcuts;
-        egui::Window::new("ショートカット").open(&mut open).show(ctx, |ui| {
-            egui::Grid::new("keys").num_columns(2).show(ui, |ui| {
+        egui::Window::new("キーボードショートカット").open(&mut open).default_size([560.0, 560.0]).show(ctx, |ui| {
+            self.keymap_editor(ui);
+        });
+        self.show.shortcuts = open;
+    }
+
+    /// ショートカットの一覧と割り当ての変更。
+    fn keymap_editor(&mut self, ui: &mut egui::Ui) {
+        use crate::keymap::{self, Keymap, Preset, ACTIONS};
+        ui.horizontal(|ui| {
+            ui.label("プリセット");
+            let mut preset = self.keymap.preset;
+            egui::ComboBox::from_id_salt("km-preset").selected_text(preset.label()).show_ui(ui, |ui| {
+                for p in Preset::ALL {
+                    ui.selectable_value(&mut preset, p, p.label());
+                }
+            });
+            if preset != self.keymap.preset {
+                // プリセットを切り替えたら、個別の変更は捨てる
+                self.keymap = Keymap { preset, overrides: Default::default() };
+                self.save_keymap();
+            }
+            if ui.add_enabled(!self.keymap.overrides.is_empty(), egui::Button::new("変更をすべて戻す")).clicked() {
+                self.keymap.overrides.clear();
+                self.save_keymap();
+            }
+        });
+        let conflicts = self.keymap.conflicts();
+        if !conflicts.is_empty() {
+            for (c, actions) in &conflicts {
+                let names: Vec<&str> = actions.iter().map(|a| keymap::info(*a).label).collect();
+                ui.colored_label(crate::theme::WARN, format!("{} が重複: {}（修飾キーの多いもの → 一覧の上にあるものが優先）", c.display(), names.join("、")));
+            }
+        }
+        if let Some(a) = self.keymap_capture {
+            ui.colored_label(crate::theme::VALUE, format!("「{}」に割り当てるキーを押してください（Esc で取り消し）", keymap::info(a).label));
+        }
+        ui.separator();
+        let conflicted: Vec<keymap::Chord> = conflicts.iter().map(|(c, _)| *c).collect();
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            let mut group = "";
+            egui::Grid::new("km-grid").num_columns(3).min_col_width(150.0).striped(true).show(ui, |ui| {
+                for i in ACTIONS {
+                    if i.group != group {
+                        group = i.group;
+                        ui.strong(group);
+                        ui.end_row();
+                    }
+                    ui.label(i.label);
+                    let chords = self.keymap.chords(i.action);
+                    let mut remove = None;
+                    ui.horizontal(|ui| {
+                        for (n, c) in chords.iter().enumerate() {
+                            let text = egui::RichText::new(c.display());
+                            let text = if conflicted.contains(c) { text.color(crate::theme::WARN) } else { text };
+                            if ui.small_button(text).on_hover_text("クリックで外す").clicked() {
+                                remove = Some(n);
+                            }
+                        }
+                        if chords.is_empty() {
+                            ui.weak("なし");
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.small_button("＋").on_hover_text("キーを追加").clicked() {
+                            self.keymap_capture = Some(i.action);
+                        }
+                        let changed = self.keymap.overrides.contains_key(&i.action);
+                        if ui.add_enabled(changed, egui::Button::new("既定").small()).on_hover_text("プリセットの割り当てに戻す").clicked() {
+                            self.keymap.overrides.remove(&i.action);
+                            self.save_keymap();
+                        }
+                    });
+                    ui.end_row();
+                    if let Some(n) = remove {
+                        let mut cs = chords.clone();
+                        cs.remove(n);
+                        self.keymap.set(i.action, cs);
+                        self.save_keymap();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.strong("マウス操作");
+            egui::Grid::new("mouse").num_columns(2).show(ui, |ui| {
                 for (key, what) in [
-                    ("Space", "再生／停止"),
-                    ("← / →（PageUp / PageDown）", "1 フレーム移動"),
-                    ("Home / End", "先頭／末尾へ"),
-                    ("J / K", "選択レイヤーの前／次のキーフレームへ"),
-                    ("M", "マーカーを打つ（再生中はタップ入力）"),
-                    ("B / N", "ワークエリアの開始／終了"),
                     ("Shift + ドラッグ", "スナップせずにスクラブ／移動"),
-                    ("V / G / R / O", "ビューアのツール: 選択 / ペン / 矩形マスク / 楕円マスク"),
                     ("Enter / Esc", "ペン: 開いたパスで確定 / 取り消し"),
                     ("Option + クリック", "マスクの頂点: 角 ⇄ 滑らか"),
-                    ("Delete", "選択中のマスクの頂点／キーフレームを削除（どちらも選んでいなければ選択中のレイヤー）"),
-                    ("⌘D", "選択中のレイヤーを複製"),
                     ("キーをクリック / Shift・⌘ + クリック", "キーフレームを選択 / 選択に足す・外す"),
                     ("空いたところからドラッグ", "矩形でキーフレームを選択（Shift・⌘ で追加）"),
                     ("選択キーをドラッグ", "まとめて移動（ビートグリッド等に吸着）"),
                     ("Alt + 選択の先頭／末尾のキーをドラッグ", "選択キーの時間を伸縮（反対の端が中心）"),
                     ("⌘C / ⌘V", "キーフレームをコピー／再生ヘッドの位置に貼り付け"),
-                    ("⌥1 / ⌥2 / ⌥3 / ⌥4", "コマ打ち: なし / 2 / 3 / 4 コマ"),
                     ("レイヤーの行をドラッグ", "重ね順を並び替え（右クリックで複製・削除などのメニュー）"),
                     ("⌘ + ホイール", "タイムラインを拡大・縮小（ホイールだけで横スクロール）"),
-                    ("⌘Z / ⇧⌘Z", "取り消す／やり直す"),
-                    ("⌘S", "保存"),
                 ] {
                     ui.monospace(key);
                     ui.label(what);
@@ -786,6 +857,8 @@ impl App {
                 }
             });
         });
-        self.show.shortcuts = open;
+        if let Some(p) = Keymap::path() {
+            ui.weak(format!("設定ファイル: {}", p.display()));
+        }
     }
 }

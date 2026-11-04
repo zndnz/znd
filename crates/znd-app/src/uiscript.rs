@@ -18,7 +18,7 @@
 //! down / up              左ボタンを押す／離す
 //! click / dclick         その場でクリック／ダブルクリック
 //! rclick                 その場で右クリック
-//! mod alt|shift|cmd|none 以後の操作に付ける修飾キー
+//! mod alt|shift|cmd|none 以後の操作に付ける修飾キー（cmd+shift のように組み合わせ可）
 //! key NAME               キーを押して離す（Enter, Escape, Delete, V など）
 //! type TEXT              文字を入力する（入力欄にフォーカスがあるとき）
 //! scroll DX DY           ホイール
@@ -158,12 +158,17 @@ impl App {
                 }
             }
             "mod" => {
-                script.modifiers = match args.first().copied() {
-                    Some("alt") => Modifiers::ALT,
-                    Some("shift") => Modifiers::SHIFT,
-                    Some("cmd") => Modifiers::COMMAND | if cfg!(target_os = "macos") { Modifiers::MAC_CMD } else { Modifiers::CTRL },
-                    _ => Modifiers::NONE,
+                // "cmd+shift" のように組み合わせられる
+                let mut m = Modifiers::NONE;
+                for part in args.first().copied().unwrap_or("none").split('+') {
+                    m = m | match part {
+                        "alt" => Modifiers::ALT,
+                        "shift" => Modifiers::SHIFT,
+                        "cmd" => Modifiers::COMMAND | if cfg!(target_os = "macos") { Modifiers::MAC_CMD } else { Modifiers::CTRL },
+                        _ => Modifiers::NONE,
+                    };
                 }
+                script.modifiers = m;
             }
             "key" => match args.first().and_then(|n| Key::from_name(n)) {
                 Some(key) => {

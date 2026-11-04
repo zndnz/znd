@@ -3,6 +3,7 @@
 //!
 //! 中身の計算は [`znd_core::keys`] にあり、ここは選択（[`KeySel`]）とレイヤーの対応付けと取り消しの単位を受け持つ。
 
+use crate::keymap::Action;
 use crate::panels::KeyKind;
 use crate::timeline::{KeySel, TlDrag, TlView};
 use crate::{theme, App};
@@ -291,7 +292,15 @@ impl App {
         ui.add_enabled_ui(n > 0, |ui| {
             ui.menu_button("キーフレーム補間", |ui| {
                 for k in KeyKind::ALL {
-                    if ui.button(k.label()).clicked() {
+                    let sc = match k {
+                        KeyKind::EasyEase => self.shortcut_text(Action::EasyEase),
+                        KeyKind::EaseIn => self.shortcut_text(Action::EaseIn),
+                        KeyKind::EaseOut => self.shortcut_text(Action::EaseOut),
+                        KeyKind::Linear => self.shortcut_text(Action::LinearKeys),
+                        KeyKind::Hold => self.shortcut_text(Action::HoldKeys),
+                        KeyKind::AutoBezier => String::new(),
+                    };
+                    if ui.add(egui::Button::new(k.label()).shortcut_text(sc)).clicked() {
                         ui.close_menu();
                         self.style_selected_keys("キーフレーム補間", k.style());
                     }
@@ -306,7 +315,7 @@ impl App {
                 }
             });
             ui.separator();
-            if ui.button("時間反転").clicked() {
+            if ui.add(egui::Button::new("時間反転").shortcut_text(self.shortcut_text(Action::ReverseKeys))).clicked() {
                 ui.close_menu();
                 self.reverse_selected_keys();
             }
@@ -334,7 +343,7 @@ impl App {
             ui.close_menu();
             self.paste_keys(None);
         }
-        if ui.add_enabled(n > 0, egui::Button::new("削除").shortcut_text("Delete")).clicked() {
+        if ui.add_enabled(n > 0, egui::Button::new("削除").shortcut_text(self.shortcut_text(Action::Delete))).clicked() {
             ui.close_menu();
             self.delete_selected_keys();
         }
