@@ -32,3 +32,17 @@ fn add_solid_creates_a_valid_layer_on_top() {
     assert_eq!(c.layers[0].out_point, c.duration);
     assert!(p.validate().is_empty());
 }
+
+#[test]
+fn add_text_creates_a_centered_text_layer_on_top() {
+    let mut p = znd_core::demo::demo_project();
+    let comp = p.compositions[0].id.0.clone();
+    let n = p.compositions[0].layers.len();
+    znd_script::run_script(&mut p, &format!("var c = comp('{comp}'); var l = addText(c, '字幕', 'こんにちは', 48);")).unwrap();
+    let c = &p.compositions[0];
+    assert_eq!(c.layers.len(), n + 1);
+    let znd_core::LayerKind::Text { document, .. } = &c.layers[0].kind else { panic!("テキストレイヤーではない") };
+    assert_eq!((document.text.as_str(), document.size), ("こんにちは", 48.0));
+    assert_eq!(c.layers[0].name, "字幕");
+    assert!(p.validate().is_empty());
+}

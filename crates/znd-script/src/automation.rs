@@ -57,6 +57,13 @@ function addSolid(c, name, color) {
   c.layers.unshift(l);
   return l;
 }
+/** コンポの中心に置いたテキストレイヤー（中央揃え）を、ID を付けていちばん上に足して返す。size は px（省略で 96） */
+function addText(c, name, text, size) {
+  var id = newId('layer');
+  var l = JSON.parse(__new_text(id, String(name || 'テキスト'), String(text == null ? '' : text), Number(size) || 96, c.width, c.height, c.duration));
+  c.layers.unshift(l);
+  return l;
+}
 /** エフェクトのパラメータに値を入れる（数・点・色はキーフレームを消して固定値に。真偽・選択肢・文字列はそのまま） */
 function setParam(fx, name, v) {
   var p = fx.params[name];
@@ -249,6 +256,21 @@ pub fn run_plugin(
         })
         .map_err(|e| e.to_string())?;
         g.set("__new_solid", new_solid).map_err(|e| e.to_string())?;
+        // コンポの中心に置いたテキストレイヤー（アプリの「テキスト追加」と同じ作り）
+        let new_text = Function::new(ctx.clone(), |id: String, name: String, text: String, size: f64, w: u32, h: u32, dur: f64| -> String {
+            let mut doc = znd_core::text::TextDocument::new(&text, size);
+            doc.justify = znd_core::text::Justify::Center;
+            let l = znd_core::Layer::new(
+                id.as_str(),
+                name.as_str(),
+                znd_core::LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false, text_expression: None },
+                znd_core::Transform::centered(0.0, 0.0, w as f64, h as f64),
+                znd_core::Time(dur as i64),
+            );
+            serde_json::to_string(&l).unwrap_or_else(|_| "null".into())
+        })
+        .map_err(|e| e.to_string())?;
+        g.set("__new_text", new_text).map_err(|e| e.to_string())?;
         let parsed = ctx.json_parse(json.clone()).map_err(|_| describe(&ctx))?;
         g.set("project", parsed).map_err(|e| e.to_string())?;
         let parsed_ctx = ctx.json_parse(context_json).map_err(|_| describe(&ctx))?;
