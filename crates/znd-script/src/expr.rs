@@ -309,6 +309,9 @@ fn init() -> (Runtime, Context) {
                     match fx.params.get(name) {
                         Some(ParamValue::Layer(Some(id))) => Ok(c.layer_index(id).map(|i| format!("layer:{i}")).unwrap_or_default()),
                         Some(ParamValue::Scalar(_) | ParamValue::Point(_) | ParamValue::Color(_)) => Ok(format!("fx.{fi}.{name}")),
+                        // チェックボックス・選択肢はキーフレームを持たないので、値そのものを返す（真は 1、選択肢は 0 始まりの番号）
+                        Some(ParamValue::Bool(b)) => Ok(format!("const:{}", *b as u8)),
+                        Some(ParamValue::Choice(i)) => Ok(format!("const:{i}")),
                         _ => Ok(String::new()),
                     }
                 }

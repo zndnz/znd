@@ -280,6 +280,7 @@ function __makeLayer(compId, li) {
       var path = __fx_path(compId, li, String(which), String(param));
       if (path === '') throw new Error('エフェクト「' + which + '」のパラメータ「' + param + '」が見つかりません');
       if (path.indexOf('layer:') === 0) return __makeLayer(compId, parseInt(path.substring(6), 10));
+      if (path.indexOf('const:') === 0) return Number(path.substring(6));
       return prop(path);
     };
     fn.param = fn;
@@ -323,6 +324,14 @@ function __makeComp(idOrName) {
   return C;
 }
 function comp(name) { return __makeComp(name); }
+
+// エクスプレッション用ライブラリ（プラグインの expressions）の関数の中からも、評価中の thisComp などを参照できるようにする
+['thisComp', 'thisLayer', 'thisProperty', 'time', 'index'].forEach(function (name) {
+  Object.defineProperty(globalThis, name, {
+    get: function () { var e = __env(); return e && e.global ? e.global[name] : undefined; },
+    configurable: true
+  });
+});
 
 // ---- 評価の入口 ----
 function __evalExpr(__src, compId, li, path, t, value) {

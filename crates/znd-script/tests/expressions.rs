@@ -444,3 +444,22 @@ fn s1_automation_script_edits_project_with_validation() {
     assert!(err.contains("不正"), "{err}");
     assert_eq!(p, before);
 }
+
+#[test]
+fn checkbox_and_choice_effect_params_are_readable() {
+    let mut l = solid("a");
+    l.effects.push(effect::EffectInstance::new("gaussian_blur", 100.0, 100.0).unwrap().set_b("repeat_edge", true).set_i("dimensions", 2));
+    let name = l.effects[0].name.clone();
+    l.transform.rotation.expression = expr(&format!("effect({name:?})(\"repeat_edge\") * 10 + effect({name:?})(\"dimensions\")"));
+    let p = project(vec![l]);
+    assert_eq!(eval(&p, "a", "transform.rotation", 0.0), vec![12.0]);
+}
+
+#[test]
+fn library_functions_see_the_current_comp_and_time() {
+    znd_render::plugins::hooks::add_expression_library("test/this.js", "function __testCompWidthPlusTime() { return thisComp.width + time + thisLayer.index; }");
+    let mut l = solid("a");
+    l.transform.rotation.expression = expr("__testCompWidthPlusTime()");
+    let p = project(vec![l]);
+    assert_eq!(eval(&p, "a", "transform.rotation", 2.0), vec![403.0]);
+}
