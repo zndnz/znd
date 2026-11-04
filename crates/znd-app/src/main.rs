@@ -1,11 +1,13 @@
 //! znd アプリ。ビューア・タイムライン・プロパティ編集・音声同期・書き出し・提出前チェック。
 
 mod audio;
+mod beatfit_ui;
 mod icons;
 mod keymap;
 mod keyops;
 mod panels;
 mod plugin_host;
+mod prefs;
 mod preview;
 mod rescue;
 mod theme;
@@ -86,6 +88,7 @@ fn main() -> eframe::Result<()> {
                     "script" => app.show.script = true,
                     "plugins" => app.show.plugins = true,
                     "shortcuts" => app.show.shortcuts = true,
+                    "beatfit" => app.show.beatfit = true,
                     "screening" => app.screening = true,
                     _ => {}
                 }
@@ -303,6 +306,10 @@ pub struct App {
     pub(crate) selected_keys: Vec<timeline::KeySel>,
     /// 矩形選択の途中で、今のフレームに行が拾ったキー。
     pub(crate) marquee_hits: Vec<timeline::KeySel>,
+    /// 「ビートに合わせる」ウィンドウの状態。
+    pub(crate) beat_ui: beatfit_ui::BeatUi,
+    /// 利用者ごとの設定。
+    pub(crate) prefs: prefs::Prefs,
     /// キーボードショートカットの割り当て。
     pub(crate) keymap: keymap::Keymap,
     /// 割り当てを変更中の操作（次に押したキーを割り当てる）。
@@ -419,6 +426,8 @@ impl App {
             selected_keys: Vec::new(),
             marquee_hits: Vec::new(),
             key_clip: None,
+            beat_ui: Default::default(),
+            prefs: prefs::Prefs::load(),
             keymap: keymap::Keymap::default(),
             keymap_capture: None,
             key_target: None,
@@ -452,6 +461,9 @@ impl App {
         app.plugin_crash = znd_render::plugins::guard::take_crash_record();
         if let Err(e) = znd_render::plugins::guard::install_crash_journal() {
             eprintln!("プラグインの異常終了の記録を始められません: {e}");
+        }
+        if let Some(p) = &app.player {
+            p.set_offset_ms(app.prefs.av_offset_ms);
         }
         let (keymap, warnings) = keymap::Keymap::load();
         app.keymap = keymap;

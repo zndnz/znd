@@ -228,3 +228,60 @@ mod tests {
         assert!((shifted.eval(Time::from_seconds(1.5)) - 50.0).abs() < 2.0);
     }
 }
+
+/// 同期テスト用のクリック音（48kHz ステレオ）。`bpm` の拍ごとに 10ms の短い音、小節頭（4 拍ごと）は高い音。
+/// 拍 n の音は、ちょうど `time_to_sample(拍の時刻)` のサンプルから鳴り始める。
+pub fn click_track(bpm: f64, seconds: f64) -> Vec<f32> {
+    let total = (seconds * crate::SAMPLE_RATE as f64).round() as usize;
+    let mut out = vec![0.0f32; total * 2];
+    if bpm <= 0.0 {
+        return out;
+    }
+    let beat = 60.0 / bpm;
+    let len = crate::SAMPLE_RATE as usize / 100;
+    let mut n = 0usize;
+    loop {
+        let t = znd_core::Time::from_seconds(n as f64 * beat);
+        let start = crate::time_to_sample(t) as usize;
+        if start >= total {
+            break;
+        }
+        let freq = if n.is_multiple_of(4) { 2000.0 } else { 1000.0 };
+        for i in 0..len.min(total - start) {
+            // 立ち上がりは鋭く、すぐ減衰する
+            let env = (1.0 - i as f32 / len as f32).powi(2);
+            let v = 0.8 * env * (std::f32::consts::TAU * freq * i as f32 / crate::SAMPLE_RATE as f32).sin();
+            out[(start + i) * 2] = v;
+            out[(start + i) * 2 + 1] = v;
+        }
+        n += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+
+    #[test]
+    fn clicks_start_on_exact_samples_and_are_detected_within_a_frame() {
+        let track = click_track(128.0, 6.0);
+        let beat = 60.0 / 128.0;
+        // サンプル精度: 拍の時刻のサンプルが鳴り始め（直前は無音）
+        for n in 1..10 {
+            let s = crate::time_to_sample(znd_core::Time::from_seconds(n as f64 * beat)) as usize;
+            assert_eq!(track[(s - 1) * 2], 0.0);
+            assert!(track[(s + 3) * 2].abs() > 0.0, "拍 {n}");
+        }
+        // ビート検出が拍を ±1 フレーム（30fps）以内で拾う
+        let mono: Vec<f32> = track.chunks_exact(2).map(|f| f[0]).collect();
+        let onsets = detect_onsets(&mono, 0.5);
+        let expected: Vec<f64> = (0..).map(|n| n as f64 * beat).take_while(|t| *t < 5.9).collect();
+        assert!(onsets.len() >= expected.len() - 1, "{} / {}", onsets.len(), expected.len());
+        for t in expected.iter().skip(1) {
+            let nearest = onsets.iter().map(|o| (o - t).abs()).fold(f64::MAX, f64::min);
+            assert!(nearest <= 1.0 / 30.0, "拍 {t:.3}s のずれ {nearest:.4}s");
+        }
+    }
+}
+

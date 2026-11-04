@@ -1,6 +1,7 @@
 //! znd のコア: データモデル、時刻、プロパティ評価、プロジェクト入出力。
 
 pub mod beat;
+pub mod beatfit;
 pub mod camera_import;
 pub mod collab;
 pub mod demo;

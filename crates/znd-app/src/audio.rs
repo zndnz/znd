@@ -1,9 +1,15 @@
 //! 音声再生。コンポの音をあらかじめミックスしておき、出力デバイスのコールバックから読む。
 //! 再生中の時刻はこの再生位置（サンプル数）から決まるので、映像が音に合わせて進む。
+//!
+//! デバイスに渡したサンプルが実際にスピーカーから鳴るのは、出力の遅延（内蔵スピーカーで数十 ms、
+//! Bluetooth では 150 ms 以上）のあと。渡した位置をそのまま時計にすると映像が音より先に進むので、
+//! コールバックごとに「渡し始めた位置・その時刻・鳴るまでの遅延」を記録し、いま鳴っている位置を
+//! [`heard_position`] で求める。さらに利用者が補正（[`Player::set_offset_ms`]）を足せる。
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct Shared {
@@ -17,11 +23,46 @@ struct Shared {
     /// ループ範囲 [開始, 終了)。終了が 0 以下なら無効。
     loop_start: AtomicI64,
     loop_end: AtomicI64,
+    /// 最後のコールバックの記録。
+    clock: Mutex<Option<ClockSample>>,
+    /// 利用者の補正（マイクロ秒）。正の値で映像を遅らせる（音が遅れて聞こえる環境向け）。
+    offset_us: AtomicI64,
+}
+
+/// コールバック 1 回ぶんの時計の記録。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockSample {
+    /// このコールバックで渡し始めたサンプル位置（48kHz）。
+    pub pos: i64,
+    /// コールバックが呼ばれた時刻。
+    pub at: Instant,
+    /// 渡したサンプルが鳴るまでの遅延（デバイスの報告）。
+    pub latency: Duration,
+}
+
+/// 時刻 `now` にスピーカーから鳴っている位置（48kHz のサンプル）。
+/// `offset` は利用者の補正（正で映像を遅らせる）。`start` は再生を始めた位置で、鳴り始める前はそこに留める。
+/// `loop_range` があれば、その範囲で折り返す。
+pub fn heard_position(c: &ClockSample, now: Instant, offset: Duration, start: i64, loop_range: Option<(i64, i64)>) -> i64 {
+    let since = now.saturating_duration_since(c.at).as_secs_f64();
+    let behind = c.latency.as_secs_f64() + offset.as_secs_f64();
+    let mut pos = c.pos + ((since - behind) * 48_000.0).round() as i64;
+    if let Some((ls, le)) = loop_range.filter(|(a, b)| b > a) {
+        if pos >= le {
+            pos = ls + (pos - ls).rem_euclid(le - ls);
+        } else if pos < ls && c.pos >= ls {
+            // 折り返した直後: まだ折り返す前の末尾が鳴っている
+            pos = le - (ls - pos);
+        }
+    }
+    pos.max(start.min(c.pos))
 }
 
 pub struct Player {
     _stream: cpal::Stream,
     shared: Arc<Shared>,
+    /// 再生を始めた位置。
+    start: AtomicI64,
 }
 
 impl Player {
@@ -42,10 +83,16 @@ impl Player {
         let stream = device
             .build_output_stream(
                 &config.into(),
-                move |data: &mut [f32], _| {
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     data.fill(0.0);
                     if !s.playing.load(Ordering::Relaxed) {
                         return;
+                    }
+                    let ts = info.timestamp();
+                    let latency = ts.playback.duration_since(&ts.callback).unwrap_or_default();
+                    // 画面のスレッドを待たせない（取れなければこの回の記録は飛ばす）
+                    if let Ok(mut c) = s.clock.try_lock() {
+                        *c = Some(ClockSample { pos: s.pos.load(Ordering::Relaxed), at: Instant::now(), latency });
                     }
                     let buf = s.buffer.lock().map(|b| b.clone()).unwrap_or_default();
                     let frames = (buf.len() / 2) as i64;
@@ -87,7 +134,7 @@ impl Player {
             )
             .ok()?;
         stream.play().ok()?;
-        Some(Player { _stream: stream, shared })
+        Some(Player { _stream: stream, shared, start: AtomicI64::new(0) })
     }
 
     pub fn set_buffer(&self, buffer: Arc<Vec<f32>>) {
@@ -102,6 +149,10 @@ impl Player {
 
     pub fn play_from(&self, sample: i64, loop_range: Option<(i64, i64)>) {
         let (ls, le) = loop_range.unwrap_or((0, 0));
+        if let Ok(mut c) = self.shared.clock.lock() {
+            *c = None;
+        }
+        self.start.store(sample, Ordering::Relaxed);
         self.shared.loop_start.store(ls, Ordering::Relaxed);
         self.shared.loop_end.store(le, Ordering::Relaxed);
         self.shared.stop_at.store(-1, Ordering::Relaxed);
@@ -125,8 +176,91 @@ impl Player {
         self.shared.playing.load(Ordering::Relaxed)
     }
 
-    /// 現在の再生位置（48kHz のサンプルフレーム）。
+    /// いまスピーカーから鳴っている位置（48kHz のサンプルフレーム）。出力の遅延と利用者の補正を差し引いてある。
     pub fn position(&self) -> i64 {
-        self.shared.pos.load(Ordering::Relaxed)
+        let offset_us = self.shared.offset_us.load(Ordering::Relaxed);
+        let clock = self.shared.clock.lock().ok().and_then(|c| *c);
+        let start = self.start.load(Ordering::Relaxed);
+        let (ls, le) = (self.shared.loop_start.load(Ordering::Relaxed), self.shared.loop_end.load(Ordering::Relaxed));
+        match clock {
+            Some(c) => {
+                let behind = Duration::from_micros(offset_us.max(0) as u64);
+                let ahead = (-offset_us).max(0) * 48 / 1000;
+                heard_position(&c, Instant::now(), behind, start, Some((ls, le))) + ahead
+            }
+            // まだコールバックが来ていない
+            None => start,
+        }
+    }
+
+    /// 映像と音のずれの補正（ミリ秒）。正の値で映像を遅らせる。
+    pub fn set_offset_ms(&self, ms: f64) {
+        self.shared.offset_us.store((ms * 1000.0).round() as i64, Ordering::Relaxed);
+    }
+
+    /// デバイスが報告している出力の遅延。
+    pub fn latency(&self) -> Option<Duration> {
+        self.shared.clock.lock().ok().and_then(|c| c.map(|c| c.latency))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(c: &ClockSample, ms: u64) -> Instant {
+        c.at + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn heard_position_subtracts_device_latency() {
+        let c = ClockSample { pos: 48_000, at: Instant::now(), latency: Duration::from_millis(40) };
+        // コールバック直後は、40ms 前に渡したもの（= 1920 サンプル手前）が鳴っている
+        assert_eq!(heard_position(&c, at(&c, 0), Duration::ZERO, 0, None), 48_000 - 1920);
+        // 40ms 経つと、渡し始めた位置がちょうど鳴る
+        assert_eq!(heard_position(&c, at(&c, 40), Duration::ZERO, 0, None), 48_000);
+        // 次のコールバックが遅れても、時間に沿って進む
+        assert_eq!(heard_position(&c, at(&c, 140), Duration::ZERO, 0, None), 48_000 + 4800);
+        // 利用者の補正（Bluetooth などで +150ms）
+        assert_eq!(heard_position(&c, at(&c, 40), Duration::from_millis(150), 0, None), 48_000 - 7200);
+    }
+
+    #[test]
+    fn stays_at_start_until_sound_begins() {
+        let c = ClockSample { pos: 96_000, at: Instant::now(), latency: Duration::from_millis(100) };
+        assert_eq!(heard_position(&c, at(&c, 0), Duration::ZERO, 96_000, None), 96_000);
+        assert_eq!(heard_position(&c, at(&c, 150), Duration::ZERO, 96_000, None), 96_000 + 2400);
+    }
+
+    #[test]
+    fn wraps_inside_loop_range() {
+        let lp = Some((0, 48_000));
+        // 折り返した直後のコールバック: 鳴っているのは折り返す前の末尾
+        let c = ClockSample { pos: 480, at: Instant::now(), latency: Duration::from_millis(20) };
+        assert_eq!(heard_position(&c, at(&c, 0), Duration::ZERO, 0, lp), 48_000 - 480);
+        // 末尾を越えたら先頭へ
+        let c = ClockSample { pos: 47_000, at: Instant::now(), latency: Duration::ZERO };
+        assert_eq!(heard_position(&c, at(&c, 100), Duration::ZERO, 0, lp), 47_000 + 4800 - 48_000);
+    }
+
+    /// 1 秒ぶんのコールバック（10ms ごと・遅延 30ms）を模擬して、映像のフレームが音と ±0.5 フレーム以内に収まるか。
+    #[test]
+    fn simulated_playback_stays_within_half_a_frame() {
+        let fps = 30.0;
+        let latency = Duration::from_millis(30);
+        let t0 = Instant::now();
+        let mut worst = 0.0f64;
+        for cb in 0..100u64 {
+            let c = ClockSample { pos: cb as i64 * 480, at: t0 + Duration::from_millis(cb * 10), latency };
+            // コールバックとコールバックの間に、画面が何度か描かれる
+            for draw in [0u64, 3, 7] {
+                let now = c.at + Duration::from_millis(draw);
+                // 鳴っている位置の正解: 時刻 - 遅延
+                let truth = (now.duration_since(t0).as_secs_f64() - latency.as_secs_f64()).max(0.0) * 48_000.0;
+                let got = heard_position(&c, now, Duration::ZERO, 0, None) as f64;
+                worst = worst.max(((got - truth) / 48_000.0 * fps).abs());
+            }
+        }
+        assert!(worst < 0.5, "最大 {worst:.3} フレームずれた");
     }
 }

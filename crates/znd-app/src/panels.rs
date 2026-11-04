@@ -703,6 +703,10 @@ impl App {
         ui.checkbox(&mut self.snap, "スナップ");
         ui.separator();
         ui.menu_button("オーディオから生成", |ui| self.audio_menu(ctx, ui));
+        if ui.button("ビートに合わせる…").on_hover_text("ビートやマーカーの位置にレイヤーを並べる・パルスのキーを打つ").clicked() {
+            ui.close_menu();
+            self.show.beatfit = true;
+        }
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui) {

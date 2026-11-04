@@ -814,6 +814,7 @@ impl App {
                         ui.label(&layer.name);
                         self.audio_controls(ui, layer);
                     }
+                    self.sync_controls(ui);
                 });
             });
         });

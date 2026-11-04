@@ -21,6 +21,7 @@ pub(crate) struct Shown {
     pub licenses: bool,
     pub shortcuts: bool,
     pub plugins: bool,
+    pub beatfit: bool,
 }
 
 pub(crate) struct ExportUi {
@@ -176,6 +177,7 @@ impl App {
         self.graph_window(ctx);
         self.script_window(ctx);
         self.plugin_window(ctx);
+        self.beatfit_window(ctx);
         self.info_windows(ctx);
     }
 
