@@ -294,7 +294,7 @@ impl App {
                                     *v = (b as u8).to_string();
                                 }
                             }
-                            "text" => {
+                            "text" | "args" => {
                                 ui.text_edit_singleline(v);
                             }
                             _ => {

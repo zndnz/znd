@@ -416,6 +416,9 @@ mod tests {
         assert_eq!(ex.params[1].choices()[1], ("slow".to_string(), "slow".to_string()));
         assert_eq!(ex.params[1].default_value(), "slow");
         assert!(!hooks::exporters().iter().any(|e| e.key == "test.exp/bad"));
+        let mut free = ex.clone();
+        free.params.push(serde_json::from_value(serde_json::json!({"id": "extra", "label": "追加", "type": "args", "default": "-tune film  -g 60"})).unwrap());
+        assert_eq!(free.expand(&["{extra}".into(), "-x".into()], &Default::default()), ["-tune", "film", "-g", "60", "-x"]);
         // 拡張子を省いたライブラリは OS に合わせて探す
         let ext = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
         std::fs::write(dir.join(format!("lib/libfx.{ext}")), b"").unwrap();

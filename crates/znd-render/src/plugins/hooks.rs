@@ -202,7 +202,7 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
 pub struct ExporterParam {
     pub id: String,
     pub label: String,
-    /// "number" / "choice" / "text" / "bool"
+    /// "number" / "choice" / "text" / "bool" / "args"（空白で区切った複数の引数。引数そのものが `{ID}` のときに展開する）
     #[serde(rename = "type", default = "default_param_type")]
     pub kind: String,
     /// 既定値（number は数値、choice は選択肢の番号、bool は真偽値、text は文字列）。
@@ -245,6 +245,7 @@ impl ExporterParam {
                 self.choices().get(i).map(|c| c.1.clone()).unwrap_or_default()
             }
             "bool" => (self.default.as_bool().unwrap_or(false) as u8).to_string(),
+            "args" => json_text(&self.default),
             _ => json_text(&self.default),
         }
     }
@@ -285,7 +286,15 @@ pub struct Exporter {
 impl Exporter {
     /// `{id}` を値で置き換えた引数。値の無いものは既定値。空になった引数は取り除く。
     pub fn expand(&self, args: &[String], values: &std::collections::HashMap<String, String>) -> Vec<String> {
+        let value = |p: &ExporterParam| values.get(&p.id).cloned().unwrap_or_else(|| p.default_value());
         args.iter()
+            .flat_map(|a| {
+                // 引数そのものが "{ID}" で、そのパラメータが args 型なら、空白で区切って複数の引数にする
+                if let Some(p) = self.params.iter().find(|p| p.kind == "args" && *a == format!("{{{}}}", p.id)) {
+                    return value(p).split_whitespace().map(String::from).collect::<Vec<_>>();
+                }
+                vec![a.clone()]
+            })
             .map(|a| {
                 let mut out = a.clone();
                 for p in &self.params {

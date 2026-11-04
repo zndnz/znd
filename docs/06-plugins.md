@@ -189,7 +189,7 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 | `even` | 偶数の解像度が必要（4:2:0 など） |
 | `audio_only` | 音声だけを書き出す（映像はレンダリングしない） |
 | `single_frame` | 1 フレームだけ書き出す（アプリでは今のフレーム、CLI では `--range` の先頭） |
-| `params` | 書き出し画面に並ぶ設定。`type` は `number` / `choice`（`options` は文字列か `{label, value}`）/ `bool`（0/1）/ `text` |
+| `params` | 書き出し画面に並ぶ設定。`type` は `number` / `choice`（`options` は文字列か `{label, value}`）/ `bool`（0/1）/ `text` / `args`（空白で区切った複数の引数。引数そのものが `{ID}` のとき展開する） |
 
 ### パネル
 
