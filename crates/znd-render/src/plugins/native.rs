@@ -68,6 +68,7 @@ pub struct Host {
     pub set_output: unsafe extern "C" fn(*mut c_void, u32, u32, i32, i32, *mut Image) -> i32,
     pub mask_count: unsafe extern "C" fn(*mut c_void) -> u32,
     pub mask_points: unsafe extern "C" fn(*mut c_void, u32, *mut f64, u32, *mut u32) -> u32,
+    pub comp_size: unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32),
 }
 
 #[repr(C)]
@@ -436,6 +437,17 @@ unsafe extern "C" fn host_mask_points(ctx: *mut c_void, index: u32, out: *mut f6
     line.pts.len() as u32
 }
 
+/// レイヤーが入っているコンポの大きさ（コンポの画素）。
+unsafe extern "C" fn host_comp_size(ctx: *mut c_void, w: *mut u32, h: *mut u32) {
+    let [cw, ch] = state(ctx).ctx.comp_size;
+    if !w.is_null() {
+        w.write(cw);
+    }
+    if !h.is_null() {
+        h.write(ch);
+    }
+}
+
 impl Effect for NativeEffect {
     fn info(&self) -> &PluginInfo {
         &self.info
@@ -462,6 +474,7 @@ impl Effect for NativeEffect {
             set_output: host_set_output,
             mask_count: host_mask_count,
             mask_points: host_mask_points,
+            comp_size: host_comp_size,
         };
         let abi3 = self.lib.abi >= 3;
         let args = RenderArgs {

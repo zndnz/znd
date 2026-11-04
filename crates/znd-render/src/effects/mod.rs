@@ -49,6 +49,8 @@ pub struct FxContext<'a> {
     pub layer_time: f64,
     /// レイヤーの長さ（イン点〜アウト点、秒）。
     pub layer_duration: f64,
+    /// レイヤーが入っているコンポの大きさ（コンポの画素、縮小表示の倍率は掛けない）。
+    pub comp_size: [u32; 2],
 }
 
 /// エフェクトを 1 つ適用する。未知の種類は何もしない。

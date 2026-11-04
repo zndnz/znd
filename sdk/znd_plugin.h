@@ -108,6 +108,8 @@ typedef struct ZndHost {
   /* index 番目のマスクを折れ線にして、バッファ画素座標の (x, y) を out に最大 cap 組書く。
    * 戻り値は折れ線の点の数（cap より大きければ足りない）。closed には閉じたパスなら 1 */
   uint32_t (*mask_points)(void *ctx, uint32_t index, double *out, uint32_t cap, uint32_t *closed);
+  /* レイヤーが入っているコンポの大きさ（コンポの画素。RenderArgs.scale は掛けない）。 */
+  void (*comp_size)(void *ctx, uint32_t *width, uint32_t *height);
 } ZndHost;
 
 typedef struct ZndRenderArgs {

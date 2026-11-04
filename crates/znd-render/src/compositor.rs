@@ -908,6 +908,7 @@ impl<'a> Renderer<'a> {
                 offset: &offset,
                 layer_time,
                 layer_duration,
+                comp_size: [comp.width, comp.height],
             };
             buf = effects::apply(&fx.kind, params, buf, &ctx);
         }

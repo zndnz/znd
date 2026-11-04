@@ -184,6 +184,7 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
                 offset: &offset,
                 layer_time: t.seconds(),
                 layer_duration: comp.duration.seconds(),
+                comp_size: [comp.width, comp.height],
             };
             buf = effects::apply(&fx.kind, &params, buf, &ctx);
             // 出力フィルターでは画面の大きさを変えられないので、ずれた分を戻して元の大きさに貼り直す

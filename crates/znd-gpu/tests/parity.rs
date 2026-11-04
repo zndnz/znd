@@ -73,6 +73,7 @@ fn cpu(kind: &str, p: &EvalParams, buf: FrameBuf, scale: f32, seconds: f64) -> F
         offset: &offset,
         layer_time: seconds,
         layer_duration: 10.0,
+        comp_size: [1920, 1080],
     };
     effects::apply(kind, p, buf, &ctx)
 }
