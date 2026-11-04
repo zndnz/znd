@@ -356,6 +356,24 @@ function __evalExpr(__src, compId, li, path, t, value) {
   }
 }
 
+function __evalText(__src, compId, li, t, value) {
+  var env = { global: {}, rs: { seed: 0, timeless: false, n: 0 }, seed: __strHash(compId + '/' + li + '/text'), comp: null, self: null };
+  env.global.time = t;
+  __envStack.push(env);
+  try {
+    env.comp = __makeComp(compId);
+    var layer = __makeLayer(compId, li);
+    env.global.value = value;
+    env.global.thisComp = env.comp;
+    env.global.thisLayer = layer;
+    env.global.index = layer.index;
+    var r = __run(__src, layer, {}, env.global);
+    return r === undefined || r === null ? '' : String(r);
+  } finally {
+    __envStack.pop();
+  }
+}
+
 function __evalSelector(__src, textIndex, textTotal, selectorValue, t) {
   var env = { global: { time: t, textIndex: textIndex, textTotal: textTotal, selectorValue: selectorValue }, rs: { seed: 0, timeless: false, n: 0 }, seed: textIndex * 7919, comp: { frameDuration: 1 / 30 }, self: null };
   __envStack.push(env);

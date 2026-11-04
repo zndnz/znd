@@ -370,6 +370,9 @@ pub enum LayerKind {
         /// 文字ごとの 3D（アニメーターの Z 位置・X/Y 回転を有効にする）。
         #[serde(default, skip_serializing_if = "is_false")]
         per_char_3d: bool,
+        /// 本文のエクスプレッション。文字列を返し、その時刻の本文になる（`value` は元の本文）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_expression: Option<crate::property::Expression>,
     },
     /// 音声のみのレイヤー。
     Audio {

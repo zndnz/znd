@@ -74,7 +74,7 @@ fn l2_missing_fonts_are_listed() {
     let l = Layer::new(
         "t",
         "t",
-        LayerKind::Text { document: doc, animators: vec![], path: None, per_char_3d: false },
+        LayerKind::Text { document: doc, animators: vec![], path: None, per_char_3d: false, text_expression: None },
         Transform::centered(0.0, 0.0, 10.0, 10.0),
         Time::from_seconds(1.0),
     );

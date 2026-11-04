@@ -178,7 +178,7 @@ pub fn add_lyric_layers(project: &mut Project, comp_index: usize, lines: &[Lyric
         let mut layer = Layer::new(
             id,
             name,
-            LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false },
+            LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false, text_expression: None },
             tr,
             comp.duration,
         );

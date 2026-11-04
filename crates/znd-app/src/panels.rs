@@ -734,7 +734,7 @@ impl App {
                 self.add_layer(
                     "テキスト追加",
                     "テキスト",
-                    LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false },
+                    LayerKind::Text { document: doc, animators: Vec::new(), path: None, per_char_3d: false, text_expression: None },
                 );
             }
             NewLayer::Rect => self.add_layer(

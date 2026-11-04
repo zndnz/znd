@@ -483,10 +483,31 @@ impl ExprEngine {
                 values.push((i, path, v));
             }
         }
-        if values.is_empty() {
+        // テキストの本文のエクスプレッション
+        let mut texts: Vec<(usize, String)> = Vec::new();
+        for (i, layer) in comp.layers.iter().enumerate() {
+            if let LayerKind::Text { document, text_expression: Some(e), .. } = &layer.kind {
+                if !e.enabled {
+                    continue;
+                }
+                let text = with_project(project, |ctx| {
+                    let f: Function = ctx.globals().get("__evalText")?;
+                    let v: Value = f.call((e.source.as_str(), comp.id.0.as_str(), i as i32, t.seconds(), document.text.as_str()))?;
+                    Ok(v.as_string().and_then(|s| s.to_string().ok()).unwrap_or_default())
+                })
+                .map_err(|e| e.to_string())?;
+                texts.push((i, text));
+            }
+        }
+        if values.is_empty() && texts.is_empty() {
             return Ok(None);
         }
         let mut out = comp.clone();
+        for (i, text) in texts {
+            if let LayerKind::Text { document, .. } = &mut out.layers[i].kind {
+                document.text = text;
+            }
+        }
         for (i, layer) in out.layers.iter_mut().enumerate() {
             visit_layer_mut(layer, &mut |path, mut m| {
                 if let Some((_, _, v)) = values.iter().find(|(li, p, _)| *li == i && p == path) {

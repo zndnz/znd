@@ -52,6 +52,10 @@ fn shape_wiggles(items: &[ShapeItem]) -> bool {
 fn is_varying(layer: &Layer) -> bool {
     let mut animated = false;
     visit_layer(layer, &mut |_, p| animated |= !p.key_times().is_empty() || p.has_expression());
+    // 本文のエクスプレッション・セレクターのエクスプレッションは時刻で変わりうる
+    if znd_core::visit::has_expressions(layer) && matches!(layer.kind, znd_core::LayerKind::Text { .. }) {
+        animated = true;
+    }
     if animated || layer.motion_blur {
         return true;
     }

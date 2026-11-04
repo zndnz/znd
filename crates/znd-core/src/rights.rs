@@ -176,7 +176,7 @@ mod tests {
         let mut text = Layer::new(
             "t",
             "t",
-            LayerKind::Text { document: TextDocument::new("x", 10.0), animators: vec![], path: None, per_char_3d: false },
+            LayerKind::Text { document: TextDocument::new("x", 10.0), animators: vec![], path: None, per_char_3d: false, text_expression: None },
             Transform::centered(0.0, 0.0, 10.0, 10.0),
             d,
         );

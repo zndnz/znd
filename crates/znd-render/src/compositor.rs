@@ -769,7 +769,7 @@ impl<'a> Renderer<'a> {
         let mut buf = FrameBuf { width: out_w, height: out_h, data: take_zeroed(out_w * out_h * 4) };
         match &layer.kind {
             LayerKind::Shape { items } => render_shape(items, t, &m, &mut buf, &self.cx),
-            LayerKind::Text { document, animators, path, per_char_3d } => {
+            LayerKind::Text { document, animators, path, per_char_3d, .. } => {
                 let path_geo: Option<BezPath> = path.as_ref().and_then(|p| layer.masks.get(p.mask)).map(|k| k.path.eval(t));
                 let selector = |src: &str, index: usize, total: usize, value: f64| match self.resolver {
                     Some(r) => r.selector(src, index, total, value, t),

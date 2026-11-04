@@ -140,7 +140,7 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 | `commands` | `menu` に `plugins`（メニューバーの「プラグイン」）/ `layer`（タイムラインのレイヤーの右クリック）/ `toolbar` を並べる。`shortcut` は `Cmd` `Ctrl` `Alt` `Shift` とキー名を `+` でつなぐ。組み込みのショートカットが優先される |
 | `panels` | スクリプトで中身を組み立てる浮動パネル。「プラグイン」メニューで開閉する |
 | `output_filters` | コンポの最終画像（背景を敷いた後）に掛けるエフェクトの列。`stage` は `preview` / `export` / `both`。プラグインのエフェクト（`plugin:` / `ofx:`）も指定できる。「プラグイン」メニューで切り替える |
-| `expressions` | ここで定義した関数は、すべてのエクスプレッションから呼べる |
+| `expressions` | ここで定義した関数は、すべてのエクスプレッションから呼べる（関数の中から `thisComp`・`thisLayer`・`time` も参照できる） |
 | `exporters` | 書き出し形式（FFmpeg の出力引数の組）。書き出し画面の形式に並び、CLI では `--format plugin:<パッケージID/ID>` で使える（後述） |
 | `permissions` | 必要とする権限の宣言（`network` / `process` / `filesystem`）。安全性スキャンで中身と突き合わせ、宣言なしに通信していれば危険度を上げる。`filesystem` を宣言したスクリプトは、利用者が選んだファイルを読み書きできる |
 | `effects` | エフェクトのライブラリ。拡張子を省く（`lib/fx`）と、OS に合わせて `fx.dylib` / `libfx.dylib` / `.so` / `.dll` を探す |

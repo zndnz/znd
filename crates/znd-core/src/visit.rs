@@ -319,7 +319,9 @@ pub fn find_prop<'a>(layer: &'a Layer, path: &str) -> Option<PropRef<'a>> {
 pub fn has_expressions(layer: &Layer) -> bool {
     let mut any = false;
     visit_layer(layer, &mut |_, r| any |= r.has_expression());
-    any || matches!(&layer.kind, LayerKind::Text { animators, .. } if animators.iter().any(|a| a.selectors.iter().any(|s| matches!(s, TextSelector::Expression { .. }))))
+    any || matches!(&layer.kind, LayerKind::Text { animators, text_expression, .. }
+        if animators.iter().any(|a| a.selectors.iter().any(|s| matches!(s, TextSelector::Expression { .. })))
+            || text_expression.as_ref().is_some_and(|e| e.enabled))
 }
 
 #[cfg(test)]

@@ -381,7 +381,7 @@ fn r2_expression_selector_drives_text_animator() {
         let l = Layer::new(
             "t",
             "t",
-            LayerKind::Text { document: TextDocument::new("AAAA", 60.0), animators: vec![animator(src)], path: None, per_char_3d: false },
+            LayerKind::Text { document: TextDocument::new("AAAA", 60.0), animators: vec![animator(src)], path: None, per_char_3d: false, text_expression: None },
             Transform::centered(0.0, 0.0, 200.0, 300.0),
             s(10.0),
         );
@@ -462,4 +462,31 @@ fn library_functions_see_the_current_comp_and_time() {
     l.transform.rotation.expression = expr("__testCompWidthPlusTime()");
     let p = project(vec![l]);
     assert_eq!(eval(&p, "a", "transform.rotation", 2.0), vec![403.0]);
+}
+
+#[test]
+fn text_expression_replaces_the_source_text_each_frame() {
+    let doc = TextDocument::new("元", 40.0);
+    let mut l = Layer::new(
+        "t",
+        "t",
+        LayerKind::Text {
+            document: doc,
+            animators: vec![],
+            path: None,
+            per_char_3d: false,
+            text_expression: Some(Expression { source: "value + ':' + Math.floor(time) + '/' + thisComp.width".into(), enabled: true }),
+        },
+        Transform::centered(0.0, 0.0, 400.0, 300.0),
+        s(10.0),
+    );
+    l.name = "t".into();
+    let p = project(vec![l]);
+    let engine = ExprEngine::new();
+    let c = p.comp(&CompId::new("c")).unwrap();
+    let r = znd_render::Resolver::resolve(&engine, &p, c, s(3.5)).unwrap().unwrap();
+    match &r.layers[0].kind {
+        LayerKind::Text { document, .. } => assert_eq!(document.text, "元:3/400"),
+        _ => unreachable!(),
+    }
 }
