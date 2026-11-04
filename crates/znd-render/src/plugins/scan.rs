@@ -309,6 +309,25 @@ const SHELL_STRINGS: &[&str] = &[
     "/dev/tcp/",
     "xattr -d com.apple.quarantine",
 ];
+/// `needle` を含むか。末尾が英字の語（`| sh` など）は、直後に英数字が続くもの（`|shift`）を数えない。
+fn contains_word_end(hay: &str, needle: &str) -> bool {
+    if !needle.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        return hay.contains(needle);
+    }
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let end = from + i + needle.len();
+        if !hay[end..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+            return true;
+        }
+        from = from + i + 1;
+        while !hay.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    false
+}
+
 /// 文書・名前空間などで普通に現れる URL のホスト。通信先として数えない。
 const BENIGN_HOSTS: &[&str] = &[
     "www.apple.com",
@@ -614,7 +633,7 @@ fn scan_bytes(path: &Path, bytes: &[u8], declared: &Declared) -> FileScan {
         for (list, hits) in
             [(SENSITIVE_STRINGS, &mut sens), (PERSIST_STRINGS, &mut persist), (SHELL_STRINGS, &mut shell)]
         {
-            if let Some(m) = list.iter().find(|m| lower.contains(**m)) {
+            if let Some(m) = list.iter().find(|m| contains_word_end(&lower, m)) {
                 hits.push(m);
             }
         }
@@ -1077,5 +1096,13 @@ mod tests {
         let bytes = fake_macho(&["_connection_count", "systemFont", "_reconnect_ui"]);
         let fs = scan_bytes(Path::new("x.dylib"), &bytes, &Declared::default());
         assert!(!fs.network && !fs.exec, "{:?}", fs.findings);
+    }
+
+    #[test]
+    fn pipe_to_shell_needs_a_word_boundary() {
+        assert!(contains_word_end("curl x | sh", "| sh"));
+        assert!(contains_word_end("a|sh -c", "|sh"));
+        assert!(!contains_word_end("and|or|xor|shift|", "|sh"));
+        assert!(contains_word_end("/bin/sh", "/bin/sh"));
     }
 }
