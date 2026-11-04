@@ -36,6 +36,8 @@ pub(crate) struct ExportUi {
     /// 権利未確認の素材があっても書き出す、という確認。
     pub acknowledged: bool,
     pub speed_graph: bool,
+    /// プラグインの書き出し形式のパラメータ（`パッケージID/ID` → パラメータ ID → 値）。
+    pub plugin_values: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 impl Default for ExportUi {
@@ -51,6 +53,7 @@ impl Default for ExportUi {
             report: true,
             acknowledged: false,
             speed_graph: false,
+            plugin_values: Default::default(),
         }
     }
 }
@@ -69,7 +72,29 @@ const FORMATS: [&str; 10] = [
 ];
 
 impl ExportUi {
-    fn settings(&self, work_area: Option<(i64, i64)>) -> ExportSettings {
+    /// `format` が組み込みの数を超えていれば、プラグインの書き出し形式。
+    fn plugin_exporter(&self) -> Option<znd_render::plugins::hooks::Exporter> {
+        self.format.checked_sub(FORMATS.len()).and_then(|i| znd_render::plugins::hooks::exporters().get(i).cloned())
+    }
+
+    fn settings(&self, work_area: Option<(i64, i64)>, frame: i64) -> ExportSettings {
+        if let Some(ex) = self.plugin_exporter() {
+            let values = self.plugin_values.get(&ex.key).cloned().unwrap_or_default();
+            let mut s = ExportSettings::new(Format::from_exporter(&ex, &values));
+            s.audio = self.audio || ex.audio_only;
+            s.transparent = self.transparent;
+            if ex.single_frame {
+                // 静止画は今のフレーム
+                s.range = Some((frame, frame + 1));
+            } else {
+                s.pad_head = self.pad;
+                s.pad_tail = self.pad;
+                if self.work_area {
+                    s.range = work_area;
+                }
+            }
+            return s;
+        }
         let mut s = match self.format {
             0 => ExportSettings::new(Format::H264 { crf: self.crf, preset: "slow".into() }),
             1 => ExportSettings::screening(self.pad),
@@ -222,11 +247,72 @@ impl App {
         egui::Window::new("書き出し").open(&mut open).default_width(460.0).show(ctx, |ui| {
             let Some(comp) = shared.comp(&self.comp_id) else { return };
             let e = &mut self.export_ui;
-            egui::ComboBox::from_id_salt("format").width(330.0).selected_text(FORMATS[e.format]).show_ui(ui, |ui| {
+            let exporters = znd_render::plugins::hooks::exporters();
+            if e.format >= FORMATS.len() + exporters.len() {
+                e.format = 0;
+            }
+            let current = match e.format.checked_sub(FORMATS.len()) {
+                Some(i) => format!("{}（プラグイン）", exporters[i].label),
+                None => FORMATS[e.format].to_string(),
+            };
+            egui::ComboBox::from_id_salt("format").width(330.0).selected_text(current).show_ui(ui, |ui| {
                 for (i, f) in FORMATS.iter().enumerate() {
                     ui.selectable_value(&mut e.format, i, *f);
                 }
+                if !exporters.is_empty() {
+                    ui.separator();
+                    ui.weak("プラグイン");
+                    for (i, ex) in exporters.iter().enumerate() {
+                        let r = ui.selectable_value(&mut e.format, FORMATS.len() + i, &ex.label);
+                        if !ex.description.is_empty() {
+                            r.on_hover_text(&ex.description);
+                        }
+                    }
+                }
             });
+            if let Some(ex) = e.plugin_exporter() {
+                let values = e.plugin_values.entry(ex.key.clone()).or_default();
+                egui::Grid::new("plugin_export_params").num_columns(2).show(ui, |ui| {
+                    for p in &ex.params {
+                        let v = values.entry(p.id.clone()).or_insert_with(|| p.default_value());
+                        ui.label(&p.label);
+                        match p.kind.as_str() {
+                            "choice" => {
+                                let choices = p.choices();
+                                let shown = choices.iter().find(|c| c.1 == *v).map(|c| c.0.clone()).unwrap_or_else(|| v.clone());
+                                egui::ComboBox::from_id_salt(("pexp", &p.id)).selected_text(shown).show_ui(ui, |ui| {
+                                    for (label, value) in &choices {
+                                        if ui.selectable_label(v == value, label).clicked() {
+                                            *v = value.clone();
+                                        }
+                                    }
+                                });
+                            }
+                            "bool" => {
+                                let mut b = v == "1";
+                                if ui.checkbox(&mut b, "").changed() {
+                                    *v = (b as u8).to_string();
+                                }
+                            }
+                            "text" => {
+                                ui.text_edit_singleline(v);
+                            }
+                            _ => {
+                                let mut x: f64 = v.parse().unwrap_or(0.0);
+                                let lo = p.min.unwrap_or(f64::MIN);
+                                let hi = p.max.unwrap_or(f64::MAX);
+                                if ui.add(egui::DragValue::new(&mut x).range(lo..=hi)).changed() {
+                                    *v = if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x}") };
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                if ex.single_frame {
+                    ui.weak("今のフレームを 1 枚書き出します");
+                }
+            }
             ui.horizontal(|ui| {
                 if matches!(e.format, 0 | 2) {
                     ui.add(egui::DragValue::new(&mut e.crf).range(0..=40).prefix("画質 CRF "));
@@ -239,7 +325,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut e.audio, "音声を含める");
                 ui.add(egui::DragValue::new(&mut e.pad).speed(0.1).range(0.0..=30.0).prefix("前後の黒味 ").suffix(" 秒"));
-                if matches!(e.format, 5..=8) {
+                if matches!(e.format, 5..=8) || e.plugin_exporter().is_some_and(|x| x.alpha) {
                     ui.checkbox(&mut e.transparent, "背景を透過");
                 }
             });
@@ -259,7 +345,7 @@ impl App {
                 ui.checkbox(&mut e.acknowledged, "確認中であることを承知のうえで書き出す");
             }
             let allowed = warnings.is_empty() || e.acknowledged;
-            let settings = e.settings(self.work_area);
+            let settings = e.settings(self.work_area, self.frame);
             let report = e.report;
             ui.separator();
             ui.horizontal(|ui| {

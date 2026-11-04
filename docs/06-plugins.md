@@ -141,7 +141,9 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 | `panels` | スクリプトで中身を組み立てる浮動パネル。「プラグイン」メニューで開閉する |
 | `output_filters` | コンポの最終画像（背景を敷いた後）に掛けるエフェクトの列。`stage` は `preview` / `export` / `both`。プラグインのエフェクト（`plugin:` / `ofx:`）も指定できる。「プラグイン」メニューで切り替える |
 | `expressions` | ここで定義した関数は、すべてのエクスプレッションから呼べる |
-| `permissions` | 必要とする権限の宣言（`network` / `process` / `filesystem`）。安全性スキャンで中身と突き合わせ、宣言なしに通信していれば危険度を上げる |
+| `exporters` | 書き出し形式（FFmpeg の出力引数の組）。書き出し画面の形式に並び、CLI では `--format plugin:<パッケージID/ID>` で使える（後述） |
+| `permissions` | 必要とする権限の宣言（`network` / `process` / `filesystem`）。安全性スキャンで中身と突き合わせ、宣言なしに通信していれば危険度を上げる。`filesystem` を宣言したスクリプトは、利用者が選んだファイルを読み書きできる |
+| `effects` | エフェクトのライブラリ。拡張子を省く（`lib/fx`）と、OS に合わせて `fx.dylib` / `libfx.dylib` / `.so` / `.dll` を探す |
 
 パス はパッケージ内の相対パスのみ（`..` や絶対パスは拒否）。スクリプトはスキャンした時点の中身をメモリに持つので、
 読み込み後にファイルを書き換えても次の起動まで反映されない。
@@ -157,7 +159,36 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
   `openPanel(key)` / `closePanel(key)`、`setFilter(key, on)`、`runCommand(key)`（key は `パッケージID/ID`）
 - `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`
 
-スクリプトの環境にはファイル・ネットワーク・別プログラムへの手段が無い。実行は 10 秒で打ち切る。
+- `filesystem` 権限があるときだけ: `host.openFile({ extensions, binary, data }, callback)`（利用者が選んだファイルを読み、
+  同じスクリプトの `callback(中身, パス, data)` を呼ぶ。テキストは UTF-8 / UTF-16 / Shift_JIS を見分ける）、
+  `host.saveFile(名前, 中身, { extensions })`（保存先を選んでもらって書く。中身はバイト列の配列も可）、
+  `host.importFiles({ extensions })`（素材を選んでもらい、再生ヘッドの位置に読み込む）
+
+スクリプトの環境にはネットワーク・別プログラムへの手段が無く、ファイルは利用者がダイアログで選んだものにしか触れない。実行は 10 秒で打ち切る。
+
+### 書き出し形式（exporters）
+
+```json
+"exporters": [{
+  "id": "x264", "label": "x264（品質指定）", "extension": "mp4", "even": true,
+  "video_args": ["-c:v", "libx264", "-preset", "{preset}", "-crf", "{crf}", "-pix_fmt", "yuv420p"],
+  "audio_args": ["-c:a", "aac", "-b:a", "{abr}k"],
+  "params": [
+    { "id": "crf", "label": "CRF", "type": "number", "default": 18, "min": 0, "max": 51 },
+    { "id": "preset", "label": "プリセット", "type": "choice", "default": 1, "options": ["fast", "medium", "slow"] },
+    { "id": "abr", "label": "音声 kbps", "default": 192 }
+  ]
+}]
+```
+
+| 項目 | 内容 |
+|---|---|
+| `video_args` / `audio_args` | 入力（生フレームのパイプと音声の WAV）の後ろ・出力ファイルの前に置く引数。`{パラメータID}` は値に置き換わり、空になった引数は消える。`-i` は使えない |
+| `alpha` | アルファ付き（16bit RGBA）でパイプに流す。透過の書き出しができる |
+| `even` | 偶数の解像度が必要（4:2:0 など） |
+| `audio_only` | 音声だけを書き出す（映像はレンダリングしない） |
+| `single_frame` | 1 フレームだけ書き出す（アプリでは今のフレーム、CLI では `--range` の先頭） |
+| `params` | 書き出し画面に並ぶ設定。`type` は `number` / `choice`（`options` は文字列か `{label, value}`）/ `bool`（0/1）/ `text` |
 
 ### パネル
 

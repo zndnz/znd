@@ -29,6 +29,7 @@ znd — レイヤーベース合成・モーショングラフィックスエン
              [--two-pass kbps] [--range 開始:終了] [--pad 秒] [--scale N] [--no-audio] [--alpha] [--report] [--gpu]
              --gpu: エフェクトを GPU で処理する（既定は CPU。結果は同じで、差は 8bit の 1 段未満）
              形式: h264（既定）/ h265 / prores / prores4444 / png / png16 / exr / gif / screening（上映提出用）
+                   plugin:<パッケージID/ID>（プラグインの書き出し形式。--param 名前=値 で設定）
   znd queue <プロジェクト> <キュー.json>     レンダーキュー（QueueJob の配列）を順に書き出す
 
 提出前チェック:
@@ -188,6 +189,24 @@ fn parse_format(args: &[String]) -> Result<ExportSettings, String> {
         "exr" => ExportSettings::new(Format::ExrSequence),
         "gif" => ExportSettings::new(Format::Gif),
         "screening" => ExportSettings::screening(1.0),
+        other if other.starts_with("plugin:") => {
+            let key = &other["plugin:".len()..];
+            let list = znd_render::plugins::hooks::exporters();
+            let ex = list.iter().find(|e| e.key == key || e.key.ends_with(&format!("/{key}"))).ok_or_else(|| {
+                let names: Vec<&str> = list.iter().map(|e| e.key.as_str()).collect();
+                format!("プラグインの書き出し形式「{key}」がありません（あるもの: {}）", if names.is_empty() { "なし".into() } else { names.join(", ") })
+            })?;
+            // --param 名前=値 を並べて指定する
+            let mut values = std::collections::HashMap::new();
+            for (i, a) in args.iter().enumerate() {
+                if a == "--param" {
+                    let kv = args.get(i + 1).ok_or("--param には 名前=値 を続けてください")?;
+                    let (k, v) = kv.split_once('=').ok_or("--param は 名前=値 で指定してください")?;
+                    values.insert(k.to_string(), v.to_string());
+                }
+            }
+            ExportSettings::new(Format::from_exporter(ex, &values))
+        }
         other => return Err(format!("未対応の形式です: {other}")),
     };
     if let Some(r) = opt(args, "--range") {

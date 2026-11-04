@@ -197,6 +197,127 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
 }
 
 /// エクスプレッション用ライブラリ（名前, ソース）を追加する。同じ名前は置き換える。
+/// プラグインが定義する書き出し形式のパラメータ（書き出し画面に並ぶ）。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct ExporterParam {
+    pub id: String,
+    pub label: String,
+    /// "number" / "choice" / "text" / "bool"
+    #[serde(rename = "type", default = "default_param_type")]
+    pub kind: String,
+    /// 既定値（number は数値、choice は選択肢の番号、bool は真偽値、text は文字列）。
+    #[serde(default)]
+    pub default: serde_json::Value,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// choice の選択肢。`{ "label": "高画質", "value": "slow" }` または文字列。
+    #[serde(default)]
+    pub options: Vec<serde_json::Value>,
+}
+
+fn default_param_type() -> String {
+    "number".into()
+}
+
+impl ExporterParam {
+    /// 選択肢の (表示名, 引数に入る値)。
+    pub fn choices(&self) -> Vec<(String, String)> {
+        self.options
+            .iter()
+            .map(|o| match o {
+                serde_json::Value::Object(m) => {
+                    let label = m.get("label").map(json_text).unwrap_or_default();
+                    let value = m.get("value").map(json_text).unwrap_or_else(|| label.clone());
+                    (label, value)
+                }
+                v => (json_text(v), json_text(v)),
+            })
+            .collect()
+    }
+
+    /// 既定値を引数に入る文字列にする。
+    pub fn default_value(&self) -> String {
+        match self.kind.as_str() {
+            "choice" => {
+                let i = self.default.as_u64().unwrap_or(0) as usize;
+                self.choices().get(i).map(|c| c.1.clone()).unwrap_or_default()
+            }
+            "bool" => (self.default.as_bool().unwrap_or(false) as u8).to_string(),
+            _ => json_text(&self.default),
+        }
+    }
+}
+
+fn json_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// プラグインが定義する書き出し形式（FFmpeg の引数の組）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Exporter {
+    /// `パッケージID/ID`
+    pub key: String,
+    pub plugin: String,
+    pub label: String,
+    pub extension: String,
+    /// 映像の出力引数（`-c:v libx264 -crf {crf}` など）。`{パラメータID}` は値に置き換わる。
+    pub video_args: Vec<String>,
+    /// 音声の出力引数（空なら音声なし。`audio_only` では必須）。
+    pub audio_args: Vec<String>,
+    /// アルファ付きでパイプに流す（透過の書き出しができる）。
+    pub alpha: bool,
+    /// 偶数の解像度が必要（4:2:0 など）。
+    pub even: bool,
+    /// 音声だけを書き出す（映像はレンダリングしない）。
+    pub audio_only: bool,
+    /// 1 フレームだけ書き出す（静止画）。範囲の先頭のフレームを使う。
+    pub single_frame: bool,
+    pub params: Vec<ExporterParam>,
+    pub description: String,
+}
+
+impl Exporter {
+    /// `{id}` を値で置き換えた引数。値の無いものは既定値。空になった引数は取り除く。
+    pub fn expand(&self, args: &[String], values: &std::collections::HashMap<String, String>) -> Vec<String> {
+        args.iter()
+            .map(|a| {
+                let mut out = a.clone();
+                for p in &self.params {
+                    let v = values.get(&p.id).cloned().unwrap_or_else(|| p.default_value());
+                    out = out.replace(&format!("{{{}}}", p.id), &v);
+                }
+                out
+            })
+            .filter(|a| !a.is_empty())
+            .collect()
+    }
+}
+
+fn exporters_list() -> &'static Mutex<Vec<Exporter>> {
+    static E: OnceLock<Mutex<Vec<Exporter>>> = OnceLock::new();
+    E.get_or_init(Mutex::default)
+}
+
+pub fn register_exporter(e: Exporter) {
+    let mut list = exporters_list().lock().unwrap();
+    if let Some(old) = list.iter_mut().find(|o| o.key == e.key) {
+        *old = e;
+    } else {
+        list.push(e);
+    }
+}
+
+/// 読み込んだプラグインが定義した書き出し形式。
+pub fn exporters() -> Vec<Exporter> {
+    exporters_list().lock().unwrap().clone()
+}
+
 pub fn add_expression_library(name: &str, source: &str) {
     let mut libs = libraries().lock().unwrap();
     let mut list: Vec<(String, String)> = libs.as_ref().clone();

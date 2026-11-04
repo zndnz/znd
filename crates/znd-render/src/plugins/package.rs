@@ -44,6 +44,32 @@ pub struct Manifest {
     /// エクスプレッションから呼べる関数を定義する JavaScript。
     #[serde(default)]
     pub expressions: Vec<String>,
+    /// 書き出し形式（FFmpeg の引数の組）。
+    #[serde(default)]
+    pub exporters: Vec<ExporterDecl>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ExporterDecl {
+    pub id: String,
+    pub label: String,
+    pub extension: String,
+    #[serde(default)]
+    pub video_args: Vec<String>,
+    #[serde(default)]
+    pub audio_args: Vec<String>,
+    #[serde(default)]
+    pub alpha: bool,
+    #[serde(default)]
+    pub even: bool,
+    #[serde(default)]
+    pub audio_only: bool,
+    #[serde(default)]
+    pub single_frame: bool,
+    #[serde(default)]
+    pub params: Vec<hooks::ExporterParam>,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -149,7 +175,14 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
     if !valid(&m.id) {
         return Err(format!("パッケージの id「{}」が不正です（英数字と . _ - のみ）", m.id));
     }
-    for id in m.commands.iter().map(|c| &c.id).chain(m.panels.iter().map(|p| &p.id)).chain(m.output_filters.iter().map(|f| &f.id)) {
+    for id in m
+        .commands
+        .iter()
+        .map(|c| &c.id)
+        .chain(m.panels.iter().map(|p| &p.id))
+        .chain(m.output_filters.iter().map(|f| &f.id))
+        .chain(m.exporters.iter().map(|e| &e.id))
+    {
         if !valid(id) {
             return Err(format!("id「{id}」が不正です（英数字と . _ - のみ）"));
         }
@@ -166,11 +199,30 @@ pub fn resolve(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(dir.join(p))
 }
 
+/// エフェクトのライブラリのパスを解決する。拡張子を省いた `lib/fx` は、OS に合わせて
+/// `lib/fx.dylib` / `lib/libfx.dylib`（macOS）、`.so`（Linux）、`.dll`（Windows）を探す。
+pub fn resolve_lib(dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    let p = resolve(dir, rel)?;
+    if p.exists() {
+        return Ok(p);
+    }
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(windows) {
+        "dll"
+    } else {
+        "so"
+    };
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let candidates = [p.with_file_name(format!("{name}.{ext}")), p.with_file_name(format!("lib{name}.{ext}"))];
+    Ok(candidates.iter().find(|c| c.exists()).cloned().unwrap_or(p))
+}
+
 pub fn declared(dir: &Path, m: &Manifest) -> Declared {
     Declared {
         manifest: true,
         permissions: m.permissions.iter().map(|s| s.to_ascii_lowercase()).collect::<BTreeSet<_>>(),
-        binaries: m.effects.iter().filter_map(|e| resolve(dir, e).ok()).collect(),
+        binaries: m.effects.iter().filter_map(|e| resolve_lib(dir, e).ok()).collect(),
     }
 }
 
@@ -188,7 +240,7 @@ pub(crate) fn activate(dir: &Path, manifest: Manifest, report: SecurityReport) -
     };
     let m = pkg.manifest.clone();
     for rel in &m.effects {
-        match resolve(dir, rel).and_then(|p| super::load_unchecked(&p)) {
+        match resolve_lib(dir, rel).and_then(|p| super::load_unchecked(&p)) {
             Ok(infos) => pkg.effect_count += infos.len(),
             Err(e) => pkg.warnings.push(format!("エフェクト {rel}: {e}")),
         }
@@ -237,6 +289,29 @@ pub(crate) fn activate(dir: &Path, manifest: Manifest, report: SecurityReport) -
             effects: f.effects.iter().map(|e| FilterEffect { kind: e.kind.clone(), params: e.params.clone() }).collect(),
         });
     }
+    for e in &m.exporters {
+        // 出力先を引数で指定させない（書き出し先はホストが決める）
+        let bad = e.video_args.iter().chain(&e.audio_args).any(|a| a == "-i" || a == "-y" || a.starts_with("-filter_complex_script"));
+        let ext_ok = !e.extension.is_empty() && e.extension.len() <= 16 && e.extension.chars().all(|c| c.is_ascii_alphanumeric());
+        if bad || !ext_ok || (e.audio_only && e.audio_args.is_empty()) {
+            pkg.warnings.push(format!("書き出し形式 {}: 引数か拡張子が不正です", e.id));
+            continue;
+        }
+        hooks::register_exporter(hooks::Exporter {
+            key: format!("{}/{}", m.id, e.id),
+            plugin: m.id.clone(),
+            label: e.label.clone(),
+            extension: e.extension.to_ascii_lowercase(),
+            video_args: e.video_args.clone(),
+            audio_args: e.audio_args.clone(),
+            alpha: e.alpha,
+            even: e.even,
+            audio_only: e.audio_only,
+            single_frame: e.single_frame,
+            params: e.params.clone(),
+            description: e.description.clone(),
+        });
+    }
     for rel in &m.expressions {
         match read(rel) {
             Ok(src) => hooks::add_expression_library(&format!("{}/{rel}", m.id), &src),
@@ -266,6 +341,7 @@ pub(crate) fn load(dir: &Path) -> Package {
                     panels: Vec::new(),
                     output_filters: Vec::new(),
                     expressions: Vec::new(),
+                    exporters: Vec::new(),
                 },
                 dir: dir.to_path_buf(),
                 report,
@@ -314,5 +390,36 @@ mod tests {
         assert!(!pkg.commands.is_empty() && !pkg.panels.is_empty());
         assert_eq!(pkg.report.level, scan::RiskLevel::Safe, "{:#?}", pkg.report.findings);
         assert!(hooks::output_filters().iter().any(|f| f.plugin == pkg.manifest.id));
+    }
+
+    #[test]
+    fn exporters_are_registered_and_libraries_resolve_without_extension() {
+        let dir = std::env::temp_dir().join(format!("znd-pkg-exporters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(
+            dir.join(MANIFEST),
+            r#"{ "id": "test.exp", "name": "書き出しテスト", "exporters": [
+                { "id": "x264", "label": "x264", "extension": "mp4", "video_args": ["-c:v", "libx264", "-crf", "{crf}"],
+                  "params": [{ "id": "crf", "label": "CRF", "default": 18 },
+                             { "id": "preset", "label": "プリセット", "type": "choice", "default": 1,
+                               "options": [{ "label": "速い", "value": "fast" }, "slow"] }] },
+                { "id": "bad", "label": "不正", "extension": "mp4", "video_args": ["-i", "/etc/passwd"] }
+            ] }"#,
+        )
+        .unwrap();
+        let pkg = load(&dir);
+        assert_eq!(pkg.status, PackageStatus::Loaded);
+        assert_eq!(pkg.warnings.len(), 1, "{:?}", pkg.warnings);
+        let ex = hooks::exporters().into_iter().find(|e| e.key == "test.exp/x264").unwrap();
+        assert_eq!(ex.expand(&ex.video_args, &Default::default()), ["-c:v", "libx264", "-crf", "18"]);
+        assert_eq!(ex.params[1].choices()[1], ("slow".to_string(), "slow".to_string()));
+        assert_eq!(ex.params[1].default_value(), "slow");
+        assert!(!hooks::exporters().iter().any(|e| e.key == "test.exp/bad"));
+        // 拡張子を省いたライブラリは OS に合わせて探す
+        let ext = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
+        std::fs::write(dir.join(format!("lib/libfx.{ext}")), b"").unwrap();
+        assert_eq!(resolve_lib(&dir, "lib/fx").unwrap(), dir.join(format!("lib/libfx.{ext}")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

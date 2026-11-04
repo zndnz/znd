@@ -46,6 +46,17 @@ pub enum Format {
     /// リニアの 32bit float EXR。
     ExrSequence,
     Gif,
+    /// プラグインが定義した形式（FFmpeg の引数の組。`{パラメータ}` は置き換え済み）。
+    Custom {
+        label: String,
+        extension: String,
+        video_args: Vec<String>,
+        audio_args: Vec<String>,
+        alpha: bool,
+        even: bool,
+        audio_only: bool,
+        single_frame: bool,
+    },
 }
 
 impl Format {
@@ -53,17 +64,40 @@ impl Format {
         matches!(self, Format::PngSequence { .. } | Format::ExrSequence)
     }
     pub fn has_alpha(&self) -> bool {
-        matches!(self, Format::ProRes4444 | Format::PngSequence { .. } | Format::ExrSequence)
+        match self {
+            Format::Custom { alpha, .. } => *alpha,
+            _ => matches!(self, Format::ProRes4444 | Format::PngSequence { .. } | Format::ExrSequence),
+        }
     }
     pub fn supports_audio(&self) -> bool {
-        matches!(self, Format::H264 { .. } | Format::H265 { .. } | Format::ProRes422 | Format::ProRes4444)
+        match self {
+            Format::Custom { audio_args, .. } => !audio_args.is_empty(),
+            _ => matches!(self, Format::H264 { .. } | Format::H265 { .. } | Format::ProRes422 | Format::ProRes4444),
+        }
     }
     /// 4:2:0 / 4:2:2 のクロマサブサンプリングのため偶数寸法が必要か。
     fn needs_even(&self) -> bool {
-        matches!(self, Format::H264 { .. } | Format::H265 { .. } | Format::ProRes422)
-    }
-    pub fn extension(&self) -> &'static str {
         match self {
+            Format::Custom { even, .. } => *even,
+            _ => matches!(self, Format::H264 { .. } | Format::H265 { .. } | Format::ProRes422),
+        }
+    }
+    /// プラグインの書き出し形式から作る。`values` はパラメータ ID → 値（無いものは既定値）。
+    pub fn from_exporter(e: &znd_render::plugins::hooks::Exporter, values: &std::collections::HashMap<String, String>) -> Format {
+        Format::Custom {
+            label: e.label.clone(),
+            extension: e.extension.clone(),
+            video_args: e.expand(&e.video_args, values),
+            audio_args: e.expand(&e.audio_args, values),
+            alpha: e.alpha,
+            even: e.even,
+            audio_only: e.audio_only,
+            single_frame: e.single_frame,
+        }
+    }
+    pub fn extension(&self) -> &str {
+        match self {
+            Format::Custom { extension, .. } => extension,
             Format::H264 { .. } | Format::H265 { .. } => "mp4",
             Format::ProRes422 | Format::ProRes4444 => "mov",
             Format::PngSequence { .. } => "png",
@@ -236,15 +270,22 @@ fn encoder_args(format: &Format, space: ColorSpace, has_audio: bool) -> (PipeFor
             args.extend(s(&["-vf", "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a", "-loop", "0"]));
             PipeFormat::Rgb8
         }
+        Format::Custom { video_args, alpha, .. } => {
+            args.extend(video_args.iter().cloned());
+            if *alpha {
+                PipeFormat::Rgba16
+            } else {
+                PipeFormat::Rgb8
+            }
+        }
         Format::PngSequence { .. } | Format::ExrSequence => unreachable!("sequences are written directly"),
     };
     if has_audio {
-        let codec: &[&str] = if matches!(format, Format::ProRes422 | Format::ProRes4444) {
-            &["-c:a", "pcm_s24le"]
-        } else {
-            &["-c:a", "aac", "-b:a", "320k"]
-        };
-        args.extend(s(codec));
+        match format {
+            Format::Custom { audio_args, .. } => args.extend(audio_args.iter().cloned()),
+            Format::ProRes422 | Format::ProRes4444 => args.extend(s(&["-c:a", "pcm_s24le"])),
+            _ => args.extend(s(&["-c:a", "aac", "-b:a", "320k"])),
+        }
         args.extend(s(&["-map", "0:v:0", "-map", "1:a:0"]));
     }
     (pipe, args)
@@ -306,7 +347,17 @@ pub fn export(
         return Err(MediaError::Invalid("書き出す範囲にフレームがありません".into()).into());
     }
     let fr = comp.frame_rate;
-    let (head, tail) = ((settings.pad_head * fr.fps()).round().max(0.0) as i64, (settings.pad_tail * fr.fps()).round().max(0.0) as i64);
+    let (audio_only, single_frame) = match &settings.format {
+        Format::Custom { audio_only, single_frame, .. } => (*audio_only, *single_frame),
+        _ => (false, false),
+    };
+    // 静止画の形式は範囲の先頭 1 フレームだけ
+    let last = if single_frame { first + 1 } else { last };
+    let (head, tail) = if single_frame {
+        (0, 0)
+    } else {
+        ((settings.pad_head * fr.fps()).round().max(0.0) as i64, (settings.pad_tail * fr.fps()).round().max(0.0) as i64)
+    };
     let total = head + (last - first) + tail;
     let (w, h) = Renderer::output_size(comp, settings.downsample);
     if settings.format.needs_even() && (w % 2 != 0 || h % 2 != 0) {
@@ -335,7 +386,7 @@ pub fn export(
     if let (true, Some(m)) = (settings.audio, &mixer) {
         let (a, b) = (time_to_sample(fr.frame_to_time(first)), time_to_sample(fr.frame_to_time(last)));
         let mixed = m.mix(comp_id, a, (b - a) as usize).map_err(MediaError::Invalid)?;
-        if mixed.iter().any(|v| *v != 0.0) {
+        if audio_only || mixed.iter().any(|v| *v != 0.0) {
             let pad = |frames: i64| vec![0.0f32; (time_to_sample(fr.frame_to_time(frames)) * 2) as usize];
             let mut full = pad(head);
             full.extend(&mixed);
@@ -373,6 +424,20 @@ pub fn export(
     let mut cleanup: Vec<PathBuf> = wav.iter().cloned().chain(intermediate.iter().cloned()).collect();
 
     let result: Result<(), ExportError> = (|| {
+        if audio_only {
+            // 音声だけの形式: 映像はレンダリングせず、ミックスした WAV を変換する
+            let Some(src) = &wav else {
+                return Err(MediaError::Invalid("音声を書き出すにはミキサー（音声の読み込み）が必要です".into()).into());
+            };
+            let mut a = s(&["-i", &src.display().to_string(), "-vn"]);
+            if let Format::Custom { audio_args, .. } = &settings.format {
+                a.extend(audio_args.iter().cloned());
+            }
+            a.push(path.display().to_string());
+            run_ffmpeg(&a)?;
+            progress(total, total);
+            return Ok(());
+        }
         if settings.format.is_sequence() {
             let mut done = 0;
             while done < total {

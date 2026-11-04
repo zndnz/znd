@@ -456,3 +456,58 @@ fn a5_export_without_clip_source_is_video_only() {
     assert!(probe(&out).unwrap().audio.is_none());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn x1_plugin_defined_formats_video_still_and_audio_only() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = temp_dir("x1");
+    let mut p = moving_project(0.5);
+    let wav = dir.join("clicks.wav");
+    write_wav(&wav, &click_track(1)).unwrap();
+    add_audio_layer(&mut p, &wav, Time::ZERO);
+    let clips = FfmpegClips::new(&dir);
+    let ctx = ExportContext { clips: Some(&clips), ..ExportContext::new(&p, &NoFootage) };
+    let exporter = |video: &[&str], audio: &[&str], ext: &str, audio_only: bool, single: bool| znd_render::plugins::hooks::Exporter {
+        key: "test/x".into(),
+        plugin: "test".into(),
+        label: "テスト".into(),
+        extension: ext.into(),
+        video_args: video.iter().map(|s| s.to_string()).collect(),
+        audio_args: audio.iter().map(|s| s.to_string()).collect(),
+        alpha: false,
+        even: false,
+        audio_only,
+        single_frame: single,
+        params: vec![serde_json::from_value(serde_json::json!({"id": "q", "label": "画質", "type": "number", "default": 30})).unwrap()],
+        description: String::new(),
+    };
+    // 映像: {q} がパラメータの値に置き換わる
+    let ex = exporter(&["-c:v", "libx264", "-crf", "{q}", "-pix_fmt", "yuv420p"], &["-c:a", "aac"], "mp4", false, false);
+    let values = std::collections::HashMap::from([("q".to_string(), "20".to_string())]);
+    let fmt = Format::from_exporter(&ex, &values);
+    assert!(matches!(&fmt, Format::Custom { video_args, .. } if video_args[3] == "20"));
+    let mp4 = dir.join("a.mp4");
+    export(&ctx, &main_id(), &mp4, &ExportSettings::new(fmt), |_, _| true).unwrap();
+    let info = probe_with(&mp4, true).unwrap();
+    assert_eq!((info.codec.as_str(), info.frame_count), ("h264", Some(15)));
+    assert!(probe(&mp4).unwrap().audio.is_some());
+    // 静止画: 範囲の先頭 1 フレームだけ
+    let png = dir.join("still.png");
+    let settings = ExportSettings { range: Some((7, 8)), ..ExportSettings::new(Format::from_exporter(&exporter(&[], &[], "png", false, true), &Default::default())) };
+    assert_eq!(export(&ctx, &main_id(), &png, &settings, |_, _| true).unwrap().frames, 1);
+    let (rp, _) = project_with_footage(&png);
+    let footage = FfmpegFootage::new(&dir);
+    let (got, want) = (to_rgb8(&decoded(&rp, &footage, 0, true), None), to_rgb8(&reference(&p, 7), None));
+    // パイプに流すときのディザの分だけずれる
+    assert!(got.iter().zip(&want).all(|(a, b)| a.abs_diff(*b) <= 1));
+    // 音声だけ: 映像を作らず WAV に
+    let out = dir.join("only.wav");
+    let ex = exporter(&[], &["-c:a", "pcm_s16le"], "wav", true, false);
+    export(&ctx, &main_id(), &out, &ExportSettings::new(Format::from_exporter(&ex, &Default::default())), |_, _| true).unwrap();
+    let info = probe(&out).unwrap();
+    assert_eq!(info.width, 0);
+    assert_eq!(info.audio.unwrap().sample_rate, 48000);
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -86,7 +86,34 @@ var host = {
   /** 出力フィルターを切り替える（"パッケージID/フィルターID"） */
   setFilter: function (key, on) { __actions.push({ type: 'filter', key: String(key), on: !!on }); },
   /** 別のコマンドを実行する（"パッケージID/コマンドID"） */
-  runCommand: function (key) { __actions.push({ type: 'command', key: String(key) }); }
+  runCommand: function (key) { __actions.push({ type: 'command', key: String(key) }); },
+  /**
+   * ファイルを選んでもらい、中身を受け取る（plugin.json の permissions に "filesystem" が必要）。
+   * 選ばれると、同じスクリプトの関数 callback(中身, パス, 追加の値) が呼ばれる。
+   * opts: { extensions: ['srt'], binary: false（true なら中身は 0〜255 の数の配列）, title, data（callback にそのまま渡す値） }
+   */
+  openFile: function (opts, callback) {
+    opts = opts || {};
+    var name = typeof callback === 'function' ? callback.name : String(callback || '');
+    if (!name) throw new Error('host.openFile: callback（関数か関数名）を指定してください');
+    __actions.push({ type: 'open_file', extensions: (opts.extensions || []).map(String), binary: !!opts.binary,
+      title: opts.title ? String(opts.title) : '', callback: name, data: opts.data === undefined ? null : opts.data });
+  },
+  /**
+   * 保存先を選んでもらい、中身を書き出す（"filesystem" 権限が必要）。
+   * content は文字列、または 0〜255 の数の配列（バイナリ）。opts: { extensions: ['srt'] }
+   */
+  saveFile: function (fileName, content, opts) {
+    opts = opts || {};
+    var binary = Array.isArray(content);
+    __actions.push({ type: 'save_file', name: String(fileName || 'untitled'), binary: binary,
+      content: binary ? content.map(function (b) { return b & 255; }) : String(content), extensions: (opts.extensions || []).map(String) });
+  },
+  /** 素材のファイルを選んでもらい、今のコンポの再生ヘッドの位置に読み込む（"filesystem" 権限が必要） */
+  importFiles: function (opts) {
+    opts = opts || {};
+    __actions.push({ type: 'import', extensions: (opts.extensions || []).map(String), sequence: !!opts.sequence });
+  }
 };
 "#;
 

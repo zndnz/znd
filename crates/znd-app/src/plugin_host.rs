@@ -32,6 +32,28 @@ pub(crate) struct PluginHost {
     pub detail: Option<PathBuf>,
     /// `host.runCommand` で頼まれた、次のフレームで実行するコマンド。
     queued: Vec<String>,
+    /// `host.openFile` で読んだファイルを渡す、次のフレームで呼ぶ関数。
+    calls: Vec<(Origin, String, Vec<Value>)>,
+}
+
+/// スクリプトがどのパッケージのどのファイルから実行されたか（コールバックを同じスクリプトで呼ぶため）。
+#[derive(Clone)]
+pub(crate) struct Origin {
+    pub label: String,
+    pub plugin: String,
+    pub dir: PathBuf,
+    pub source: std::sync::Arc<String>,
+}
+
+/// ファイルを読み書きするスクリプトに許す上限。
+const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn has_permission(plugin: &str, perm: &str) -> bool {
+    plugins::packages().iter().any(|p| p.manifest.id == plugin && p.manifest.permissions.iter().any(|x| x.eq_ignore_ascii_case(perm)))
+}
+
+fn strings(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
 pub(crate) fn risk_color(level: RiskLevel) -> Color32 {
@@ -47,6 +69,28 @@ pub(crate) fn risk_color(level: RiskLevel) -> Color32 {
 fn risk_badge(ui: &mut egui::Ui, level: RiskLevel) -> egui::Response {
     let text = egui::RichText::new(format!(" 危険度: {} ", level.short())).size(10.5).color(Color32::BLACK).strong();
     ui.add(egui::Label::new(text.background_color(risk_color(level))))
+}
+
+/// テキストファイルの中身を文字列にする。UTF-8（BOM 付き含む）と UTF-16 を見分け、
+/// どちらでもなければ Shift_JIS として読む（AviUtl 由来の字幕などに多い）。
+fn decode_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    let utf16 = |le: bool, b: &[u8]| -> String {
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) }).collect();
+        String::from_utf16_lossy(&units)
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        return utf16(true, rest);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        return utf16(false, rest);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned(),
+    }
 }
 
 /// "Cmd+Shift+K" のような表記を読む。
@@ -82,7 +126,8 @@ impl App {
     }
 
     /// プラグインのスクリプトの結果を取り込む（プロジェクトの書き換え・画面への操作・ログ）。
-    fn absorb_plugin_run(&mut self, label: &str, coalesce: bool, run: znd_script::PluginRun) {
+    fn absorb_plugin_run(&mut self, origin: &Origin, coalesce: bool, run: znd_script::PluginRun) {
+        let label = origin.label.as_str();
         if let Some(updated) = run.project {
             if let Some(owner) = self.shared.comp(&self.comp_id).and_then(|c| c.locked_by.clone()).filter(|o| o != &self.user) {
                 self.status = format!("このコンポは {owner} がロックしているため、プラグインの変更を取り込みませんでした");
@@ -129,7 +174,77 @@ impl App {
                         }
                     }
                 }
+                kind @ ("open_file" | "save_file" | "import") => {
+                    if !has_permission(&origin.plugin, "filesystem") {
+                        let msg = format!("[{label}] ファイルを扱うには plugin.json の permissions に \"filesystem\" が必要です");
+                        self.status = msg.clone();
+                        self.plugins.logs.push(msg);
+                        continue;
+                    }
+                    let exts = strings(a.get("extensions"));
+                    let mut dialog = rfd::FileDialog::new();
+                    if !exts.is_empty() {
+                        dialog = dialog.add_filter(exts.join(", "), &exts);
+                    }
+                    match kind {
+                        "open_file" => {
+                            if let Some(t) = a.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                                dialog = dialog.set_title(t);
+                            }
+                            let Some(path) = dialog.pick_file() else { continue };
+                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            if size > MAX_FILE_BYTES {
+                                self.status = format!("[{label}] ファイルが大きすぎます（64MB まで）");
+                                continue;
+                            }
+                            let content = match std::fs::read(&path) {
+                                Ok(bytes) if a.get("binary").and_then(Value::as_bool).unwrap_or(false) => json!(bytes),
+                                Ok(bytes) => json!(decode_text(&bytes)),
+                                Err(e) => {
+                                    self.status = format!("[{label}] 読めません: {e}");
+                                    continue;
+                                }
+                            };
+                            let callback = a.get("callback").and_then(Value::as_str).unwrap_or("").to_string();
+                            let data = a.get("data").cloned().unwrap_or(Value::Null);
+                            if !callback.is_empty() && self.plugins.calls.len() < 8 {
+                                self.plugins.calls.push((origin.clone(), callback, vec![content, json!(path.display().to_string()), data]));
+                            }
+                        }
+                        "save_file" => {
+                            let name = a.get("name").and_then(Value::as_str).unwrap_or("untitled");
+                            let Some(path) = dialog.set_file_name(name).save_file() else { continue };
+                            let bytes: Vec<u8> = match a.get("content") {
+                                Some(Value::String(t)) => t.as_bytes().to_vec(),
+                                Some(Value::Array(v)) => v.iter().map(|b| b.as_u64().unwrap_or(0) as u8).collect(),
+                                _ => Vec::new(),
+                            };
+                            self.status = match std::fs::write(&path, bytes) {
+                                Ok(()) => format!("{} に保存しました", path.display()),
+                                Err(e) => format!("[{label}] 保存できません: {e}"),
+                            };
+                        }
+                        _ => {
+                            let sequence = a.get("sequence").and_then(Value::as_bool).unwrap_or(false);
+                            for path in dialog.pick_files().unwrap_or_default() {
+                                self.import_path(&path, sequence);
+                            }
+                        }
+                    }
+                }
                 _ => {}
+            }
+        }
+    }
+
+    /// `host.openFile` のコールバックなど、スクリプトの関数を引数付きで呼ぶ。
+    fn run_plugin_call(&mut self, origin: &Origin, function: &str, args: &[Value]) {
+        let context = self.plugin_context(&origin.dir, &origin.plugin);
+        match znd_script::run_plugin(&self.shared, &origin.source, Some((function, args)), &context) {
+            Ok(run) => self.absorb_plugin_run(origin, false, run),
+            Err(e) => {
+                self.status = format!("{}: {e}", origin.label);
+                self.plugins.logs.push(format!("[{}] エラー: {e}", origin.label));
             }
         }
     }
@@ -137,11 +252,12 @@ impl App {
     pub(crate) fn run_plugin_command(&mut self, cmd: &Command) {
         let context = self.plugin_context(&cmd.dir, &cmd.plugin);
         let call = cmd.function.as_deref().map(|f| (f, &[][..]));
+        let origin = Origin { label: cmd.label.clone(), plugin: cmd.plugin.clone(), dir: cmd.dir.clone(), source: cmd.source.clone() };
         match znd_script::run_plugin(&self.shared, &cmd.source, call, &context) {
             Ok(run) => {
                 // スクリプトが host.status で出したものがあれば、そちらが上書きする
                 self.status = format!("{} を実行しました", cmd.label);
-                self.absorb_plugin_run(&cmd.label, false, run);
+                self.absorb_plugin_run(&origin, false, run);
             }
             Err(e) => {
                 self.status = format!("{}: {e}", cmd.label);
@@ -275,6 +391,9 @@ impl App {
         for key in std::mem::take(&mut self.plugins.queued) {
             self.run_command_key(&key);
         }
+        for (origin, function, args) in std::mem::take(&mut self.plugins.calls) {
+            self.run_plugin_call(&origin, &function, &args);
+        }
         for panel in plugins::panels() {
             if self.plugins.panels.get(&panel.key).is_some_and(|s| s.open) {
                 self.plugin_panel(ctx, &panel);
@@ -371,7 +490,13 @@ impl App {
                     st.built_for = None;
                 }
                 // スライダーのドラッグなど、続けて届く同じ部品の操作は 1 つの取り消し単位にまとめる
-                self.absorb_plugin_run(&format!("{} / {id}", panel.title), true, run);
+                let origin = Origin {
+                    label: format!("{} / {id}", panel.title),
+                    plugin: panel.plugin.clone(),
+                    dir: panel.dir.clone(),
+                    source: panel.source.clone(),
+                };
+                self.absorb_plugin_run(&origin, true, run);
             }
             Err(e) => {
                 if let Some(st) = self.plugins.panels.get_mut(&panel.key) {

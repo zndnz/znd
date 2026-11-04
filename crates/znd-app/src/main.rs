@@ -734,11 +734,15 @@ impl App {
                     LayerKind::Precomp { comp } if depth < 16 => p.comp(comp),
                     _ => None,
                 };
-                if znd_audio::layer_footage(p, l).is_some() || nested.is_some() {
+                // 音声エフェクト（プラグイン）のパラメータが変わったときもミックスし直す
+                let audio_fx: Vec<&EffectInstance> =
+                    l.effects.iter().filter(|e| znd_core::effect::audio_processor(&e.kind).is_some()).collect();
+                if znd_audio::layer_footage(p, l).is_some() || nested.is_some() || !audio_fx.is_empty() {
                     feed(
                         &serde_json::to_string(&(&l.kind, l.in_point, l.out_point, l.start_time, l.speed, &l.audio, &l.time_remap, l.solo))
                             .unwrap_or_default(),
                     );
+                    feed(&serde_json::to_string(&audio_fx).unwrap_or_default());
                 }
                 if let Some(n) = nested {
                     walk(p, n, feed, depth + 1);
