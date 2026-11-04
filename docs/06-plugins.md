@@ -157,7 +157,8 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 - `ctx`: `comp`（開いているコンポの ID）、`layer` / `layers`（選択中のレイヤー）、`frame`、`time`（秒）、`fps`、`plugin`
 - `host`: 画面への操作。`select(id)`、`setFrame(n)`、`setTime(秒)`、`status(文)`、`alert(文)`、`openComp(id)`、
   `openPanel(key)` / `closePanel(key)`、`setFilter(key, on)`、`runCommand(key)`（key は `パッケージID/ID`）
-- `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`
+- `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`、
+  `addEffect(レイヤー, 種類, 名前)`（既定値のエフェクトを足して返す）・`setParam(エフェクト, パラメータ, 値)`・`findEffect(レイヤー, 名前)`
 
 - `filesystem` 権限があるときだけ: `host.openFile({ extensions, binary, data }, callback)`（利用者が選んだファイルを読み、
   同じスクリプトの `callback(中身, パス, data)` を呼ぶ。テキストは UTF-8 / UTF-16 / Shift_JIS を見分ける）、

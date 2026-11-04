@@ -41,6 +41,29 @@ function newId(prefix) {
   project.compositions.forEach(function (c) { used[c.id] = true; c.layers.forEach(function (l) { used[l.id] = true; }); });
   for (var n = 1; ; n++) { var id = prefix + '-' + n; if (!used[id]) return id; }
 }
+/** 既定値のエフェクトを作ってレイヤーの末尾に足し、そのエフェクトを返す。name を省くと種類の表示名 */
+function addEffect(l, kind, name) {
+  var fx = JSON.parse(__new_effect(String(kind), l.kind && l.kind.width ? l.kind.width : 100, l.kind && l.kind.height ? l.kind.height : 100));
+  if (!fx) throw new Error('エフェクト「' + kind + '」がありません');
+  if (name) fx.name = String(name);
+  if (!l.effects) l.effects = [];
+  l.effects.push(fx);
+  return fx;
+}
+/** エフェクトのパラメータに値を入れる（数・点・色はキーフレームを消して固定値に。真偽・選択肢・文字列はそのまま） */
+function setParam(fx, name, v) {
+  var p = fx.params[name];
+  if (!p) throw new Error('パラメータ「' + name + '」がありません');
+  if (p.t === 'scalar' || p.t === 'point' || p.t === 'color') p.v = { value: v };
+  else p.v = v;
+  return fx;
+}
+/** 名前でレイヤーのエフェクトを探す（無ければ null） */
+function findEffect(l, name) {
+  var list = l.effects || [];
+  for (var i = 0; i < list.length; i++) if (list[i].name === name || list[i].kind === name) return list[i];
+  return null;
+}
 /** キーフレームを作る。kind: 'linear' | 'ease' | 'hold' */
 function key(sec, value, kind) {
   var k = { time: flicks(sec), value: value, interp_in: 'linear', interp_out: 'linear', bezier_mode: 'manual' };
@@ -196,6 +219,15 @@ pub fn run_plugin(
         })
         .map_err(|e| e.to_string())?;
         g.set("log", log).map_err(|e| e.to_string())?;
+        // 既定値のエフェクト（ファイル形式と同じ JSON）。種類が無ければ "null"
+        let new_effect = Function::new(ctx.clone(), |kind: String, w: f64, h: f64| -> String {
+            match znd_core::effect::EffectInstance::new(&kind, w, h) {
+                Some(fx) => serde_json::to_string(&fx).unwrap_or_else(|_| "null".into()),
+                None => "null".into(),
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        g.set("__new_effect", new_effect).map_err(|e| e.to_string())?;
         let parsed = ctx.json_parse(json.clone()).map_err(|_| describe(&ctx))?;
         g.set("project", parsed).map_err(|e| e.to_string())?;
         let parsed_ctx = ctx.json_parse(context_json).map_err(|_| describe(&ctx))?;
