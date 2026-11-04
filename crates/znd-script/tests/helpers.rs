@@ -18,3 +18,17 @@ fn add_effect_creates_defaults_and_set_param_overrides() {
     let e = fx.eval(znd_core::Time::ZERO);
     assert_eq!((e.f("radius"), e.b("repeat_edge"), e.i("dimensions")), (25.0, true, 0));
 }
+
+#[test]
+fn add_solid_creates_a_valid_layer_on_top() {
+    let mut p = znd_core::demo::demo_project();
+    let comp = p.compositions[0].id.0.clone();
+    let n = p.compositions[0].layers.len();
+    znd_script::run_script(&mut p, &format!("var c = comp('{comp}'); var l = addSolid(c, '線', [0, 0, 0]); addEffect(l, 'gaussian_blur');")).unwrap();
+    let c = &p.compositions[0];
+    assert_eq!(c.layers.len(), n + 1);
+    assert_eq!(c.layers[0].name, "線");
+    assert!(matches!(c.layers[0].kind, znd_core::LayerKind::Solid { width, height, .. } if width == c.width && height == c.height));
+    assert_eq!(c.layers[0].out_point, c.duration);
+    assert!(p.validate().is_empty());
+}

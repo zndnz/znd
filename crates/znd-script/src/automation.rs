@@ -50,6 +50,13 @@ function addEffect(l, kind, name) {
   l.effects.push(fx);
   return fx;
 }
+/** コンポの大きさの平面を、ID を付けていちばん上に足して返す。color は sRGB の [r, g, b]（0〜1、省略で白） */
+function addSolid(c, name, color) {
+  var id = newId('layer');
+  var l = JSON.parse(__new_solid(id, String(name || '平面'), c.width, c.height, JSON.stringify(color || [1, 1, 1]), c.duration));
+  c.layers.unshift(l);
+  return l;
+}
 /** エフェクトのパラメータに値を入れる（数・点・色はキーフレームを消して固定値に。真偽・選択肢・文字列はそのまま） */
 function setParam(fx, name, v) {
   var p = fx.params[name];
@@ -228,6 +235,20 @@ pub fn run_plugin(
         })
         .map_err(|e| e.to_string())?;
         g.set("__new_effect", new_effect).map_err(|e| e.to_string())?;
+        // コンポの大きさの平面レイヤー（ファイル形式と同じ JSON）
+        let new_solid = Function::new(ctx.clone(), |id: String, name: String, w: u32, h: u32, color: String, dur: f64| -> String {
+            let c: [f32; 3] = serde_json::from_str(&color).unwrap_or([1.0, 1.0, 1.0]);
+            let l = znd_core::Layer::new(
+                id.as_str(),
+                name.as_str(),
+                znd_core::LayerKind::Solid { width: w.max(1), height: h.max(1), color: c },
+                znd_core::Transform::centered(w as f64, h as f64, w as f64, h as f64),
+                znd_core::Time(dur as i64),
+            );
+            serde_json::to_string(&l).unwrap_or_else(|_| "null".into())
+        })
+        .map_err(|e| e.to_string())?;
+        g.set("__new_solid", new_solid).map_err(|e| e.to_string())?;
         let parsed = ctx.json_parse(json.clone()).map_err(|_| describe(&ctx))?;
         g.set("project", parsed).map_err(|e| e.to_string())?;
         let parsed_ctx = ctx.json_parse(context_json).map_err(|_| describe(&ctx))?;
