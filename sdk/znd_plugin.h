@@ -110,6 +110,9 @@ typedef struct ZndHost {
   uint32_t (*mask_points)(void *ctx, uint32_t index, double *out, uint32_t cap, uint32_t *closed);
   /* レイヤーが入っているコンポの大きさ（コンポの画素。RenderArgs.scale は掛けない）。 */
   void (*comp_size)(void *ctx, uint32_t *width, uint32_t *height);
+  /* index 番目のパラメータを、レイヤーのイン点から layer_time 秒の時刻で評価して out[4] に書く（render の値と同じ形）。
+     時間で変わるカーブ（キーフレームで描いた曲線）を読むのに使う。文字列・レイヤーは 0。 */
+  int32_t (*param_at)(void *ctx, uint32_t index, double layer_time, double *out);
 } ZndHost;
 
 typedef struct ZndRenderArgs {

@@ -69,6 +69,7 @@ pub struct Host {
     pub mask_count: unsafe extern "C" fn(*mut c_void) -> u32,
     pub mask_points: unsafe extern "C" fn(*mut c_void, u32, *mut f64, u32, *mut u32) -> u32,
     pub comp_size: unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32),
+    pub param_at: unsafe extern "C" fn(*mut c_void, u32, f64, *mut f64) -> i32,
 }
 
 #[repr(C)]
@@ -448,6 +449,25 @@ unsafe extern "C" fn host_comp_size(ctx: *mut c_void, w: *mut u32, h: *mut u32) 
     }
 }
 
+/// index 番目のパラメータを、レイヤーのイン点から layer_time 秒の時刻で評価して out[4] に書く（render に渡す値と同じ形）。
+/// 文字列・レイヤーのパラメータは 0 を書く。時間で変わるカーブ（時間制御）を読むのに使う。
+unsafe extern "C" fn host_param_at(ctx: *mut c_void, index: u32, layer_time: f64, out: *mut f64) -> i32 {
+    let s = state(ctx);
+    let Some(param) = s.names.get(index as usize) else { return 1 };
+    if out.is_null() || !layer_time.is_finite() {
+        return 1;
+    }
+    let at = s.ctx.time + znd_core::Time::from_seconds(layer_time - s.ctx.layer_time);
+    let p = (s.ctx.eval_at)(at);
+    let color = |c: [f64; 4]| {
+        let l = s.ctx.cx.rgb([c[0] as f32, c[1] as f32, c[2] as f32]);
+        [l[0] as f64, l[1] as f64, l[2] as f64, c[3]]
+    };
+    let (values, _) = pack(std::slice::from_ref(param), &p, s.ctx.scale as f64, &color);
+    std::slice::from_raw_parts_mut(out, 4).copy_from_slice(&values[..4]);
+    0
+}
+
 impl Effect for NativeEffect {
     fn info(&self) -> &PluginInfo {
         &self.info
@@ -475,6 +495,7 @@ impl Effect for NativeEffect {
             mask_count: host_mask_count,
             mask_points: host_mask_points,
             comp_size: host_comp_size,
+            param_at: host_param_at,
         };
         let abi3 = self.lib.abi >= 3;
         let args = RenderArgs {
