@@ -163,11 +163,13 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
     let none_time = |_: Time| None;
     let no_audio = |_: &znd_core::LayerId, _: usize| Vec::new();
     let seed = comp.id.0.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let (w, h) = (buf.width, buf.height);
     for f in &active {
         for spec in &f.effects {
             let Some(fx) = build_effect(spec, comp.width as f64, comp.height as f64) else { continue };
             let params = fx.eval(t);
             let eval_at = |at: Time| fx.eval(at);
+            let offset = std::cell::Cell::new([0.0f64; 2]);
             let ctx = FxContext {
                 time: t,
                 frame_rate: comp.frame_rate,
@@ -179,8 +181,16 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
                 eval_at: &eval_at,
                 masks: &[],
                 seed,
+                offset: &offset,
+                layer_time: t.seconds(),
+                layer_duration: comp.duration.seconds(),
             };
             buf = effects::apply(&fx.kind, &params, buf, &ctx);
+            // 出力フィルターでは画面の大きさを変えられないので、ずれた分を戻して元の大きさに貼り直す
+            if buf.width != w || buf.height != h || offset.get() != [0.0, 0.0] {
+                buf = crate::compositor::paste_at(&buf, offset.get(), w, h);
+                offset.set([0.0, 0.0]);
+            }
         }
     }
     buf

@@ -58,6 +58,7 @@ fn cpu(kind: &str, p: &EvalParams, buf: FrameBuf, scale: f32, seconds: f64) -> F
     let none_self = |_: Time| None;
     let audio = |_: &znd_core::LayerId, _: usize| Vec::new();
     let eval_at = |_: Time| p.clone();
+    let offset = std::cell::Cell::new([0.0f64; 2]);
     let ctx = FxContext {
         time: Time::from_seconds(seconds),
         frame_rate: FrameRate::FPS_30,
@@ -69,6 +70,9 @@ fn cpu(kind: &str, p: &EvalParams, buf: FrameBuf, scale: f32, seconds: f64) -> F
         eval_at: &eval_at,
         masks: &[],
         seed: 7,
+        offset: &offset,
+        layer_time: seconds,
+        layer_duration: 10.0,
     };
     effects::apply(kind, p, buf, &ctx)
 }

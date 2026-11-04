@@ -417,3 +417,69 @@ fn o5_openfx_string_constants_match_official_headers() {
     unknown.dedup();
     assert!(unknown.is_empty(), "公式ヘッダーに無い定数: {unknown:?}");
 }
+
+/// ABI 3 のサンプル（出力の大きさの変更・組み込みエフェクトの呼び出し・音声エフェクト）を読み込む。
+fn native_abi3() -> Option<&'static PathBuf> {
+    static LIB: OnceLock<Option<PathBuf>> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let out = out_dir().join(format!("outline.{}", lib_ext()));
+        let ok = run(Command::new("cc")
+            .args(["-O1", "-shared", "-fPIC", "-Wall", "-Werror", "-I"])
+            .arg(root().join("sdk"))
+            .arg("-o")
+            .arg(&out)
+            .arg(root().join("examples/plugins/outline.c"))
+            .arg("-lm"));
+        if !ok {
+            eprintln!("cc が使えないためスキップ");
+            return None;
+        }
+        plugins::load_plugin_file(&out).unwrap();
+        Some(out)
+    })
+    .as_ref()
+}
+
+#[test]
+fn p5_abi3_effect_can_grow_the_layer_image() {
+    if native_abi3().is_none() {
+        return;
+    }
+    // 20x20 の赤い平面を 60x60 のコンポの中央に置き、5px の白い縁を付ける
+    let mut l = solid("a", 20, 20, RED, 60, 60);
+    l.effects = vec![fx("plugin:org.znd.example.outline", 20, 20).set_f("width", 5.0).set_c("color", [1.0, 1.0, 1.0, 1.0])];
+    let p = project(vec![comp("main", 60, 60, vec![l])]);
+    let buf = render(&p, "main");
+    // 中は赤のまま、元の画像の外側 3px の位置は白い縁、10px 離れた位置は透明
+    let c = buf.pixel(30, 30);
+    close(c[0], 1.0, 1e-4, "中の赤");
+    close(c[1], 0.0, 1e-4, "中の緑");
+    let edge = buf.pixel(30, 17);
+    close(edge[1], 1.0, 1e-4, "上の縁");
+    close(edge[3], 1.0, 1e-4, "上の縁のアルファ");
+    close(buf.pixel(42, 30)[1], 1.0, 1e-4, "右の縁");
+    close(buf.pixel(30, 9)[3], 0.0, 1e-6, "縁の外");
+    // 1/2 解像度でも同じ位置に縁が付く
+    let half = render_at(&p, "main", 0.0, RenderOptions { downsample: 2, ..ALPHA });
+    close(half.pixel(15, 8)[3], 1.0, 0.05, "1/2 解像度の縁");
+    close(half.pixel(15, 4)[3], 0.0, 1e-6, "1/2 解像度の縁の外");
+}
+
+#[test]
+fn p6_abi3_audio_effect_is_registered_as_audio_processor() {
+    if native_abi3().is_none() {
+        return;
+    }
+    let kind = "plugin:org.znd.example.gain";
+    let proc = znd_core::effect::audio_processor(kind).expect("音声エフェクトとして登録される");
+    let fx = fx(kind, 10, 10).set_f("gain", 0.25);
+    let mut samples = vec![1.0f32; 64];
+    proc.process(
+        &fx.eval(Time::ZERO),
+        znd_core::effect::AudioBlock { samples: &mut samples, sample_rate: 48000, start: 0, time: Time::ZERO, instance: 1, seed: 0 },
+    );
+    assert!(samples.iter().all(|v| (*v - 0.25).abs() < 1e-6));
+    // 映像には何もしない
+    let p = one_layer(8, 8, RED, vec![fx]);
+    close(render(&p, "main").pixel(4, 4)[0], 1.0, 1e-6, "映像は元のまま");
+}

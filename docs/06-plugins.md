@@ -49,7 +49,7 @@ cargo run -p znd-cli -- plugins
 
 `znd_plugin_describe()` で定義（エフェクトとパラメータ）を返し、`znd_plugin_render()` で
 RGBA の float バッファ（リニアライト・プリマルチプライド）をその場で書き換える。
-パラメータは Float / Bool / Choice / Color / Point の 5 種類で、ホストがキーフレームと
+パラメータは Float / Bool / Choice / Color / Point（ABI 3 では Text / Layer も）で、ホストがキーフレームと
 エクスプレッションを評価した「その時刻の値」を渡す。px 単位の値と位置は、プレビュー解像度に
 合わせてホストが縮尺を掛けてから渡すので、プラグイン側で解像度を気にする必要はない。
 
@@ -61,6 +61,27 @@ RGBA の float バッファ（リニアライト・プリマルチプライド�
 ```bash
 cc -O2 -shared -fPIC -Isdk -o vignette.dylib examples/plugins/vignette.c
 ```
+
+- [examples/plugins/outline.c](../examples/plugins/outline.c)（C。ABI 3: 画像を広げる縁取りと、音声エフェクト）
+
+### ABI 3 で増えたもの
+
+ABI 2 のプラグインもそのまま読み込める。ABI 3 を宣言したプラグインには、`ZndRenderArgs` の後半と
+ホスト関数表 `ZndHost` が渡る。
+
+| 項目 | 内容 |
+|---|---|
+| `layer_time` / `layer_duration` | レイヤーのイン点からの経過秒と、レイヤーの長さ |
+| `ZND_PARAM_TEXT` | 文字列のパラメータ（`strings[i]`） |
+| `ZND_PARAM_LAYER` | 他のレイヤーの参照。`host->layer_image` / `host->audio` で絵と音を取得する |
+| `host->frame_at` | このレイヤーの（エフェクト前の）絵を別の時刻で取得する（残像・時間系） |
+| `host->apply_effect` | 組み込みエフェクト（`gaussian_blur` など）を種類名と JSON のパラメータで呼ぶ |
+| `host->set_output` | 出力の大きさと左上の位置を変える（縁取り・影・余白の除去など）。レイヤーの置き場所はホストが合わせる |
+| `ZND_EFFECT_AUDIO` + `znd_plugin_process_audio` | 音声エフェクト。ミキサーがレイヤーの音に掛ける。音の無いレイヤー（平面など）に掛けると無音から始まるので、シンセやメトロノームも作れる |
+
+大きさを変えたエフェクトは、平面・フッテージ・プリコンポのレイヤーでは画像が広がったまま合成される。
+シェイプ・テキストなどコンポ全体のバッファに描くレイヤーと調整レイヤー・出力フィルターでは、
+元の大きさのバッファに貼り直される（はみ出した部分は切れる）。
 
 描画が 0 以外を返すか、結果に NaN / 無限大が含まれていた場合、ホストは元の画像に戻して続ける。
 `ZND_EFFECT_THREAD_SAFE` を付けていないエフェクトは、ホストが 1 スレッドずつ呼ぶ。

@@ -894,6 +894,8 @@ pub enum DynPd {
     B(bool),
     I(u32, Vec<String>),
     S,
+    /// 他のレイヤーの参照。
+    L,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -932,6 +934,7 @@ pub fn register_effect(def: DynEffect) -> &'static EffectDef {
                     Pd::I(*d, Box::leak(labels.into_boxed_slice()))
                 }
                 DynPd::S => Pd::S,
+                DynPd::L => Pd::L,
             },
         })
         .collect();
@@ -953,6 +956,43 @@ pub fn effect_def(kind: &str) -> Option<&'static EffectDef> {
 /// 組み込みと、登録済みのプラグインのすべてのエフェクト。
 pub fn all_effects() -> Vec<&'static EffectDef> {
     EFFECTS.iter().chain(dynamic().read().unwrap().iter().copied()).collect()
+}
+
+// ---------- 音声エフェクト（プラグインが提供する） ----------
+
+/// 音声エフェクトに渡す 1 ブロック。
+pub struct AudioBlock<'a> {
+    /// ステレオのインターリーブ（L, R, L, R, ...）、48kHz。その場で書き換える。
+    pub samples: &'a mut [f32],
+    pub sample_rate: u32,
+    /// `samples[0]` の、レイヤーのイン点から数えたサンプル位置。
+    pub start: i64,
+    /// `samples[0]` のコンポ上の時刻。
+    pub time: Time,
+    /// エフェクトの実体ごとに異なる値（レイヤー ID とエフェクトの位置から作る）。状態を持つ処理の区別に使う。
+    pub instance: u64,
+    /// レイヤーごとの乱数の種。
+    pub seed: u32,
+}
+
+/// 音声エフェクトの処理本体。`znd-audio` のミキサーが、レイヤーの音に順に掛ける。
+pub trait AudioProcessor: Send + Sync {
+    fn process(&self, params: &EvalParams, block: AudioBlock);
+}
+
+fn audio_processors() -> &'static std::sync::RwLock<BTreeMap<String, std::sync::Arc<dyn AudioProcessor>>> {
+    static P: std::sync::OnceLock<std::sync::RwLock<BTreeMap<String, std::sync::Arc<dyn AudioProcessor>>>> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// `kind` のエフェクトを音声エフェクトとして登録する（映像には掛からない）。
+pub fn register_audio_processor(kind: &str, p: std::sync::Arc<dyn AudioProcessor>) {
+    audio_processors().write().unwrap().insert(kind.to_string(), p);
+}
+
+/// `kind` が音声エフェクトなら、その処理本体。
+pub fn audio_processor(kind: &str) -> Option<std::sync::Arc<dyn AudioProcessor>> {
+    audio_processors().read().unwrap().get(kind).cloned()
 }
 
 /// エフェクトプリセット（複数エフェクトの束）。パラメータ・キーフレーム・エクスプレッションを含む。

@@ -107,11 +107,13 @@ enum Content {
         height: f32,
         color: [f32; 4],
     },
-    /// 画像と、その画像が表すレイヤー座標上の大きさ。
+    /// 画像と、その画像が表すレイヤー座標上の大きさ・左上の位置（大きさを変えるエフェクトの後は 0 でない）。
     Image {
         buf: FrameBuf,
         width: f64,
         height: f64,
+        x0: f64,
+        y0: f64,
     },
     Shared {
         buf: Arc<FrameBuf>,
@@ -384,8 +386,8 @@ impl<'a> Renderer<'a> {
                     Some(Content::Solid { width, height, color }) => {
                         Some((CompositeSource::Solid { width: width as f64, height: height as f64, color }, m))
                     }
-                    Some(Content::Image { buf, width, height }) => {
-                        let fit = Affine::scale(width / buf.width as f64, height / buf.height as f64);
+                    Some(Content::Image { buf, width, height, x0, y0 }) => {
+                        let fit = Affine::translate(x0, y0).then_after(&Affine::scale(width / buf.width as f64, height / buf.height as f64));
                         let to_buf = Affine::scale(buf.width as f64 / width, buf.height as f64 / height);
                         let scale = matrix_scale(&to_buf);
                         let ops = ops();
@@ -449,7 +451,7 @@ impl<'a> Renderer<'a> {
                 let origin = [-(comp.width as f64) / 2.0, -(comp.height as f64) / 2.0];
                 let m = flat.then_after(&Affine::translate(-origin[0], -origin[1]));
                 let buf = self.comp_space_buffer(orig, comp, layer, t, m, flat, cw, ch, opts, depth)?;
-                (Some(Content::Image { buf, width: comp.width as f64, height: comp.height as f64 }), origin)
+                (Some(Content::Image { buf, width: comp.width as f64, height: comp.height as f64, x0: 0.0, y0: 0.0 }), origin)
             } else {
                 (self.layer_content(orig, comp, layer, t, opts, depth)?, [0.0, 0.0])
             };
@@ -460,7 +462,11 @@ impl<'a> Renderer<'a> {
                     b.data.chunks_exact_mut(4).for_each(|p| p.copy_from_slice(&color));
                     (Arc::new(b), width as f64, height as f64)
                 }
-                Content::Image { buf, width, height } => (Arc::new(buf), width, height),
+                Content::Image { buf, width, height, x0, y0 } => {
+                    let origin = [origin[0] + x0, origin[1] + y0];
+                    items.push(SceneItem::Plane { layer, buf: Arc::new(buf), width, height, opacity, origin });
+                    continue;
+                }
                 Content::Shared { buf, width, height } => (buf, width, height),
             };
             items.push(SceneItem::Plane { layer, buf, width, height, opacity, origin });
@@ -489,7 +495,12 @@ impl<'a> Renderer<'a> {
         let m = base.then_after(&world_matrix(comp, layer, t));
         // 別時刻の「下の絵」は持っていないので、時間系エフェクトは現在の絵だけを見る
         let none = |_: Time| None;
-        let processed = self.apply_effects(orig, comp, layer, t, canvas.clone(), matrix_scale(&base), &m, &none, opts, depth)?;
+        let (processed, offset) = self.apply_effects(orig, comp, layer, t, canvas.clone(), matrix_scale(&base), &m, &none, opts, depth)?;
+        let processed = if processed.width != canvas.width || processed.height != canvas.height || offset != [0.0, 0.0] {
+            paste_at(&processed, offset, canvas.width, canvas.height)
+        } else {
+            processed
+        };
         let alpha = combined_alpha(&layer.masks, t, &m, canvas.width, canvas.height);
         for (i, (dst, src)) in canvas.data.chunks_exact_mut(4).zip(processed.data.chunks_exact(4)).enumerate() {
             let a = opacity * alpha.as_ref().map(|m| m[i]).unwrap_or(1.0);
@@ -541,8 +552,8 @@ impl<'a> Renderer<'a> {
                 Some(Content::Solid { width, height, color }) => {
                     Ok(rasterize(&Source::Solid { width: *width, height: *height, color: *color }, &m, out_w, out_h, opacity))
                 }
-                Some(Content::Image { buf, width, height }) => {
-                    let fit = Affine::scale(width / buf.width as f64, height / buf.height as f64);
+                Some(Content::Image { buf, width, height, x0, y0 }) => {
+                    let fit = Affine::translate(*x0, *y0).then_after(&Affine::scale(width / buf.width as f64, height / buf.height as f64));
                     Ok(rasterize(&Source::Image(buf), &m.then_after(&fit), out_w, out_h, opacity))
                 }
                 Some(Content::Shared { buf, width, height }) => {
@@ -599,7 +610,7 @@ impl<'a> Renderer<'a> {
         if !processing {
             return Ok(Some(content));
         }
-        let Content::Image { mut buf, width, height } = content else { return Ok(Some(content)) };
+        let Content::Image { mut buf, width, height, .. } = content else { return Ok(Some(content)) };
         let to_buf = Affine::scale(buf.width as f64 / width, buf.height as f64 / height);
         apply_masks(&mut buf, &layer.masks, t, &to_buf);
         // 時間系エフェクト用: 別時刻の「マスクまで適用した絵」
@@ -614,8 +625,11 @@ impl<'a> Renderer<'a> {
                 _ => None,
             }
         };
-        let buf = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&to_buf), &to_buf, &at_time, opts, depth)?;
-        Ok(Some(Content::Image { buf, width, height }))
+        let (sx, sy) = (buf.width as f64 / width, buf.height as f64 / height);
+        let (buf, [ox, oy]) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&to_buf), &to_buf, &at_time, opts, depth)?;
+        // 大きさを変えるエフェクトの後は、画像の大きさと左上の位置をレイヤー座標に直す
+        let (width, height) = (buf.width as f64 / sx, buf.height as f64 / sy);
+        Ok(Some(Content::Image { buf, width, height, x0: ox / sx, y0: oy / sy }))
     }
 
     /// マスク・エフェクト適用前の内容。`need_buffer` が true なら必ず書き換え可能な画像で返す。
@@ -640,7 +654,7 @@ impl<'a> Renderer<'a> {
                 let (bw, bh) = ((*width).div_ceil(ds).max(1) as usize, (*height).div_ceil(ds).max(1) as usize);
                 let mut buf = FrameBuf::new(bw, bh);
                 buf.data.chunks_exact_mut(4).for_each(|p| p.copy_from_slice(&color));
-                Ok(Some(Content::Image { buf, width: *width as f64, height: *height as f64 }))
+                Ok(Some(Content::Image { buf, width: *width as f64, height: *height as f64, x0: 0.0, y0: 0.0 }))
             }
             LayerKind::Footage { footage } => {
                 let item = self.project.footage_item(footage).ok_or_else(|| RenderError::MissingFootage { layer: layer.name.clone() })?;
@@ -669,7 +683,7 @@ impl<'a> Renderer<'a> {
                 };
                 if !need_buffer && self.cx.identity {
                     return Ok(Some(match blended {
-                        Some(buf) => Content::Image { buf, width, height },
+                        Some(buf) => Content::Image { buf, width, height, x0: 0.0, y0: 0.0 },
                         None => Content::Shared { buf: frame, width, height },
                     }));
                 }
@@ -687,7 +701,7 @@ impl<'a> Renderer<'a> {
                     tile_to_buf(rasterize(&Source::Image(src), &fit, bw, bh, 1.0), bw, bh)
                 };
                 self.cx.convert_buffer(&mut buf.data);
-                Ok(Some(Content::Image { buf, width, height }))
+                Ok(Some(Content::Image { buf, width, height, x0: 0.0, y0: 0.0 }))
             }
             LayerKind::Precomp { comp: nested_id } if !layer.collapse || layer.three_d => {
                 let nested = self.project.comp(nested_id).ok_or_else(|| RenderError::MissingComp(nested_id.clone()))?;
@@ -701,7 +715,7 @@ impl<'a> Renderer<'a> {
                 let (nw, nh) = Self::output_size(nested, opts.downsample);
                 let s = 1.0 / ds as f64;
                 let buf = self.render_layers(nested, nested_t, Affine::scale(s, s), nw, nh, opts, depth + 1)?;
-                Ok(Some(Content::Image { buf, width: nested.width as f64, height: nested.height as f64 }))
+                Ok(Some(Content::Image { buf, width: nested.width as f64, height: nested.height as f64, x0: 0.0, y0: 0.0 }))
             }
             _ => Ok(None),
         }
@@ -736,7 +750,8 @@ impl<'a> Renderer<'a> {
             apply_masks(&mut b, &l.masks, at, &m2);
             Some(b)
         };
-        self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&base), &m, &at_time, opts, depth)
+        let (buf, offset) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&base), &m, &at_time, opts, depth)?;
+        Ok(if buf.width != out_w || buf.height != out_h || offset != [0.0, 0.0] { paste_at(&buf, offset, out_w, out_h) } else { buf })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -837,7 +852,7 @@ impl<'a> Renderer<'a> {
         at_time: &dyn Fn(Time) -> Option<FrameBuf>,
         opts: RenderOptions,
         depth: usize,
-    ) -> Result<FrameBuf, RenderError> {
+    ) -> Result<(FrameBuf, [f64; 2]), RenderError> {
         let masks: Vec<BezPath> = layer.masks.iter().map(|k| transform_path(&k.path.eval(t), mask_m)).collect();
         let (w, h) = (buf.width, buf.height);
         let fetch_layer = |id: &LayerId| self.map_image(comp, id, t, w, h, opts, depth);
@@ -850,6 +865,8 @@ impl<'a> Renderer<'a> {
         let active: Vec<(&znd_core::EffectInstance, znd_core::EvalParams)> =
             layer.effects.iter().filter(|e| e.enabled).map(|fx| (fx, fx.eval(t))).collect();
         let env = effects::AccelEnv { scale, time_seconds: t.seconds(), cx: &self.cx };
+        let offset = std::cell::Cell::new([0.0f64; 2]);
+        let (layer_time, layer_duration) = ((t - layer.in_point).seconds(), (layer.out_point - layer.in_point).seconds());
         let on_gpu = |i: usize| match self.accel {
             Some(a) => a.supports(&effects::AccelOp { kind: &active[i].0.kind, params: &active[i].1 }, &env, w, h),
             None => false,
@@ -888,11 +905,34 @@ impl<'a> Renderer<'a> {
                 eval_at: &eval_at,
                 masks: &masks,
                 seed,
+                offset: &offset,
+                layer_time,
+                layer_duration,
             };
             buf = effects::apply(&fx.kind, params, buf, &ctx);
         }
-        Ok(buf)
+        Ok((buf, offset.get()))
     }
+}
+
+/// 大きさの変わった画像を、元の `w`×`h` のバッファへ `offset`（元の画素座標での左上）の位置で貼り直す。
+pub(crate) fn paste_at(buf: &FrameBuf, offset: [f64; 2], w: usize, h: usize) -> FrameBuf {
+    let mut out = FrameBuf::new(w, h);
+    let (ox, oy) = (offset[0].round() as isize, offset[1].round() as isize);
+    for y in 0..buf.height {
+        let dy = y as isize + oy;
+        if dy < 0 || dy >= h as isize {
+            continue;
+        }
+        let (x0, x1) = ((-ox).max(0) as usize, (w as isize - ox).clamp(0, buf.width as isize) as usize);
+        if x0 >= x1 {
+            continue;
+        }
+        let src = &buf.data[(y * buf.width + x0) * 4..(y * buf.width + x1) * 4];
+        let d = (dy as usize * w + (x0 as isize + ox) as usize) * 4;
+        out.data[d..d + src.len()].copy_from_slice(src);
+    }
+    out
 }
 
 fn tile_to_buf(tile: Option<Tile>, w: usize, h: usize) -> FrameBuf {

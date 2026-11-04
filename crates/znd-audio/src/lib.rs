@@ -192,8 +192,11 @@ impl<'a> Mixer<'a> {
                         }
                     }
                 }
+                // 音を持たないレイヤーでも、音声エフェクト（シンセ・メトロノームなど）があれば無音から作る
+                _ if has_audio_effects(layer) => {}
                 _ => continue,
             }
+            apply_audio_effects(layer, start + a as i64, &mut dry);
             // 音量（キーフレーム可）とフェード
             let (fade_in, fade_out) = (time_to_sample(layer.audio.fade_in).max(0), time_to_sample(layer.audio.fade_out).max(0));
             let gain_at = |abs: i64| db_to_gain(layer.audio.level_db.eval(sample_to_time(abs)));
@@ -219,6 +222,44 @@ impl<'a> Mixer<'a> {
             }
         }
         Ok(())
+    }
+}
+
+fn has_audio_effects(layer: &Layer) -> bool {
+    layer.effects.iter().any(|e| e.enabled && znd_core::effect::audio_processor(&e.kind).is_some())
+}
+
+/// レイヤーの音声エフェクト（プラグイン）を順に掛ける。`abs` は `dry[0]` のコンポ上のサンプル位置。
+fn apply_audio_effects(layer: &Layer, abs: i64, dry: &mut [f32]) {
+    if dry.is_empty() {
+        return;
+    }
+    let seed = layer.id.0.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    for (index, fx) in layer.effects.iter().enumerate().filter(|(_, e)| e.enabled) {
+        let Some(proc) = znd_core::effect::audio_processor(&fx.kind) else { continue };
+        let time = sample_to_time(abs);
+        let instance = (seed as u64) << 32 | index as u64;
+        // パラメータは CONTROL_BLOCK ごとに評価し直す（キーフレームに追従させる）
+        for (k, chunk) in dry.chunks_mut(CONTROL_BLOCK * 2).enumerate() {
+            let at = abs + (k * CONTROL_BLOCK) as i64;
+            let params = fx.eval(sample_to_time(at));
+            proc.process(
+                &params,
+                znd_core::effect::AudioBlock {
+                    samples: chunk,
+                    sample_rate: SAMPLE_RATE,
+                    start: at - time_to_sample(layer.in_point),
+                    time: if k == 0 { time } else { sample_to_time(at) },
+                    instance,
+                    seed,
+                },
+            );
+        }
+        for v in dry.iter_mut() {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
     }
 }
 
@@ -277,6 +318,63 @@ mod tests {
 
     fn id() -> CompId {
         CompId::new("c")
+    }
+
+    struct Doubler;
+    impl znd_core::effect::AudioProcessor for Doubler {
+        fn process(&self, p: &znd_core::EvalParams, b: znd_core::effect::AudioBlock) {
+            let k = p.f("k") as f32;
+            b.samples.iter_mut().for_each(|v| *v *= k);
+        }
+    }
+
+    struct Tone;
+    impl znd_core::effect::AudioProcessor for Tone {
+        fn process(&self, _: &znd_core::EvalParams, b: znd_core::effect::AudioBlock) {
+            // レイヤーのイン点からのサンプル位置をそのまま値にする（位置の検証用）
+            for (i, f) in b.samples.chunks_exact_mut(2).enumerate() {
+                f[0] = (b.start + i as i64) as f32;
+                f[1] = 0.5;
+            }
+        }
+    }
+
+    fn register_test_audio(kind: &str, p: std::sync::Arc<dyn znd_core::effect::AudioProcessor>) {
+        use znd_core::effect::{register_effect, DynEffect, DynPd};
+        register_effect(DynEffect {
+            kind: kind.into(),
+            label: kind.into(),
+            category: "テスト".into(),
+            time_dependent: false,
+            params: vec![("k".into(), "k".into(), DynPd::F(2.0, 0.0, 10.0))],
+        });
+        znd_core::effect::register_audio_processor(kind, p);
+    }
+
+    #[test]
+    fn audio_effects_from_plugins_are_applied_and_can_generate_sound() {
+        register_test_audio("plugin:test.doubler", std::sync::Arc::new(Doubler));
+        register_test_audio("plugin:test.tone", std::sync::Arc::new(Tone));
+        let dur = Time::from_seconds(10.0);
+        let mut l = audio_layer("a", "r", dur);
+        l.effects.push(EffectInstance::new("plugin:test.doubler", 0.0, 0.0).unwrap().set_f("k", 3.0));
+        let (p, src) = setup(vec![l], vec![("r", ramp(48000))]);
+        let out = Mixer::new(&p, &src).mix(&id(), 0, 600).unwrap();
+        assert_eq!(out[0], 3.0 / 100_000.0);
+        assert!((out[599 * 2] - 3.0 * 600.0 / 100_000.0).abs() < 1e-6);
+        // 無効にすれば元の音
+        let mut p2 = p.clone();
+        p2.compositions[0].layers[0].effects[0].enabled = false;
+        assert_eq!(Mixer::new(&p2, &src).mix(&id(), 0, 4).unwrap()[0], 1.0 / 100_000.0);
+        // 音を持たない平面でも、音声エフェクトがあれば鳴る（レイヤーのイン点からの位置が渡る）
+        let mut s = Layer::new("s", "s", LayerKind::Solid { width: 10, height: 10, color: [1.0; 3] }, Transform::centered(10.0, 10.0, 10.0, 10.0), dur);
+        s.in_point = Time::from_seconds(1.0);
+        s.effects.push(EffectInstance::new("plugin:test.tone", 0.0, 0.0).unwrap());
+        let (p, src) = setup(vec![s], vec![]);
+        let out = Mixer::new(&p, &src).mix(&id(), SR - 2, 700).unwrap();
+        assert_eq!(&out[..4], &[0.0, 0.0, 0.0, 0.0]);
+        assert_eq!((out[4], out[5]), (0.0, 0.5));
+        assert_eq!(out[(2 + 600) * 2], 600.0);
     }
 
     #[test]
