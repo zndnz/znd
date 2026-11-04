@@ -146,6 +146,15 @@ impl App {
             match a.get("type").and_then(Value::as_str).unwrap_or("") {
                 "select" => self.selected = a.get("layer").and_then(Value::as_str).map(LayerId::new),
                 "frame" => self.set_frame(a.get("frame").and_then(Value::as_i64).unwrap_or(0), false),
+                "work_area" => {
+                    self.work_area = match (a.get("start").and_then(Value::as_i64), a.get("end").and_then(Value::as_i64)) {
+                        (Some(s), Some(e)) => {
+                            let (s, e) = (s.clamp(0, self.total_frames()), e.clamp(0, self.total_frames()));
+                            (e > s).then_some((s, e))
+                        }
+                        _ => None,
+                    };
+                }
                 "time" => {
                     let fps = self.frame_rate().fps();
                     self.set_frame((a.get("seconds").and_then(Value::as_f64).unwrap_or(0.0) * fps).round() as i64, false);

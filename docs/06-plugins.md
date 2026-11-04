@@ -156,7 +156,7 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 - `project`: プロジェクト全体（ファイル形式と同じ JSON）。書き換えると 1 回の取り消し単位として取り込まれる。
   実行後に構造を検査し、参照切れなどがあれば取り込まない
 - `ctx`: `comp`（開いているコンポの ID）、`layer` / `layers`（選択中のレイヤー）、`frame`、`time`（秒）、`fps`、`plugin`
-- `host`: 画面への操作。`select(id)`、`setFrame(n)`、`setTime(秒)`、`status(文)`、`alert(文)`、`openComp(id)`、
+- `host`: 画面への操作。`select(id)`、`setFrame(n)`、`setWorkArea(開始, 終了)`（フレーム。終了は含まない。引数なしで解除）、`setTime(秒)`、`status(文)`、`alert(文)`、`openComp(id)`、
   `openPanel(key)` / `closePanel(key)`、`setFilter(key, on)`、`runCommand(key)`（key は `パッケージID/ID`）
 - `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`、
   `addEffect(レイヤー, 種類, 名前)`（既定値のエフェクトを足して返す）・`setParam(エフェクト, パラメータ, 値)`・`findEffect(レイヤー, 名前)`・`addSolid(コンポ, 名前, 色)`（コンポの大きさの平面を一番上に足す）・`addText(コンポ, 名前, 文字, サイズ)`（コンポの中心にテキストレイヤーを一番上に足す）

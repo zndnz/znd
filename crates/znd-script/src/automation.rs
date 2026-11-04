@@ -109,6 +109,8 @@ var host = {
   select: function (layerId) { __actions.push({ type: 'select', layer: layerId == null ? null : String(layerId) }); },
   /** 再生ヘッドをフレーム番号へ動かす */
   setFrame: function (frame) { __actions.push({ type: 'frame', frame: Math.round(frame) }); },
+  /** ワークエリアを start〜end フレーム（end は含まない）にする。引数なしで解除 */
+  setWorkArea: function (start, end) { __actions.push(start == null ? { type: 'work_area' } : { type: 'work_area', start: Math.round(start), end: Math.round(end) }); },
   /** 再生ヘッドを秒で動かす */
   setTime: function (sec) { __actions.push({ type: 'time', seconds: Number(sec) }); },
   /** 画面下の状態表示に出す */
