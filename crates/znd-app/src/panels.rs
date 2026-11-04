@@ -547,20 +547,9 @@ impl App {
                 }
             });
 
-            // 右端: ワークスペース名と、プレビュー・レンダーの入口
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space(4.0);
-                if ui.button("レンダー").on_hover_text("書き出しウィンドウを開く").clicked() {
-                    self.show.export = true;
-                }
-                if ui.button(if self.playing.is_some() { "停止" } else { "プレビュー" }).on_hover_text("再生／停止 (Space)").clicked()
-                {
-                    self.toggle_play();
-                }
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("ワークスペース: 標準").size(10.5).color(theme::TEXT_DIM));
-            });
+            widgets::vsep(ui);
+            self.toolbar(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.status_area(ui));
         });
     }
 
@@ -579,7 +568,6 @@ impl App {
         }
         if ui.button("コンポジション設定…").on_hover_text("プロジェクトパネルの下段で編集します").clicked() {
             ui.close_menu();
-            self.left_tab = 0;
             self.selected_footage = None;
         }
         ui.separator();

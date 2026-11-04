@@ -1,9 +1,10 @@
-//! 画面全体の配置。上からメニュー・ツールバー、中段に プロジェクト｜コンポジション｜プロパティ類、下段にタイムライン、最下段に状態表示。
+//! 画面全体の配置。最上段の 1 本にメニュー・ツール・状態表示、中段に プロジェクト｜コンポジション｜プロパティ、下段にタイムライン。
 //!
-//! パネルの境界はドラッグで動かせる。各パネルはタブで中身を切り替える。
+//! 同じ操作や情報を二か所に置かない。ポインタの下の色・RAM プレビューの量などはビューアの下の 1 行に、
+//! 整列とイン／アウトはプロパティの先頭の 1 行にまとめている。パネルの境界はドラッグで動かせる。
 
 use crate::icons::{self, Icon};
-use crate::panels::{collect_rows, NewLayer};
+use crate::panels::NewLayer;
 use crate::timeline::timecode;
 use crate::tools::Tool;
 use crate::{resolution_label, theme, widgets, App};
@@ -38,9 +39,8 @@ fn bar_frame(fill: Color32, margin_x: f32) -> egui::Frame {
 
 impl App {
     pub(crate) fn workspace(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menu").exact_height(22.0).frame(bar_frame(theme::BG0, 4.0)).show(ctx, |ui| self.menu_bar(ctx, ui));
-        egui::TopBottomPanel::top("toolbar").exact_height(28.0).frame(bar_frame(theme::BG2, 4.0)).show(ctx, |ui| self.toolbar(ui));
-        egui::TopBottomPanel::bottom("status").exact_height(19.0).frame(bar_frame(theme::BG0, 6.0)).show(ctx, |ui| self.status_bar(ui));
+        // 最上段の 1 本にメニュー・ツール・状態表示をまとめる
+        egui::TopBottomPanel::top("menu").exact_height(28.0).frame(bar_frame(theme::BG0, 4.0)).show(ctx, |ui| self.menu_bar(ctx, ui));
         let height = ctx.screen_rect().height();
         egui::TopBottomPanel::bottom("timeline")
             .resizable(true)
@@ -53,7 +53,7 @@ impl App {
             .default_width(344.0)
             .width_range(220.0..=560.0)
             .frame(theme::panel_frame())
-            .show(ctx, |ui| self.left_panel(ui));
+            .show(ctx, |ui| self.project_tab(ui));
         egui::SidePanel::right("properties")
             .resizable(true)
             .default_width(336.0)
@@ -63,137 +63,118 @@ impl App {
         egui::CentralPanel::default().frame(theme::panel_frame()).show(ctx, |ui| self.comp_panel(ctx, ui));
     }
 
-    // ---------- ツールバー ----------
+    // ---------- ツール（メニューの右に並ぶ） ----------
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            for (tool, icon, tip) in Tool::ALL {
-                if widgets::icon_toggle(ui, icon, self.tool == tool, tip).clicked() {
-                    self.set_tool(tool);
-                }
+    /// ツールの切り替え・レイヤー作成・書き出し・プラグインのボタン。
+    /// 補助表示の切り替えはビューアの下、スナップはタイムラインの上にあるので、ここには置かない。
+    pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.x = 1.0;
+        for (tool, icon, tip) in Tool::ALL {
+            if widgets::icon_toggle(ui, icon, self.tool == tool, tip).clicked() {
+                self.set_tool(tool);
             }
-            widgets::vsep(ui);
-            for (icon, tip, what) in [
-                (Icon::Text, "テキストレイヤーを作成", NewLayer::Text),
-                (Icon::Rect, "シェイプレイヤー（矩形）を作成", NewLayer::Rect),
-                (Icon::Ellipse, "シェイプレイヤー（楕円）を作成", NewLayer::Ellipse),
-                (Icon::Star, "シェイプレイヤー（スター）を作成", NewLayer::Star),
-                (Icon::Solid, "平面レイヤーを作成", NewLayer::Solid),
-                (Icon::Null, "ヌルオブジェクトを作成", NewLayer::Null),
-                (Icon::Adjust, "調整レイヤーを作成", NewLayer::Adjustment),
-                (Icon::Camera, "カメラを作成", NewLayer::Camera),
-                (Icon::Light, "ライト（ポイント）を作成", NewLayer::Light(LightType::Point)),
+        }
+        widgets::vsep(ui);
+        self.new_layer_button(ui);
+        if widgets::icon_button(ui, Icon::Export, "書き出し…").clicked() {
+            self.show.export = true;
+        }
+        self.plugin_toolbar(ui);
+    }
+
+    /// レイヤー作成のボタン。押すと、種類を絵と名前で選ぶ一覧が開く。
+    fn new_layer_button(&mut self, ui: &mut egui::Ui) {
+        let resp = widgets::icon_button(ui, Icon::Plus, "レイヤーを作成…");
+        // 一覧が開くボタンであることを示す小さな三角
+        let c = resp.rect.right_bottom() - vec2(4.0, 4.0);
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![c + vec2(-3.0, 0.0), c, c + vec2(0.0, -3.0)],
+            theme::TEXT_DIM,
+            Stroke::NONE,
+        ));
+        let id = ui.make_persistent_id("new_layer_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(id));
+        }
+        egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(190.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (icon, label, what) in [
+                (Icon::Text, "テキスト", NewLayer::Text),
+                (Icon::Rect, "シェイプ（矩形）", NewLayer::Rect),
+                (Icon::Ellipse, "シェイプ（楕円）", NewLayer::Ellipse),
+                (Icon::Star, "シェイプ（スター）", NewLayer::Star),
+                (Icon::Solid, "平面", NewLayer::Solid),
+                (Icon::Null, "ヌルオブジェクト", NewLayer::Null),
+                (Icon::Adjust, "調整レイヤー", NewLayer::Adjustment),
+                (Icon::Camera, "カメラ", NewLayer::Camera),
+                (Icon::Light, "ライト（ポイント）", NewLayer::Light(LightType::Point)),
+                (Icon::Light, "ライト（スポット）", NewLayer::Light(LightType::Spot)),
+                (Icon::Light, "ライト（平行）", NewLayer::Light(LightType::Parallel)),
+                (Icon::Light, "ライト（アンビエント）", NewLayer::Light(LightType::Ambient)),
             ] {
-                // マスクのツールと同じ絵のシェイプ作成は、枠で囲って見分ける
-                let resp = widgets::icon_button(ui, icon, tip);
-                if matches!(icon, Icon::Rect | Icon::Ellipse) {
-                    ui.painter().circle_filled(resp.rect.right_bottom() - vec2(5.0, 5.0), 1.6, theme::VALUE);
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(rect, 1.0, theme::BG3);
                 }
+                icons::paint_sized(ui.painter(), Rect::from_min_size(rect.min + vec2(2.0, 2.0), vec2(16.0, 16.0)), icon, theme::TEXT_DIM, 13.0);
+                ui.painter().text(pos2(rect.left() + 24.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.5), theme::TEXT);
                 if resp.clicked() {
                     self.create_layer(what);
                 }
             }
-            widgets::vsep(ui);
-            if widgets::icon_button(ui, Icon::Import, "素材を読み込む…").clicked() {
-                self.import_footage_dialog(false);
-            }
-            if widgets::icon_button(ui, Icon::NewComp, "新規コンポジション").clicked() {
-                self.new_composition();
-            }
-            if widgets::icon_button(ui, Icon::Export, "書き出し…").clicked() {
-                self.show.export = true;
-            }
-            widgets::vsep(ui);
-            if widgets::icon_toggle(ui, Icon::Magnet, self.snap, "スナップ").clicked() {
-                self.snap = !self.snap;
-            }
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new("スナップ").size(10.5).color(if self.snap { theme::TEXT } else { theme::TEXT_DIM }));
-            widgets::vsep(ui);
-            if widgets::icon_toggle(ui, Icon::Guides, self.show_guides, "セーフマージンを表示").clicked() {
-                self.show_guides = !self.show_guides;
-            }
-            if widgets::icon_toggle(ui, Icon::Grid, self.show_grid, "グリッドを表示").clicked() {
-                self.show_grid = !self.show_grid;
-            }
-            if widgets::icon_toggle(
-                ui,
-                Icon::Screen,
-                self.screening,
-                "上映プレビュー: 暗室を想定した表示と、白飛び・黒つぶれ・バンディングの警告",
-            )
-            .clicked()
-            {
-                self.screening = !self.screening;
-            }
-            self.plugin_toolbar(ui);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(4.0);
-                let name = Tool::ALL.iter().find(|t| t.0 == self.tool).map(|t| t.2.split(':').next().unwrap_or("")).unwrap_or("");
-                ui.label(egui::RichText::new(name).size(10.5).color(theme::TEXT_DIM));
-            });
         });
     }
 
-    // ---------- 状態表示 ----------
+    // ---------- 状態表示（最上段の右端） ----------
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_centered(|ui| {
-            ui.style_mut().override_font_id = Some(FontId::proportional(10.5));
-            match self.running_task() {
-                Some((label, fraction, cancel)) => {
-                    ui.add(egui::ProgressBar::new(fraction).desired_width(180.0).desired_height(12.0).text(label));
-                    if ui.small_button("中止").clicked() {
-                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
+    /// 右から: ファイル名・未保存の印・ビット深度・レンダリング先・音声の処理・メッセージ（または進捗）。
+    pub(crate) fn status_area(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().override_font_id = Some(FontId::proportional(10.5));
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.add_space(4.0);
+        let title = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "未保存".into());
+        ui.label(egui::RichText::new(title).color(theme::TEXT));
+        if self.dirty {
+            let (r, _) = ui.allocate_exact_size(vec2(6.0, 12.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), 2.5, theme::WARN);
+            r_tooltip(ui, r, "保存していない変更があります");
+        }
+        let depth = match self.shared.settings.bit_depth {
+            BitDepth::B8 => "8 bpc",
+            BitDepth::B16 => "16 bpc",
+            BitDepth::F32 => "32 bpc",
+        };
+        ui.label(egui::RichText::new(depth).color(theme::TEXT_DIM));
+        let gpu = match crate::gpu_name() {
+            Some(name) if crate::GPU_ENABLED.load(std::sync::atomic::Ordering::Relaxed) => format!("GPU: {name}"),
+            _ => "CPU レンダリング".to_string(),
+        };
+        ui.label(egui::RichText::new(gpu).color(theme::TEXT_DIM));
+        if let Some(task) = &self.audio_task {
+            ui.label(egui::RichText::new(format!("{}…", task.label)).color(theme::TEXT_DIM));
+        }
+        widgets::vsep(ui);
+        match self.running_task() {
+            Some((label, fraction, cancel)) => {
+                if ui.small_button("中止").clicked() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-                None => {
-                    ui.add(egui::Label::new(egui::RichText::new(&self.status).color(theme::TEXT_DIM)).truncate());
-                }
+                ui.add(egui::ProgressBar::new(fraction).desired_width(180.0).desired_height(12.0).text(label));
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let title = self
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "未保存".into());
-                ui.label(egui::RichText::new(title).color(theme::TEXT));
-                if self.dirty {
-                    let (r, _) = ui.allocate_exact_size(vec2(6.0, 12.0), Sense::hover());
-                    ui.painter().circle_filled(r.center(), 2.5, theme::WARN);
-                    r_tooltip(ui, r, "保存していない変更があります");
-                }
-                let depth = match self.shared.settings.bit_depth {
-                    BitDepth::B8 => "8 bpc",
-                    BitDepth::B16 => "16 bpc",
-                    BitDepth::F32 => "32 bpc",
-                };
-                ui.label(egui::RichText::new(depth).color(theme::TEXT_DIM));
-                let gpu = match crate::gpu_name() {
-                    Some(name) if crate::GPU_ENABLED.load(std::sync::atomic::Ordering::Relaxed) => format!("GPU: {name}"),
-                    _ => "CPU レンダリング".to_string(),
-                };
-                ui.label(egui::RichText::new(gpu).color(theme::TEXT_DIM));
-                if let Some(task) = &self.audio_task {
-                    ui.label(egui::RichText::new(format!("{}…", task.label)).color(theme::TEXT_DIM));
-                }
-            });
-        });
-    }
-
-    // ---------- 左: プロジェクト／エフェクトコントロール ----------
-
-    fn left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        widgets::tab_strip(ui, &["プロジェクト", "エフェクトコントロール"], &mut self.left_tab);
-        match self.left_tab {
-            0 => self.project_tab(ui),
-            _ => self.effect_controls_tab(ui),
+            None => {
+                let status = self.status.clone();
+                ui.add(egui::Label::new(egui::RichText::new(&status).color(theme::TEXT_DIM)).truncate()).on_hover_text(status);
+            }
         }
     }
+
+    // ---------- 左: プロジェクト ----------
 
     fn project_items(&self, shared: &Project) -> Vec<Item> {
         let search = self.project_search.trim().to_lowercase();
@@ -256,10 +237,13 @@ impl App {
                     }
                 });
             });
-        // 一覧の下の操作
-        egui::TopBottomPanel::bottom("project_footer").exact_height(24.0).frame(bar_frame(theme::BG2, 2.0)).show_inside(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+        // 上段: 検索と操作を 1 行に
+        egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 3.0)).show(ui, |ui| {
+            ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
+                let w = (ui.available_width() - 5.0 * 24.0 - 6.0).max(60.0);
+                widgets::search_box(ui, &mut self.project_search, "名前で検索", w);
+                ui.add_space(6.0);
                 if widgets::icon_button(ui, Icon::Import, "素材を読み込む…").clicked() {
                     self.import_footage_dialog(false);
                 }
@@ -280,34 +264,7 @@ impl App {
                 if widgets::icon_button(ui, Icon::Trash, "選択中の項目を削除（使われていないものだけ）").clicked() {
                     self.delete_project_item();
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(format!("{} 項目", items.len())).size(10.0).color(theme::TEXT_DIM));
-                });
             });
-        });
-
-        // 上段: 選択中の項目の概要
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-        let p = ui.painter_at(head);
-        let thumb = Rect::from_min_size(head.min + vec2(6.0, 6.0), vec2(48.0, 34.0));
-        p.rect_filled(thumb, 1.0, theme::INPUT);
-        p.rect_stroke(thumb, 1.0, Stroke::new(1.0_f32, theme::LINE));
-        if let Some(item) = items.iter().find(|i| i.selected) {
-            icons::paint_sized(&p, thumb, item.icon, theme::TEXT_DIM, 20.0);
-            let x = thumb.right() + 8.0;
-            let clip = p.with_clip_rect(Rect::from_min_max(pos2(x, head.top()), head.max));
-            clip.text(pos2(x, head.top() + 7.0), Align2::LEFT_TOP, &item.name, FontId::proportional(11.5), theme::TEXT);
-            let line2 = if item.size.is_empty() { item.kind.to_string() } else { format!("{}（1.00）", item.size) };
-            clip.text(pos2(x, head.top() + 21.0), Align2::LEFT_TOP, line2, FontId::proportional(10.0), theme::TEXT_DIM);
-            let line3 = if item.fps.is_empty() { item.duration.clone() } else { format!("Δ {}、{} fps", item.duration, item.fps) };
-            clip.text(pos2(x, head.top() + 33.0), Align2::LEFT_TOP, line3, FontId::proportional(10.0), theme::TEXT_DIM);
-        }
-        p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0_f32, theme::LINE));
-
-        egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 3.0)).show(ui, |ui| {
-            let w = ui.available_width() - 22.0;
-            widgets::search_box(ui, &mut self.project_search, "名前で検索", w);
         });
 
         // 一覧（名前・種類・サイズ・フレームレート・デュレーション）
@@ -323,7 +280,13 @@ impl App {
         let p = ui.painter_at(hrect);
         p.rect_filled(hrect, 0.0, theme::BG2);
         p.hline(hrect.x_range(), hrect.bottom() - 0.5, Stroke::new(1.0_f32, theme::LINE));
-        p.text(pos2(hrect.left() + 24.0, hrect.center().y), Align2::LEFT_CENTER, "名前", FontId::proportional(10.0), theme::TEXT_DIM);
+        p.text(
+            pos2(hrect.left() + 24.0, hrect.center().y),
+            Align2::LEFT_CENTER,
+            format!("名前（{} 項目）", items.len()),
+            FontId::proportional(10.0),
+            theme::TEXT_DIM,
+        );
         let mut x = hrect.left() + name_w;
         for (label, w) in cols {
             p.vline(x, hrect.y_range(), Stroke::new(1.0_f32, theme::LINE));
@@ -450,74 +413,69 @@ impl App {
         }
     }
 
-    fn effect_controls_tab(&mut self, ui: &mut egui::Ui) {
-        let shared = self.shared.clone();
-        let Some(comp) = shared.comp(&self.comp_id) else { return };
-        let Some(layer) = self.selected.as_ref().and_then(|id| comp.layer(id)) else {
-            widgets::hint(ui, "タイムラインでレイヤーを選択すると、そのレイヤーのエフェクトをここで調整できます。");
-            return;
-        };
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-        let p = ui.painter_at(head);
-        p.text(
-            pos2(head.left() + 6.0, head.center().y),
-            Align2::LEFT_CENTER,
-            format!("{} ・ {}", comp.name, layer.name),
-            FontId::proportional(11.0),
-            theme::TEXT_DIM,
-        );
-        p.hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0_f32, theme::LINE));
-        let t = comp.frame_rate.frame_to_time(self.frame);
-        let rows = collect_rows(layer, t);
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add_enabled_ui(!layer.locked, |ui| widgets::padded(ui, |ui| self.effects_body(ui, comp, layer, &rows, t)));
-        });
-    }
-
-    // ---------- 右: プロパティ類 ----------
+    // ---------- 右: プロパティ／エフェクト一覧／オーディオ ----------
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::TopBottomPanel::bottom("right_lower")
-            .resizable(true)
-            .default_height(150.0)
-            .height_range(80.0..=480.0)
-            .frame(theme::panel_frame())
-            .show_inside(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                widgets::tab_strip(ui, &["情報", "プレビュー", "整列", "オーディオ"], &mut self.lower_tab);
-                egui::ScrollArea::vertical().id_salt("right_lower_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    match self.lower_tab {
-                        0 => self.info_tab(ui),
-                        1 => self.preview_tab(ui),
-                        2 => self.align_tab(ui),
-                        _ => self.audio_tab(ui),
-                    }
-                });
-            });
-        widgets::tab_strip(ui, &["プロパティ", "エフェクト＆プリセット", "文字"], &mut self.right_tab);
+        widgets::tab_strip(ui, &["プロパティ", "エフェクト", "オーディオ"], &mut self.right_tab);
         egui::ScrollArea::vertical().id_salt("right_upper_scroll").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             match self.right_tab {
                 0 => self.properties_tab(ui),
                 1 => self.effects_presets_tab(ui),
-                _ => self.character_tab(ui),
+                _ => self.audio_tab(ui),
             }
         });
     }
 
+    /// 選択中のレイヤーのすべての設定（種類ごとの設定・文字・トランスフォーム・マスク・エフェクト・音声）。
+    /// 先頭の 1 行に、整列のボタンとデュレーション（イン／アウトはポインタを載せると出る）を置く。
     fn properties_tab(&mut self, ui: &mut egui::Ui) {
         let shared = self.shared.clone();
         let Some(comp) = shared.comp(&self.comp_id) else { return };
         match self.selected.clone().and_then(|id| comp.layer(&id)) {
-            Some(layer) => self.layer_panel(ui, comp, layer),
+            Some(layer) => {
+                self.layer_header(ui, comp, layer);
+                self.layer_panel(ui, comp, layer);
+            }
             None => widgets::hint(
                 ui,
-                "タイムラインかビューアでレイヤーを選択すると、トランスフォーム・マスク・エフェクトをここで編集できます。",
+                "タイムラインかビューアでレイヤーを選択すると、トランスフォーム・文字・マスク・エフェクト・音声をここで編集できます。",
             ),
         }
+    }
+
+    fn layer_header(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer) {
+        let fr = comp.frame_rate;
+        let (a, b) = (fr.time_to_frame(layer.in_point), fr.time_to_frame(layer.out_point));
+        egui::Frame::none().fill(theme::BG2).inner_margin(egui::Margin::symmetric(4.0, 2.0)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_enabled_ui(!layer.locked, |ui| {
+                    for (icon, tip, horizontal, mode) in [
+                        (Icon::AlignLeft, "コンポの左に揃える", true, -1),
+                        (Icon::AlignHCenter, "コンポの水平方向の中央に揃える", true, 0),
+                        (Icon::AlignRight, "コンポの右に揃える", true, 1),
+                        (Icon::AlignTop, "コンポの上に揃える", false, -1),
+                        (Icon::AlignVCenter, "コンポの垂直方向の中央に揃える", false, 0),
+                        (Icon::AlignBottom, "コンポの下に揃える", false, 1),
+                    ] {
+                        if widgets::icon_button(ui, icon, tip).clicked() {
+                            self.align_layer(horizontal, mode);
+                        }
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let mono = |s: String| egui::RichText::new(s).font(FontId::monospace(10.5));
+                    ui.label(mono(timecode(fr, b - a)).color(theme::VALUE))
+                        .on_hover_text(format!("デュレーション（イン {} – アウト {}）", timecode(fr, a), timecode(fr, b)));
+                    ui.label(egui::RichText::new("Δ").size(10.5).color(theme::TEXT_DIM))
+                        .on_hover_text(format!("イン {} – アウト {}", timecode(fr, a), timecode(fr, b)));
+                });
+            });
+        });
     }
 
     fn effects_presets_tab(&mut self, ui: &mut egui::Ui) {
@@ -571,72 +529,6 @@ impl App {
         }
     }
 
-    fn character_tab(&mut self, ui: &mut egui::Ui) {
-        let shared = self.shared.clone();
-        let layer = shared.comp(&self.comp_id).and_then(|c| self.selected.as_ref().and_then(|id| c.layer(id)));
-        match layer {
-            Some(layer) if matches!(layer.kind, LayerKind::Text { .. }) => {
-                ui.add_enabled_ui(!layer.locked, |ui| widgets::padded(ui, |ui| self.kind_panel(ui, layer)));
-            }
-            _ => {
-                widgets::hint(ui, "テキストレイヤーを選択すると、フォント・サイズ・塗りと線・揃え・アニメーターをここで編集できます。");
-                widgets::padded(ui, |ui| {
-                    if ui.button("テキストレイヤーを作成").clicked() {
-                        self.create_layer(NewLayer::Text);
-                    }
-                });
-            }
-        }
-    }
-
-    fn info_tab(&mut self, ui: &mut egui::Ui) {
-        let shared = self.shared.clone();
-        let Some(comp) = shared.comp(&self.comp_id) else { return };
-        let fr = comp.frame_rate;
-        let mono = FontId::monospace(11.0);
-        widgets::padded(ui, |ui| {
-            // ポインタの下の色と座標
-            ui.columns(2, |c| {
-                let rgba = self.hover_info.map(|h| h.1);
-                for (i, name) in ["R", "G", "B", "A"].iter().enumerate() {
-                    let v = rgba.map(|c| c[i].to_string()).unwrap_or_else(|| "–".into());
-                    c[0].horizontal(|ui| {
-                        ui.label(egui::RichText::new(*name).color(theme::TEXT_DIM));
-                        ui.label(egui::RichText::new(v).font(mono.clone()));
-                    });
-                }
-                let pos = self.hover_info.map(|h| h.0);
-                for (i, name) in ["X", "Y"].iter().enumerate() {
-                    let v = pos.map(|p| format!("{:.1}", p[i])).unwrap_or_else(|| "–".into());
-                    c[1].horizontal(|ui| {
-                        ui.label(egui::RichText::new(*name).color(theme::TEXT_DIM));
-                        ui.label(egui::RichText::new(v).font(mono.clone()));
-                    });
-                }
-                if let Some(c4) = rgba {
-                    let (r, _) = c[1].allocate_exact_size(vec2(36.0, 22.0), Sense::hover());
-                    c[1].painter().rect_filled(r, 1.0, Color32::from_rgb(c4[0], c4[1], c4[2]));
-                    c[1].painter().rect_stroke(r, 1.0, Stroke::new(1.0_f32, theme::LINE_HI));
-                }
-            });
-            ui.add_space(4.0);
-            let line = |ui: &mut egui::Ui, k: &str, v: String| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(k).color(theme::TEXT_DIM));
-                    ui.label(egui::RichText::new(v).font(mono.clone()));
-                });
-            };
-            line(ui, "現在の時刻", format!("{}（{} フレーム）", timecode(fr, self.frame), self.frame));
-            if let Some(layer) = self.selected.as_ref().and_then(|id| comp.layer(id)) {
-                ui.label(&layer.name);
-                let (a, b) = (fr.time_to_frame(layer.in_point), fr.time_to_frame(layer.out_point));
-                line(ui, "イン", timecode(fr, a));
-                line(ui, "アウト", timecode(fr, b));
-                line(ui, "デュレーション", timecode(fr, b - a));
-            }
-        });
-    }
-
     /// 再生の操作（先頭・コマ戻し・再生／停止・コマ送り・末尾）。
     fn transport(&mut self, ui: &mut egui::Ui) {
         if widgets::icon_button(ui, Icon::First, "先頭へ (Home)").clicked() {
@@ -661,73 +553,6 @@ impl App {
         if widgets::icon_button(ui, Icon::Last, "末尾へ (End)").clicked() {
             self.set_frame(i64::MAX, false);
         }
-    }
-
-    fn preview_tab(&mut self, ui: &mut egui::Ui) {
-        let total = self.total_frames();
-        widgets::padded(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                self.transport(ui);
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("解像度").color(theme::TEXT_DIM));
-                egui::ComboBox::from_id_salt("preview_res").width(56.0).selected_text(resolution_label(self.downsample)).show_ui(
-                    ui,
-                    |ui| {
-                        for ds in [1, 2, 4] {
-                            ui.selectable_value(&mut self.downsample, ds, resolution_label(ds));
-                        }
-                    },
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("範囲").color(theme::TEXT_DIM));
-                match self.work_area {
-                    Some((a, b)) => {
-                        ui.label(format!("ワークエリア {a}–{b}"));
-                        if ui.small_button("解除").clicked() {
-                            self.work_area = None;
-                        }
-                    }
-                    None => {
-                        ui.label("コンポ全体");
-                    }
-                }
-            });
-            ui.checkbox(&mut self.snap, "再生ヘッドをビートとマーカーに吸着");
-            ui.checkbox(&mut self.screening, "上映プレビュー（暗室表示と警告の重ね描き）");
-            let cached = self.engine.cached_frames(total, self.downsample).len();
-            ui.label(egui::RichText::new(format!("RAM プレビュー: {cached} / {total} フレーム")).size(10.5).color(theme::TEXT_DIM));
-        });
-    }
-
-    fn align_tab(&mut self, ui: &mut egui::Ui) {
-        let has = self.selected.is_some();
-        widgets::padded(ui, |ui| {
-            ui.label(egui::RichText::new("レイヤーを整列: コンポジション").color(theme::TEXT_DIM));
-            ui.add_enabled_ui(has, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 1.0;
-                    for (icon, tip, horizontal, mode) in [
-                        (Icon::AlignLeft, "左揃え", true, -1),
-                        (Icon::AlignHCenter, "水平方向の中央", true, 0),
-                        (Icon::AlignRight, "右揃え", true, 1),
-                        (Icon::AlignTop, "上揃え", false, -1),
-                        (Icon::AlignVCenter, "垂直方向の中央", false, 0),
-                        (Icon::AlignBottom, "下揃え", false, 1),
-                    ] {
-                        if widgets::icon_button(ui, icon, tip).clicked() {
-                            self.align_layer(horizontal, mode);
-                        }
-                    }
-                });
-            });
-            if !has {
-                ui.label(egui::RichText::new("整列するレイヤーを選択してください").size(10.5).color(theme::TEXT_DIM));
-            }
-        });
     }
 
     /// 選択中のレイヤーを、コンポの端または中央に揃える。`mode` は -1 = 左／上、0 = 中央、1 = 右／下。
@@ -917,12 +742,29 @@ impl App {
                         .color(theme::BEAT),
                 );
             }
+            // 右端から: ポインタの下の座標と色・RAM プレビュー・ワークエリア・レンダリング中の印
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let dim = |s: String| egui::RichText::new(s).font(FontId::monospace(10.5)).color(theme::TEXT_DIM);
+                if let Some((pos, c)) = self.hover_info {
+                    ui.label(dim(format!("R{:>3} G{:>3} B{:>3} A{:>3}", c[0], c[1], c[2], c[3])));
+                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(r, 1.0, Color32::from_rgb(c[0], c[1], c[2]));
+                    ui.painter().rect_stroke(r, 1.0, Stroke::new(1.0_f32, theme::LINE_HI));
+                    ui.label(dim(format!("X{:>7.1} Y{:>7.1}", pos[0], pos[1])));
+                }
+                let cached = self.engine.cached_frames(total, self.downsample).len();
+                ui.label(dim(format!("RAM {cached}/{total}"))).on_hover_text("RAM プレビュー済みのフレーム数");
+                if let Some((a, b)) = self.work_area {
+                    let r = ui
+                        .add(egui::Label::new(dim(format!("範囲 {a}–{b} ×"))).sense(Sense::click()))
+                        .on_hover_text("ワークエリア（クリックで解除してコンポ全体に戻す）");
+                    if r.clicked() {
+                        self.work_area = None;
+                    }
+                }
                 if !self.engine.is_cached(self.frame, self.downsample) {
                     ui.label(egui::RichText::new("レンダリング中…").size(10.5).color(theme::TEXT_DIM));
-                }
-                if let Some((a, b)) = self.work_area {
-                    ui.label(egui::RichText::new(format!("範囲 {a}–{b}")).size(10.5).color(theme::TEXT_DIM));
                 }
             });
         });

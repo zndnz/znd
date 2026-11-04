@@ -327,9 +327,7 @@ pub struct App {
     /// 最後にクリックしたプロパティの行（キーの貼り付け先）。
     pub(crate) key_target: Option<(LayerId, String)>,
     /// 各パネルで開いているタブ。
-    pub(crate) left_tab: usize,
     pub(crate) right_tab: usize,
-    pub(crate) lower_tab: usize,
     pub(crate) project_search: String,
     pub(crate) fx_search: String,
     /// ビューアに出すチャンネル（0 = RGB、1〜3 = R・G・B、4 = 輝度）。
@@ -439,9 +437,7 @@ impl App {
             keymap: keymap::Keymap::default(),
             keymap_capture: None,
             key_target: None,
-            left_tab: 0,
             right_tab: 0,
-            lower_tab: 0,
             project_search: String::new(),
             fx_search: String::new(),
             channel: 0,
