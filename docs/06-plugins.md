@@ -1,5 +1,18 @@
 # 6. プラグイン
 
+> **プラグインの導入・使用は自己責任です。** znd は読み込む前に安全性スキャン（後述）を行いますが、
+> これはファイルを実行せずに中身を調べる簡易的な検査で、悪質なプラグインをすべて見抜けるわけではありません。
+> 「安全」と出ても安全を保証するものではありません。入手元が信頼できないものは入れないでください。
+
+プラグインでできること:
+
+| 種類 | 提供できるもの |
+|---|---|
+| エフェクト（ネイティブ / OpenFX） | エフェクトメニューに並ぶ画像処理 |
+| パッケージ（`plugin.json` のあるフォルダ） | 上記のエフェクトに加えて、メニューのコマンド・レイヤーの右クリックメニュー・ツールバーのボタン・キーボードショートカット・パネル（UI）・出力フィルター（レンダリングへの介入）・エクスプレッション用ライブラリ |
+
+## エフェクト
+
 エフェクトを外部の動的ライブラリで追加できる。2 種類に対応している。
 
 | 種類 | エフェクトの種類名 | 形式 |
@@ -73,3 +86,114 @@ cc -O2 -shared -fPIC -Isdk -o vignette.dylib examples/plugins/vignette.c
 C++ サポートライブラリ版の Invert / Retimer）。市販のプラグインでは試していない。
 動かないプラグインを調べるときは、環境変数 `ZND_OFX_TRACE=1` で、ホストが呼んだアクションと
 プラグインが読もうとして見つからなかったプロパティが stderr に出る。
+
+## パッケージ（コマンド・パネル・出力フィルター・エクスプレッション）
+
+`plugin.json` を持つフォルダをプラグインフォルダに置くと、パッケージとして読み込まれる。
+サンプル: [examples/plugins/toolkit.zndplugin](../examples/plugins/toolkit.zndplugin)
+
+```json
+{
+  "id": "com.example.toolkit",
+  "name": "ツールキット",
+  "version": "1.0.0",
+  "vendor": "作者",
+  "license": "MIT",
+  "permissions": [],
+  "effects": ["lib/fx.dylib"],
+  "commands": [
+    { "id": "center", "label": "中央へ", "script": "commands/layout.js", "function": "centerSelected",
+      "menu": ["plugins", "layer", "toolbar"], "shortcut": "Cmd+Shift+H" }
+  ],
+  "panels": [{ "id": "motion", "title": "揺れと弾み", "script": "panels/motion.js", "width": 300 }],
+  "output_filters": [
+    { "id": "finish", "label": "仕上げ", "stage": "both", "enabled": false,
+      "effects": [{ "kind": "film_grain", "params": { "amount": 8 } }] }
+  ],
+  "expressions": ["expressions/motion.js"]
+}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `commands` | `menu` に `plugins`（メニューバーの「プラグイン」）/ `layer`（タイムラインのレイヤーの右クリック）/ `toolbar` を並べる。`shortcut` は `Cmd` `Ctrl` `Alt` `Shift` とキー名を `+` でつなぐ。組み込みのショートカットが優先される |
+| `panels` | スクリプトで中身を組み立てる浮動パネル。「プラグイン」メニューで開閉する |
+| `output_filters` | コンポの最終画像（背景を敷いた後）に掛けるエフェクトの列。`stage` は `preview` / `export` / `both`。プラグインのエフェクト（`plugin:` / `ofx:`）も指定できる。「プラグイン」メニューで切り替える |
+| `expressions` | ここで定義した関数は、すべてのエクスプレッションから呼べる |
+| `permissions` | 必要とする権限の宣言（`network` / `process` / `filesystem`）。安全性スキャンで中身と突き合わせ、宣言なしに通信していれば危険度を上げる |
+
+パス はパッケージ内の相対パスのみ（`..` や絶対パスは拒否）。スクリプトはスキャンした時点の中身をメモリに持つので、
+読み込み後にファイルを書き換えても次の起動まで反映されない。
+
+### スクリプトから使えるもの
+
+コマンドもパネルも、自動化スクリプト（`znd script`）と同じ環境で動く。
+
+- `project`: プロジェクト全体（ファイル形式と同じ JSON）。書き換えると 1 回の取り消し単位として取り込まれる。
+  実行後に構造を検査し、参照切れなどがあれば取り込まない
+- `ctx`: `comp`（開いているコンポの ID）、`layer` / `layers`（選択中のレイヤー）、`frame`、`time`（秒）、`fps`、`plugin`
+- `host`: 画面への操作。`select(id)`、`setFrame(n)`、`setTime(秒)`、`status(文)`、`alert(文)`、`openComp(id)`、
+  `openPanel(key)` / `closePanel(key)`、`setFilter(key, on)`、`runCommand(key)`（key は `パッケージID/ID`）
+- `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`
+
+スクリプトの環境にはファイル・ネットワーク・別プログラムへの手段が無い。実行は 10 秒で打ち切る。
+
+### パネル
+
+`panel(state)` が部品の配列を返し、部品が操作されると `onEvent(id, value, state)` が呼ばれる。
+`state` はパネルごとにホストが持ち回る（初回は `{}`）。プロジェクトの書き換えは `onEvent` でのみ受け付ける。
+部品は `{ type, id, label, value, ... }`:
+
+| type | 追加の項目 | value |
+|---|---|---|
+| `heading` / `label` / `hint` | `text` | — |
+| `separator` | — | — |
+| `button` | — | `null` |
+| `slider` | `min` `max` `step` | 数値 |
+| `number` | `speed` | 数値 |
+| `checkbox` | — | 真偽値 |
+| `text` | — | 文字列（確定時に送る） |
+| `choice` | `options`（文字列の配列） | 番号 |
+| `color` | — | `[r, g, b, a]`（0〜1） |
+| `row` | `items`（部品の配列） | 横に並べる |
+
+## 安全性スキャンと危険度
+
+すべてのプラグイン（単体のライブラリ・OpenFX バンドル・パッケージ）は、読み込む前に中身を調べて危険度を付ける。
+特に、外部のサーバーを経由する悪質なもの（情報を外へ送る、外からプログラムを取ってきて実行する、外から命令を受ける）を、
+通信機能と他の痕跡の組み合わせで見分ける。
+
+| 見る項目 | 例 |
+|---|---|
+| 通信 | `socket` `connect` `getaddrinfo`、libcurl、NSURLSession、WinHTTP、スクリプトの `fetch` |
+| 通信先 | URL・生の IP アドレス。使い捨てのファイル置き場・チャットの Webhook・トンネル・短縮 URL は特に重く見る |
+| プログラムの実行 | `system` `popen` `execve` `posix_spawn`、`/bin/sh`、`curl ... \| sh` |
+| 個人情報 | `~/.ssh`、キーチェーン、ブラウザのパスワード・Cookie、暗号資産のウォレット |
+| 監視 | キー入力の横取り、画面の取り込み、クリップボード |
+| 常駐化 | LaunchAgents、crontab、Run レジストリキー、シェルの起動ファイル |
+| 解析妨害・難読化 | `PT_DENY_ATTACH`、長い base64、エスケープだらけのスクリプト |
+| 宣言との食い違い | 通信するのに `permissions` に `network` が無い、宣言されていない実行ファイルの同梱 |
+
+組み合わせ（通信＋個人情報 → 持ち出しの疑い、通信＋実行 → 外部からのプログラム取得の疑い、通信＋常駐化 → 遠隔操作の疑い）は
+加点が大きく、持ち出し・遠隔操作の疑いは点数に関係なく「重大」になる。
+
+| 危険度 | 点数 | 扱い |
+|---|---|---|
+| 安全 | 0 | 読み込む |
+| 低 | 1〜24 | 読み込む |
+| 中 | 25〜49 | 読み込む（一覧に警告を出す） |
+| 高 | 50〜79 | **読み込まない**。利用者が内容を確認し、自己責任で許可したときだけ読み込む |
+| 重大 | 80〜 | 同上 |
+
+許可は「プラグイン」ウィンドウの「自己責任で許可して読み込む…」で行い、中身の SHA-256 に結び付けて
+`~/Library/Application Support/znd/plugin-trust.json`（Linux は `~/.config/znd/`、Windows は `%APPDATA%\znd\`）に記録する。
+ファイルが差し替えられると許可は無効になり、再び止まる。
+
+CLI では読み込まずにスキャンだけできる:
+
+```bash
+cargo run -p znd-cli -- plugin-scan path/to/plugin.dylib
+```
+
+**限界**: 実行時に組み立てる文字列・暗号化や圧縮で隠したコード・正規のライブラリに見せかけた処理は見抜けない。
+逆に、ライセンス認証や更新確認のために通信する正当なプラグインも「通信」として検出される。結果は判断材料であり、最終的な判断と責任は利用者にある。

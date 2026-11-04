@@ -127,6 +127,7 @@ impl App {
             {
                 self.screening = !self.screening;
             }
+            self.plugin_toolbar(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
                 let name = Tool::ALL.iter().find(|t| t.0 == self.tool).map(|t| t.2.split(':').next().unwrap_or("")).unwrap_or("");

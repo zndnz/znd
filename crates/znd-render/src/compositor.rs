@@ -222,6 +222,8 @@ impl<'a> Renderer<'a> {
                 px[3] = 1.0;
             }
         }
+        // プラグインの出力フィルター（ガイドを描く＝プレビュー、描かない＝書き出し）
+        let canvas = crate::plugins::hooks::apply_output_filters(comp, t, canvas, (1.0 / ds) as f32, &self.cx, opts.guides);
         Ok(canvas)
     }
 

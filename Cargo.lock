@@ -5385,6 +5385,7 @@ dependencies = [
  "image",
  "libloading",
  "rayon",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
  "ufbx",

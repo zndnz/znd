@@ -10,9 +10,21 @@
 //! そのエフェクトは何もせず（元の画像のまま）、`missing` で検出できる。
 //!
 //! プラグインはホストと同じプロセス・同じ権限で動く。信頼できるものだけを入れること。
+//! 読み込む前に `scan` で静的な安全性スキャンを行い、危険度が高いものは利用者が
+//! 自己責任で許可（`trust`）するまで読み込まない。
+//!
+//! `plugin.json` を持つフォルダ（パッケージ、`package`）は、エフェクトに加えてコマンド・パネル・
+//! 出力フィルター・エクスプレッション用ライブラリを提供できる（`hooks`）。
 
+pub mod hooks;
 pub mod native;
 pub mod ofx;
+pub mod package;
+pub mod scan;
+pub mod trust;
+
+pub use package::{Command, Package, PackageStatus, Panel};
+pub use scan::{RiskLevel, SecurityReport, DISCLAIMER};
 
 use crate::effects::FxContext;
 use crate::frame::FrameBuf;
@@ -52,6 +64,13 @@ pub struct PluginInfo {
     pub param_count: usize,
 }
 
+impl PluginInfo {
+    /// このエフェクトを含むファイルの安全性スキャンの結果。
+    pub fn report(&self) -> Option<SecurityReport> {
+        report_for(&self.path)
+    }
+}
+
 pub(crate) trait Effect: Send + Sync {
     fn info(&self) -> &PluginInfo;
     fn apply(&self, p: &EvalParams, buf: FrameBuf, ctx: &FxContext) -> FrameBuf;
@@ -62,7 +81,15 @@ struct Registry {
     effects: BTreeMap<String, Arc<dyn Effect>>,
     /// 読み込み済み（または失敗済み）のファイル。
     files: BTreeMap<PathBuf, Result<usize, String>>,
+    /// 調べたファイル・パッケージの安全性スキャンの結果。
+    reports: BTreeMap<PathBuf, SecurityReport>,
+    /// 危険度が高いため読み込みを止めているもの。
+    blocked: BTreeMap<PathBuf, SecurityReport>,
+    packages: BTreeMap<PathBuf, Arc<Package>>,
 }
+
+/// 読み込みを止めたときのエラーの先頭に付ける印。
+pub const BLOCKED_PREFIX: &str = "安全性スキャンで危険度";
 
 fn registry() -> &'static Mutex<Registry> {
     static R: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -128,9 +155,49 @@ pub struct ScanReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// プラグインファイル（ネイティブのライブラリ、または `.ofx.bundle` / `.ofx`）を 1 つ読み込んで登録する。
-/// 既に読み込み済みなら何もしない。
+/// プラグインファイル（ネイティブのライブラリ、または `.ofx.bundle` / `.ofx`）か、パッケージのフォルダを
+/// 1 つ読み込んで登録する。既に読み込み済みなら何もしない。
+///
+/// 読み込む前に安全性スキャンを行い、危険度が「高」以上で利用者の許可が無ければ読み込まずにエラーを返す
+/// （`blocked` に載る。`allow_and_load` で自己責任で読み込める）。
 pub fn load_plugin_file(path: &Path) -> Result<Vec<PluginInfo>, String> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if package::is_package(&key) {
+        let pkg = load_package(&key);
+        return match &pkg.status {
+            PackageStatus::Loaded => Ok(Vec::new()),
+            PackageStatus::Blocked => Err(blocked_message(&pkg.report)),
+            PackageStatus::Failed(e) => Err(e.clone()),
+        };
+    }
+    if let Some(prev) = registry().lock().unwrap().files.get(&key) {
+        return prev.clone().map(|_| Vec::new());
+    }
+    let report = scan::scan_path(&key, &scan::Declared::default());
+    let blocked = report.level.blocks() && !trust::is_trusted(&report.hash);
+    {
+        let mut reg = registry().lock().unwrap();
+        reg.reports.insert(key.clone(), report.clone());
+        if blocked {
+            reg.blocked.insert(key.clone(), report.clone());
+            return Err(blocked_message(&report));
+        }
+        reg.blocked.remove(&key);
+    }
+    load_unchecked(path)
+}
+
+fn blocked_message(report: &SecurityReport) -> String {
+    format!(
+        "{}「{}」のため読み込みを止めました（{}）。内容を確認し、自己責任で許可した場合のみ読み込めます",
+        BLOCKED_PREFIX,
+        report.level.short(),
+        report.findings.first().map(|f| f.title.as_str()).unwrap_or("")
+    )
+}
+
+/// スキャンを済ませたファイルを読み込む（パッケージ内のエフェクト用）。
+pub(crate) fn load_unchecked(path: &Path) -> Result<Vec<PluginInfo>, String> {
     let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(prev) = registry().lock().unwrap().files.get(&key) {
         return prev.clone().map(|_| Vec::new());
@@ -140,7 +207,7 @@ pub fn load_plugin_file(path: &Path) -> Result<Vec<PluginInfo>, String> {
     } else if is_native_lib(path) {
         native::load(path)
     } else {
-        Err("プラグインとして読み込める形式ではありません（.dylib / .so / .dll / .ofx.bundle）".into())
+        Err("プラグインとして読み込める形式ではありません（.dylib / .so / .dll / .ofx.bundle / plugin.json のあるフォルダ）".into())
     };
     let mut reg = registry().lock().unwrap();
     match result {
@@ -164,11 +231,88 @@ pub fn load_plugin_file(path: &Path) -> Result<Vec<PluginInfo>, String> {
     }
 }
 
+fn load_package(dir: &Path) -> Arc<Package> {
+    if let Some(p) = registry().lock().unwrap().packages.get(dir).filter(|p| p.status == PackageStatus::Loaded) {
+        return p.clone();
+    }
+    let pkg = Arc::new(package::load(dir));
+    let mut reg = registry().lock().unwrap();
+    reg.reports.insert(dir.to_path_buf(), pkg.report.clone());
+    if pkg.status == PackageStatus::Blocked {
+        reg.blocked.insert(dir.to_path_buf(), pkg.report.clone());
+    } else {
+        reg.blocked.remove(dir);
+    }
+    reg.packages.insert(dir.to_path_buf(), pkg.clone());
+    pkg
+}
+
+/// 止めていたプラグインを、利用者の自己責任で許可して読み込む。
+/// スキャンし直した結果のハッシュを許可として記録するので、中身が変わると再び止まる。
+pub fn allow_and_load(path: &Path) -> Result<Vec<PluginInfo>, String> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let report = if package::is_package(&key) {
+        let m = package::read_manifest(&key)?;
+        scan::scan_path(&key, &package::declared(&key, &m))
+    } else {
+        scan::scan_path(&key, &scan::Declared::default())
+    };
+    trust::allow(&report.hash, &key, report.level.short())?;
+    {
+        let mut reg = registry().lock().unwrap();
+        reg.blocked.remove(&key);
+        reg.packages.remove(&key);
+        reg.files.remove(&key);
+    }
+    load_plugin_file(path)
+}
+
+/// 許可を取り消す（読み込み済みのものは、次の起動から止まる）。
+pub fn revoke(path: &Path) -> Result<(), String> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let hash = registry().lock().unwrap().reports.get(&key).map(|r| r.hash.clone());
+    match hash {
+        Some(h) => trust::revoke(&h),
+        None => Err("このプラグインのスキャン結果がありません".into()),
+    }
+}
+
+/// 読み込みを止めているもの（パス, スキャン結果）。
+pub fn blocked() -> Vec<(PathBuf, SecurityReport)> {
+    registry().lock().unwrap().blocked.iter().map(|(p, r)| (p.clone(), r.clone())).collect()
+}
+
+/// そのファイル・パッケージのスキャン結果。
+pub fn report_for(path: &Path) -> Option<SecurityReport> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let reg = registry().lock().unwrap();
+    reg.reports.get(&key).cloned().or_else(|| {
+        // バンドルの中のファイルやパッケージ内のライブラリは、その親のスキャン結果を返す
+        reg.reports.iter().filter(|(p, _)| key.starts_with(p)).max_by_key(|(p, _)| p.as_os_str().len()).map(|(_, r)| r.clone())
+    })
+}
+
+/// 読み込んだ（または止めた・失敗した）パッケージ。
+pub fn packages() -> Vec<Arc<Package>> {
+    registry().lock().unwrap().packages.values().cloned().collect()
+}
+
+/// 読み込み済みのパッケージが提供するコマンド。
+pub fn commands() -> Vec<Command> {
+    packages().iter().filter(|p| p.status == PackageStatus::Loaded).flat_map(|p| p.commands.clone()).collect()
+}
+
+/// 読み込み済みのパッケージが提供するパネル。
+pub fn panels() -> Vec<Panel> {
+    packages().iter().filter(|p| p.status == PackageStatus::Loaded).flat_map(|p| p.panels.clone()).collect()
+}
+
 /// フォルダの中のプラグインをすべて読み込む（フォルダ直下と、1 段下のフォルダまで）。
+/// `plugin.json` のあるフォルダはパッケージとして読み込み、その中は個別に探さない。
 pub fn scan(dirs: &[PathBuf]) -> ScanReport {
     let mut report = ScanReport::default();
     let visit = |path: &Path, report: &mut ScanReport| {
-        if !(is_ofx(path) || (is_native_lib(path) && path.is_file())) {
+        if !(package::is_package(path) || is_ofx(path) || (is_native_lib(path) && path.is_file())) {
             return false;
         }
         match load_plugin_file(path) {

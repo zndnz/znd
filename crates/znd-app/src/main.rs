@@ -3,6 +3,7 @@
 mod audio;
 mod icons;
 mod panels;
+mod plugin_host;
 mod preview;
 mod theme;
 mod timeline;
@@ -306,6 +307,7 @@ pub struct App {
     pub(crate) script: Option<uiscript::Script>,
     pub(crate) script_shot: Option<PathBuf>,
     plugin_report: Vec<(PathBuf, String)>,
+    pub(crate) plugins: plugin_host::PluginHost,
 
     recovery: Option<PathBuf>,
     show: windows::Shown,
@@ -406,6 +408,7 @@ impl App {
             script_shot: None,
             // プラグインのエフェクトを、プロジェクトを開く前に使えるようにしておく
             plugin_report: znd_render::plugins::scan_default().errors,
+            plugins: Default::default(),
             recovery: None,
             show: windows::Shown::default(),
             screenshot: screenshot.map(|path| Screenshot { path, started: Instant::now(), requested: false }),
@@ -1154,10 +1157,18 @@ impl eframe::App for App {
             let t = self.frame_rate().frame_to_time(self.frame);
             self.expr_errors = (self.revision, znd_script::ExprEngine::new().check(&self.shared, &self.comp_id, t));
         }
+        let revision = self.revision;
         self.workspace(ctx);
         self.windows(ctx);
         self.tick_script(ctx);
         self.tick_screenshot(ctx);
+        self.tick_plugins(ctx);
+        // このフレームの UI 操作で編集が入った（数値を入力して Enter など）。次の入力を待たずに描き直しを頼む。
+        // そうしないと、ポインタを動かすかタイムラインを動かすまでプレビューが古いまま残る。
+        if self.revision != revision {
+            self.engine.request(&self.shared, self.revision, &self.comp_id, self.frame, self.downsample);
+            ctx.request_repaint();
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {

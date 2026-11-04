@@ -1,0 +1,57 @@
+{
+  "id": "com.example.toolkit",
+  "name": "ツールキット（サンプル）",
+  "version": "1.0.0",
+  "vendor": "znd サンプル",
+  "license": "MIT OR Apache-2.0",
+  "description": "パッケージ形式のプラグインでできることを一通り見せるサンプル。コマンド・パネル・ショートカット・出力フィルター・エクスプレッション用ライブラリ。",
+  "permissions": [],
+  "commands": [
+    {
+      "id": "center",
+      "label": "選択レイヤーをコンポの中央へ",
+      "script": "commands/layout.js",
+      "function": "centerSelected",
+      "menu": ["plugins", "layer", "toolbar"],
+      "shortcut": "Cmd+Shift+H",
+      "description": "アンカーポイントを保ったまま、位置をコンポの中心に合わせます"
+    },
+    {
+      "id": "stagger",
+      "label": "レイヤーの開始を 2 フレームずつずらす",
+      "script": "commands/layout.js",
+      "function": "stagger",
+      "menu": ["plugins"]
+    },
+    {
+      "id": "report",
+      "label": "コンポの概要をログに出す",
+      "script": "commands/layout.js",
+      "function": "report",
+      "menu": ["plugins"]
+    }
+  ],
+  "panels": [
+    { "id": "motion", "title": "揺れと弾み", "script": "panels/motion.js", "width": 300 }
+  ],
+  "output_filters": [
+    {
+      "id": "finish",
+      "label": "仕上げ（コントラスト＋グレイン）",
+      "stage": "both",
+      "enabled": false,
+      "effects": [
+        { "kind": "brightness_contrast", "params": { "contrast": 12 } },
+        { "kind": "film_grain", "params": { "amount": 8, "size": 1.2 } }
+      ]
+    },
+    {
+      "id": "check_luma",
+      "label": "確認用: 白黒表示（プレビューのみ）",
+      "stage": "preview",
+      "enabled": false,
+      "effects": [{ "kind": "hue_saturation", "params": { "saturation": -100 } }]
+    }
+  ],
+  "expressions": ["expressions/motion.js"]
+}

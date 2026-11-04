@@ -527,6 +527,7 @@ impl App {
             ui.menu_button("レイヤー", |ui| self.layer_menu(ui));
             ui.menu_button("エフェクト", |ui| self.effect_menu(ui));
             ui.menu_button("アニメーション", |ui| self.animation_menu(ctx, ui));
+            ui.menu_button("プラグイン", |ui| self.plugins_menu(ui));
             ui.menu_button("表示", |ui| self.view_menu(ui));
             ui.menu_button("ウィンドウ", |ui| {
                 ui.checkbox(&mut self.show.export, "書き出し");

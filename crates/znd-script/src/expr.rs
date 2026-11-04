@@ -48,6 +48,25 @@ struct State {
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static JS: (Runtime, Context) = init();
+    /// このスレッドの JS に読み込み済みの、プラグインのエクスプレッション用ライブラリの世代。
+    static LIB_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// プラグインが追加したエクスプレッション用ライブラリを、まだならこのスレッドの JS に読み込む。
+/// ライブラリの中のエラーは、そのライブラリを飛ばして続ける（他のエクスプレッションを巻き込まない）。
+fn sync_libraries(ctx: &Ctx) {
+    let (generation, libs) = znd_render::plugins::hooks::expression_libraries();
+    if LIB_GEN.with(|g| g.get()) == generation {
+        return;
+    }
+    LIB_GEN.with(|g| g.set(generation));
+    for (name, src) in libs.iter() {
+        if ctx.eval::<(), _>(src.as_str()).is_err() {
+            let caught = ctx.catch();
+            let (message, _) = describe(&caught);
+            eprintln!("エクスプレッション用ライブラリ {name}: {message}");
+        }
+    }
 }
 
 fn project<'a>() -> Option<&'a Project> {
@@ -378,6 +397,9 @@ fn with_project<T>(project: &Project, f: impl FnOnce(&Ctx) -> rquickjs::Result<T
             STATE.with(|s| *s.borrow_mut() = Some(State { project, stack: Vec::new(), error: None }));
         }
         let result = context.with(|ctx| {
+            if fresh {
+                sync_libraries(&ctx);
+            }
             f(&ctx).map_err(|_| {
                 let caught = ctx.catch();
                 STATE.with(|s| s.borrow_mut().as_mut().and_then(|st| st.error.take())).unwrap_or_else(|| {

@@ -100,6 +100,8 @@ impl Fingerprinter {
     /// コンポ `comp` の時刻 `t` のフレームの指紋。`project` は `new` に渡したものと同じ内容であること。
     pub fn frame(&self, project: &Project, comp: &CompId, t: Time, opts: RenderOptions) -> u64 {
         let mut h = mix(self.settings, opts.downsample as u64 | (opts.background as u64) << 8 | (opts.guides as u64) << 9);
+        // プラグインの出力フィルター・エクスプレッション用ライブラリが変わったら別の絵として扱う
+        h = mix(h, crate::plugins::hooks::fingerprint(opts.guides));
         match project.compositions.iter().position(|c| &c.id == comp) {
             Some(ci) => self.comp(project, ci, t, mix(h, 1), 0),
             None => {

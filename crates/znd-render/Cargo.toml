@@ -10,6 +10,7 @@ znd-text.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 libloading = "0.8"
+serde.workspace = true
 serde_json.workspace = true
 gltf = "1"
 ufbx = "0.11"

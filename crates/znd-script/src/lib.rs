@@ -3,5 +3,5 @@
 pub mod automation;
 pub mod expr;
 
-pub use automation::run_script;
+pub use automation::{run_plugin, run_script, PluginRun};
 pub use expr::{source_rect, ExprEngine, ExprError};

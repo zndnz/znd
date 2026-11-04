@@ -17,6 +17,7 @@
 //! rclick                 その場で右クリック
 //! mod alt|shift|cmd|none 以後の操作に付ける修飾キー
 //! key NAME               キーを押して離す（Enter, Escape, Delete, V など）
+//! type TEXT              文字を入力する（入力欄にフォーカスがあるとき）
 //! scroll DX DY           ホイール
 //! wait N                 N フレーム待つ
 //! shot PATH              スクリーンショットを保存する
@@ -156,6 +157,10 @@ impl App {
                 }
                 None => fail("キーの名前が分かりません"),
             },
+            "type" => {
+                let text = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("").to_string();
+                script.pending.push(Event::Text(text));
+            }
             "scroll" => script.pending.push(Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(num(0), num(1)),

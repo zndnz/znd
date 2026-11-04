@@ -59,6 +59,8 @@ znd — レイヤーベース合成・モーショングラフィックスエン
 プラグイン:
   znd plugins [ファイル]                    読み込まれるプラグイン（znd ネイティブ / OpenFX）とパラメータの一覧。
                                            ファイルを指定すると、それだけを試しに読み込む（開発時の確認用）
+  znd plugin-scan <ファイル|フォルダ>        読み込まずに安全性スキャンだけ行い、危険度と根拠を表示する
+                                           （外部サーバーとの通信・情報の持ち出し・プログラムの実行など）
 
 その他:
   znd script <プロジェクト> <スクリプト.js>  自動化スクリプトを実行して保存する
@@ -741,6 +743,20 @@ fn run(args: &[String]) -> Result<(), String> {
             flag(rest, "--full"),
             gpu(rest),
         ),
+        "plugin-scan" => {
+            let file = positional(rest, 0).ok_or("スキャンするファイルかフォルダを指定してください")?;
+            let path = Path::new(file);
+            let declared = if plugins::package::is_package(path) {
+                let m = plugins::package::read_manifest(path)?;
+                plugins::package::declared(path, &m)
+            } else {
+                Default::default()
+            };
+            let r = plugins::scan::scan_path(path, &declared);
+            print_report(&r, true);
+            println!("\n{}", plugins::DISCLAIMER);
+            Ok(())
+        }
         "plugins" => {
             if let Some(file) = positional(rest, 0) {
                 // 指定したファイルだけを試しに読み込む（プラグイン開発時の確認用）
@@ -755,9 +771,34 @@ fn run(args: &[String]) -> Result<(), String> {
                     println!("読み込めません: {}: {e}", file.display());
                 }
             }
+            for (path, r) in plugins::blocked() {
+                println!("\n読み込みを止めました: {}", path.display());
+                print_report(&r, false);
+                println!("  内容を確認し、自己責任で使う場合はアプリの「プラグイン」ウィンドウで許可してください");
+            }
+            for pkg in plugins::packages().iter().filter(|p| p.status != plugins::PackageStatus::Blocked) {
+                let m = &pkg.manifest;
+                println!("\nパッケージ {} 「{}」 {}", m.id, m.name, m.version);
+                println!("  フォルダ: {}", pkg.dir.display());
+                println!("  {}", pkg.report.summary());
+                println!(
+                    "  コマンド {} / パネル {} / 出力フィルター {} / エクスプレッション用ライブラリ {} / エフェクト {}",
+                    pkg.commands.len(),
+                    pkg.panels.len(),
+                    m.output_filters.len(),
+                    m.expressions.len(),
+                    pkg.effect_count
+                );
+                if let plugins::PackageStatus::Failed(e) = &pkg.status {
+                    println!("  読み込めません: {e}");
+                }
+                for w in &pkg.warnings {
+                    println!("  注意: {w}");
+                }
+            }
             let list = plugins::loaded();
             if list.is_empty() {
-                println!("プラグインは読み込まれていません");
+                println!("エフェクトのプラグインは読み込まれていません");
             }
             for i in list {
                 let def = effect::effect_def(&i.kind);
@@ -765,6 +806,9 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("  ファイル: {}", i.path.display());
                 let or_unknown = |s: &str| if s.is_empty() { "（記載なし）".to_string() } else { s.to_string() };
                 println!("  提供元: {} / 版: {} / ライセンス: {}", or_unknown(&i.vendor), or_unknown(&i.version), or_unknown(&i.license));
+                if let Some(r) = i.report() {
+                    println!("  {}", r.summary());
+                }
                 for p in def.map(|d| d.params).unwrap_or_default() {
                     println!("  - {}（{}）", p.name, p.label);
                 }
@@ -783,6 +827,23 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         other => Err(format!("不明なコマンド「{other}」\n\n{USAGE}")),
+    }
+}
+
+fn print_report(r: &plugins::SecurityReport, full: bool) {
+    println!("  {}", r.summary());
+    println!("  調べたファイル: {} 個 / SHA-256: {}", r.files_scanned, r.hash);
+    for f in &r.findings {
+        println!("  - [{}] +{} {}", f.category.label(), f.score, f.title);
+        if full && !f.evidence.is_empty() {
+            println!("      根拠: {}", f.evidence.join(", "));
+        }
+        if full && f.file != r.path {
+            println!("      ファイル: {}", f.file.display());
+        }
+    }
+    if full && !r.endpoints.is_empty() {
+        println!("  見つかった通信先: {}", r.endpoints.join(", "));
     }
 }
 

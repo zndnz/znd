@@ -1094,6 +1094,7 @@ impl App {
             ui.close_menu();
             self.delete_layer(id);
         }
+        self.plugin_layer_menu(ui, id);
     }
 
     /// 行の背景と下端の線。選択中のレイヤーの行は少し明るくする。
