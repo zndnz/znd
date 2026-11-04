@@ -25,6 +25,8 @@ pub(crate) struct PanelState {
 pub(crate) struct PluginHost {
     pub panels: HashMap<String, PanelState>,
     pub alert: Option<String>,
+    /// `host.copyText` で頼まれた、次の描画でクリップボードに入れる文字。
+    pub copy: Option<String>,
     pub logs: Vec<String>,
     /// 自己責任での許可を確認中のもの。
     pub confirm: Option<(PathBuf, SecurityReport)>,
@@ -122,6 +124,7 @@ impl App {
             "time": t,
             "fps": fps,
             "plugin": { "id": plugin, "dir": plugin_dir.display().to_string() },
+            "projectPath": self.path.as_ref().map(|p| p.display().to_string()),
         })
     }
 
@@ -161,6 +164,15 @@ impl App {
                 }
                 "status" => self.status = a.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
                 "alert" => self.plugins.alert = a.get("text").and_then(Value::as_str).map(String::from),
+                "copy_text" => self.plugins.copy = a.get("text").and_then(Value::as_str).map(String::from),
+                "open_project_folder" => match self.path.as_ref().and_then(|p| p.parent()) {
+                    Some(dir) => {
+                        if let Err(e) = open_in_file_manager(dir) {
+                            self.status = format!("{} を開けません: {e}", dir.display());
+                        }
+                    }
+                    None => self.status = "プロジェクトがまだ保存されていません".into(),
+                },
                 "comp" => {
                     let id = CompId::new(a.get("comp").and_then(Value::as_str).unwrap_or(""));
                     if self.shared.comp(&id).is_some() {
@@ -408,6 +420,9 @@ impl App {
                 self.plugin_panel(ctx, &panel);
             }
         }
+        if let Some(text) = self.plugins.copy.take() {
+            ctx.copy_text(text);
+        }
         if let Some(text) = self.plugins.alert.clone() {
             let mut open = true;
             let mut close = false;
@@ -566,14 +581,7 @@ impl App {
             if let Some(dir) = plugins::user_plugin_dir() {
                 if ui.button("プラグインフォルダを開く").clicked() {
                     let _ = std::fs::create_dir_all(&dir);
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else if cfg!(target_os = "windows") {
-                        "explorer"
-                    } else {
-                        "xdg-open"
-                    };
-                    if let Err(e) = std::process::Command::new(opener).arg(&dir).spawn() {
+                    if let Err(e) = open_in_file_manager(&dir) {
                         self.status = format!("{} を開けません: {e}", dir.display());
                     }
                 }
@@ -984,4 +992,16 @@ fn panel_item(ui: &mut egui::Ui, item: &Value, events: &mut Vec<(String, Value)>
             ui.weak(format!("（未対応の部品: {other}）"));
         }
     }
+}
+
+/// フォルダを OS のファイルマネージャーで開く。
+fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener).arg(dir).spawn().map(|_| ())
 }
