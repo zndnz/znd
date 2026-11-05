@@ -152,6 +152,18 @@ var host = {
     __actions.push({ type: 'save_file', name: String(fileName || 'untitled'), binary: binary,
       content: binary ? content.map(function (b) { return b & 255; }) : String(content), extensions: (opts.extensions || []).map(String) });
   },
+  /**
+   * レイヤーの音の大きさを 1 フレームごとに測り、同じスクリプトの関数 callback(結果, 追加の値) に渡す。
+   * 結果は { レイヤーID: [dBFS, ...] }（今のコンポの頭から終わりまでのフレームごと。音量・エフェクトを掛けた後の RMS。無音は -120）。
+   * opts: { comp（既定は今のコンポ）, data（callback にそのまま渡す値） }
+   */
+  audioLevels: function (layerIds, callback, opts) {
+    opts = opts || {};
+    var name = typeof callback === 'function' ? callback.name : String(callback || '');
+    if (!name) throw new Error('host.audioLevels: callback（関数か関数名）を指定してください');
+    __actions.push({ type: 'audio_levels', layers: (layerIds || []).map(String), comp: opts.comp ? String(opts.comp) : null,
+      callback: name, data: opts.data === undefined ? null : opts.data });
+  },
   /** 素材のファイルを選んでもらい、今のコンポの再生ヘッドの位置に読み込む（"filesystem" 権限が必要） */
   importFiles: function (opts) {
     opts = opts || {};

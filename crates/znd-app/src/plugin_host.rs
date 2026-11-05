@@ -130,6 +130,37 @@ impl App {
         })
     }
 
+    /// レイヤーごとの、1 フレームごとの音の大きさ（RMS の dBFS。無音は -120）。
+    fn audio_levels(&self, comp_id: &CompId, layers: &[String]) -> Value {
+        let shared = self.shared.clone();
+        let Some(comp) = shared.comp(comp_id) else { return json!({}) };
+        let mixer = znd_audio::Mixer::new(&shared, &*self.engine.clips);
+        let fps = comp.frame_rate.fps();
+        let total = mixer.comp_frames(comp);
+        let frames = (comp.duration.seconds() * fps).round().max(0.0) as usize;
+        let mut out = serde_json::Map::new();
+        for id in layers.iter().take(64) {
+            let lid = LayerId::new(id.as_str());
+            if comp.layer(&lid).is_none() {
+                continue;
+            }
+            let Ok(s) = mixer.mix_layer(comp_id, &lid, 0, total) else { continue };
+            let per = znd_audio::SAMPLE_RATE as f64 / fps;
+            let v: Vec<f64> = (0..frames)
+                .map(|f| {
+                    let (a, b) = (((f as f64 * per) as usize).min(total), (((f + 1) as f64 * per) as usize).min(total));
+                    if b <= a {
+                        return -120.0;
+                    }
+                    let ms = s[a * 2..b * 2].iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / ((b - a) * 2) as f64;
+                    if ms <= 1e-12 { -120.0 } else { (10.0 * ms.log10()).max(-120.0) }
+                })
+                .collect();
+            out.insert(id.clone(), json!(v));
+        }
+        Value::Object(out)
+    }
+
     /// プラグインのスクリプトの結果を取り込む（プロジェクトの書き換え・画面への操作・ログ）。
     fn absorb_plugin_run(&mut self, origin: &Origin, coalesce: bool, run: znd_script::PluginRun) {
         let label = origin.label.as_str();
@@ -189,6 +220,16 @@ impl App {
                 "filter" => {
                     hooks::set_filter_enabled(a.get("key").and_then(Value::as_str).unwrap_or(""), a.get("on").and_then(Value::as_bool).unwrap_or(false));
                     self.publish();
+                }
+                "audio_levels" => {
+                    let callback = a.get("callback").and_then(Value::as_str).unwrap_or("").to_string();
+                    let comp_id = a.get("comp").and_then(Value::as_str).map(CompId::new).unwrap_or_else(|| self.comp_id.clone());
+                    let layers = strings(a.get("layers"));
+                    let levels = self.audio_levels(&comp_id, &layers);
+                    let data = a.get("data").cloned().unwrap_or(Value::Null);
+                    if !callback.is_empty() && self.plugins.calls.len() < 8 {
+                        self.plugins.calls.push((origin.clone(), callback, vec![levels, data]));
+                    }
                 }
                 "command" => {
                     if let Some(k) = a.get("key").and_then(Value::as_str) {

@@ -163,6 +163,7 @@ C++ サポートライブラリ版の Invert / Retimer）。市販のプラグ�
 - `log(...)`（「プラグイン」ウィンドウに出る）と補助関数 `comp()` `layer()` `key()` `setKeys()` `flicks()` `seconds()` `newId()`、
   `addEffect(レイヤー, 種類, 名前)`（既定値のエフェクトを足して返す）・`setParam(エフェクト, パラメータ, 値)`・`findEffect(レイヤー, 名前)`・`addSolid(コンポ, 名前, 色)`（コンポの大きさの平面を一番上に足す）・`addText(コンポ, 名前, 文字, サイズ)`（コンポの中心にテキストレイヤーを一番上に足す）
 
+- `host.audioLevels(layerIds, callback, { comp, data })`: レイヤーの音の大きさを 1 フレームごとに測り（音量・エフェクトを掛けた後の RMS の dBFS。無音は -120）、`callback({ レイヤーID: [dB, ...] }, data)` を呼ぶ。パネルから呼ぶと、callback の戻り値がパネルの状態になる
 - `filesystem` 権限があるときだけ: `host.openFile({ extensions, binary, data }, callback)`（利用者が選んだファイルを読み、
   同じスクリプトの `callback(中身, パス, data)` を呼ぶ。パネルから呼んだときは、コールバックが返したオブジェクトがパネルの新しい状態になる。テキストは UTF-8 / UTF-16 / Shift_JIS を見分ける）、
   `host.saveFile(名前, 中身, { extensions })`（保存先を選んでもらって書く。中身はバイト列の配列も可）、
