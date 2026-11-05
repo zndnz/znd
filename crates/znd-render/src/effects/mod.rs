@@ -34,6 +34,9 @@ pub struct FxContext<'a> {
     pub fetch_layer: &'a dyn Fn(&LayerId) -> Option<FrameBuf>,
     /// このレイヤーの（エフェクト適用前の）画像を別の時刻で取得する。
     pub fetch_self: &'a dyn Fn(Time) -> Option<FrameBuf>,
+    /// 下のレイヤーまでの合成結果を、今のバッファ（引数の幅×高さ）の画素に写して取得する。
+    /// 読めるのは `reads_below` のエフェクトを持つレイヤーを CPU で合成するときだけ。
+    pub fetch_below: &'a dyn Fn(usize, usize) -> Option<FrameBuf>,
     /// 指定レイヤーの音声（モノラル 48kHz）を、現在時刻を中心に `len` サンプル取得する。
     pub audio: &'a dyn Fn(&LayerId, usize) -> Vec<f32>,
     /// このエフェクトのパラメータを別の時刻で評価する（粒子の発生位置など）。

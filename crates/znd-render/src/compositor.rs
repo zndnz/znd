@@ -261,7 +261,12 @@ impl<'a> Renderer<'a> {
         let drawable = |layer: &Layer| layer.visible && !(any_solo && !layer.solo) && !(layer.guide && !opts.guides) && layer.active_at(t);
         if let Some(gpu) = self.composite {
             // 3D のまとまりと調整レイヤーは「ここまでの絵」を CPU で読むので、そのコンポは CPU で合成する
-            let cpu_only = comp.layers.iter().any(|l| drawable(l) && (three_d::is_scene_layer(l) || matches!(l.kind, LayerKind::Adjustment)));
+            let cpu_only = comp.layers.iter().any(|l| {
+                drawable(l)
+                    && (three_d::is_scene_layer(l)
+                        || matches!(l.kind, LayerKind::Adjustment)
+                        || l.effects.iter().any(|e| e.enabled && znd_core::effect::reads_below(&e.kind)))
+            });
             if !cpu_only && gpu.fits(out_w, out_h) {
                 let job = self.composite_job(gpu, orig, comp, &drawable, t, base, out_w, out_h, opts, depth)?;
                 match gpu.composite(&job) {
@@ -305,11 +310,11 @@ impl<'a> Renderer<'a> {
                 self.apply_adjustment(&mut canvas, orig, comp, layer, t, base, opts, depth)?;
                 continue;
             }
-            let Some(mut tile) = self.layer_tile(orig, comp, layer, t, base, out_w, out_h, opts, depth)? else { continue };
+            let Some(mut tile) = self.layer_tile(orig, comp, layer, t, base, out_w, out_h, opts, depth, Some(&canvas))? else { continue };
             if let Some(tm) = &layer.track_matte {
                 // マットレイヤーは自身の表示スイッチに関係なくマットとして描く。
                 let matte = match comp.layer(&tm.layer) {
-                    Some(ml) if ml.active_at(t) => self.layer_tile(orig, comp, ml, t, base, out_w, out_h, opts, depth)?,
+                    Some(ml) if ml.active_at(t) => self.layer_tile(orig, comp, ml, t, base, out_w, out_h, opts, depth, None)?,
                     _ => None,
                 };
                 apply_matte(&mut tile, matte.as_ref(), tm.mode);
@@ -404,10 +409,10 @@ impl<'a> Renderer<'a> {
                 }
             }
             // GPU に載せられない: CPU でタイルまで作る（マットもここで適用する）
-            let Some(mut tile) = self.layer_tile(orig, comp, layer, t, base, out_w, out_h, opts, depth)? else { continue };
+            let Some(mut tile) = self.layer_tile(orig, comp, layer, t, base, out_w, out_h, opts, depth, None)? else { continue };
             if let Some(tm) = &layer.track_matte {
                 let matte = match comp.layer(&tm.layer) {
-                    Some(ml) if ml.active_at(t) => self.layer_tile(orig, comp, ml, t, base, out_w, out_h, opts, depth)?,
+                    Some(ml) if ml.active_at(t) => self.layer_tile(orig, comp, ml, t, base, out_w, out_h, opts, depth, None)?,
                     _ => None,
                 };
                 apply_matte(&mut tile, matte.as_ref(), tm.mode);
@@ -450,10 +455,10 @@ impl<'a> Renderer<'a> {
                 let flat = Affine::scale(cw as f64 / comp.width as f64, ch as f64 / comp.height as f64);
                 let origin = [-(comp.width as f64) / 2.0, -(comp.height as f64) / 2.0];
                 let m = flat.then_after(&Affine::translate(-origin[0], -origin[1]));
-                let buf = self.comp_space_buffer(orig, comp, layer, t, m, flat, cw, ch, opts, depth)?;
+                let buf = self.comp_space_buffer(orig, comp, layer, t, m, flat, cw, ch, opts, depth, None)?;
                 (Some(Content::Image { buf, width: comp.width as f64, height: comp.height as f64, x0: 0.0, y0: 0.0 }), origin)
             } else {
-                (self.layer_content(orig, comp, layer, t, opts, depth)?, [0.0, 0.0])
+                (self.layer_content(orig, comp, layer, t, opts, depth, None)?, [0.0, 0.0])
             };
             let Some(content) = content else { continue };
             let (buf, width, height) = match content {
@@ -495,7 +500,8 @@ impl<'a> Renderer<'a> {
         let m = base.then_after(&world_matrix(comp, layer, t));
         // 別時刻の「下の絵」は持っていないので、時間系エフェクトは現在の絵だけを見る
         let none = |_: Time| None;
-        let (processed, offset) = self.apply_effects(orig, comp, layer, t, canvas.clone(), matrix_scale(&base), &m, &none, opts, depth)?;
+        let below = (&*canvas, Affine::IDENTITY);
+        let (processed, offset) = self.apply_effects(orig, comp, layer, t, canvas.clone(), matrix_scale(&base), &m, &none, opts, depth, Some(below))?;
         let processed = if processed.width != canvas.width || processed.height != canvas.height || offset != [0.0, 0.0] {
             paste_at(&processed, offset, canvas.width, canvas.height)
         } else {
@@ -525,12 +531,15 @@ impl<'a> Renderer<'a> {
         out_h: usize,
         opts: RenderOptions,
         depth: usize,
+        below: Option<&FrameBuf>,
     ) -> Result<Option<Tile>, RenderError> {
         let mb = comp.motion_blur;
         let blur = mb.enabled && layer.motion_blur && mb.samples > 1 && mb.shutter_angle > 0.0;
         let comp_space = is_comp_space(layer);
         // 画像系のレイヤーは、内容（ソース＋マスク＋エフェクト）を 1 回だけ作り、置き方だけを時刻ごとに変える
-        let content = if comp_space { None } else { self.layer_content(orig, comp, layer, t, opts, depth)? };
+        // 下のレイヤーまでの絵は、レイヤー座標 → 出力画素の変換と一緒に渡す
+        let below_at = below.map(|b| (b, base.then_after(&world_matrix(comp, layer, t))));
+        let content = if comp_space { None } else { self.layer_content(orig, comp, layer, t, opts, depth, below_at)? };
         if !comp_space && content.is_none() {
             return Ok(None);
         }
@@ -543,7 +552,7 @@ impl<'a> Renderer<'a> {
             let m = base.then_after(&world_matrix(c, l, at));
             match &content {
                 None => {
-                    let mut buf = self.comp_space_buffer(orig, c, l, at, m, base, out_w, out_h, opts, depth)?;
+                    let mut buf = self.comp_space_buffer(orig, c, l, at, m, base, out_w, out_h, opts, depth, if at == t { below } else { None })?;
                     if opacity < 1.0 {
                         buf.data.iter_mut().for_each(|v| *v *= opacity);
                     }
@@ -604,6 +613,7 @@ impl<'a> Renderer<'a> {
         t: Time,
         opts: RenderOptions,
         depth: usize,
+        below: Option<(&FrameBuf, Affine)>,
     ) -> Result<Option<Content>, RenderError> {
         let processing = has_effects(layer) || has_masks(layer);
         let Some(content) = self.raw_content(comp, layer, t, opts, depth, processing)? else { return Ok(None) };
@@ -626,7 +636,9 @@ impl<'a> Renderer<'a> {
             }
         };
         let (sx, sy) = (buf.width as f64 / width, buf.height as f64 / height);
-        let (buf, [ox, oy]) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&to_buf), &to_buf, &at_time, opts, depth)?;
+        // バッファ画素 → 出力画素
+        let below = below.and_then(|(b, m)| to_buf.inverse().map(|inv| (b, m.then_after(&inv))));
+        let (buf, [ox, oy]) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&to_buf), &to_buf, &at_time, opts, depth, below)?;
         // 大きさを変えるエフェクトの後は、画像の大きさと左上の位置をレイヤー座標に直す
         let (width, height) = (buf.width as f64 / sx, buf.height as f64 / sy);
         Ok(Some(Content::Image { buf, width, height, x0: ox / sx, y0: oy / sy }))
@@ -736,6 +748,7 @@ impl<'a> Renderer<'a> {
         out_h: usize,
         opts: RenderOptions,
         depth: usize,
+        below: Option<&FrameBuf>,
     ) -> Result<FrameBuf, RenderError> {
         let mut buf = self.comp_space_raw(comp, layer, t, m, out_w, out_h, opts, depth)?;
         apply_masks(&mut buf, &layer.masks, t, &m);
@@ -750,7 +763,8 @@ impl<'a> Renderer<'a> {
             apply_masks(&mut b, &l.masks, at, &m2);
             Some(b)
         };
-        let (buf, offset) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&base), &m, &at_time, opts, depth)?;
+        let below = below.map(|b| (b, Affine::IDENTITY));
+        let (buf, offset) = self.apply_effects(orig, comp, layer, t, buf, matrix_scale(&base), &m, &at_time, opts, depth, below)?;
         Ok(if buf.width != out_w || buf.height != out_h || offset != [0.0, 0.0] { paste_at(&buf, offset, out_w, out_h) } else { buf })
     }
 
@@ -838,7 +852,8 @@ impl<'a> Renderer<'a> {
     }
 
     /// レイヤーのエフェクトを順に適用する。`scale` はバッファ画素 / レイヤー座標 1 単位、
-    /// `mask_m` はレイヤー座標 → バッファ画素、`at_time` は別時刻のエフェクト前の絵。
+    /// `mask_m` はレイヤー座標 → バッファ画素、`at_time` は別時刻のエフェクト前の絵、
+    /// `below` は下のレイヤーまでの合成結果（出力画素）と、元のバッファ画素 → 出力画素の変換。
     #[allow(clippy::too_many_arguments)]
     fn apply_effects(
         &self,
@@ -852,6 +867,7 @@ impl<'a> Renderer<'a> {
         at_time: &dyn Fn(Time) -> Option<FrameBuf>,
         opts: RenderOptions,
         depth: usize,
+        below: Option<(&FrameBuf, Affine)>,
     ) -> Result<(FrameBuf, [f64; 2]), RenderError> {
         let masks: Vec<BezPath> = layer.masks.iter().map(|k| transform_path(&k.path.eval(t), mask_m)).collect();
         let (w, h) = (buf.width, buf.height);
@@ -866,6 +882,21 @@ impl<'a> Renderer<'a> {
             layer.effects.iter().filter(|e| e.enabled).map(|fx| (fx, fx.eval(t))).collect();
         let env = effects::AccelEnv { scale, time_seconds: t.seconds(), cx: &self.cx };
         let offset = std::cell::Cell::new([0.0f64; 2]);
+        // 下のレイヤーまでの絵を、今のバッファ（w×h、左上は元のバッファの offset）の画素に写す
+        let fetch_below = |w: usize, h: usize| -> Option<FrameBuf> {
+            let (canvas, m) = below?;
+            let o = offset.get();
+            let mut out = FrameBuf::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let (sx, sy) = m.apply(x as f64 + 0.5 + o[0], y as f64 + 0.5 + o[1]);
+                    let c = sample_bilinear(canvas, sx, sy);
+                    let i = (y * w + x) * 4;
+                    out.data[i..i + 4].copy_from_slice(&c);
+                }
+            }
+            Some(out)
+        };
         let (layer_time, layer_duration) = ((t - layer.in_point).seconds(), (layer.out_point - layer.in_point).seconds());
         let on_gpu = |i: usize| match self.accel {
             Some(a) => a.supports(&effects::AccelOp { kind: &active[i].0.kind, params: &active[i].1 }, &env, w, h),
@@ -901,6 +932,7 @@ impl<'a> Renderer<'a> {
                 cx: &self.cx,
                 fetch_layer: &fetch_layer,
                 fetch_self: at_time,
+                fetch_below: &fetch_below,
                 audio: &audio,
                 eval_at: &eval_at,
                 masks: &masks,
@@ -991,4 +1023,24 @@ fn apply_matte(tile: &mut Tile, matte: Option<&Tile>, mode: MatteMode) {
         let f = if invert { 1.0 - f } else { f };
         px.iter_mut().for_each(|v| *v *= f);
     }
+}
+
+/// 出力画素の座標（画素の中心は +0.5）で双線形に読む。範囲の外は透明。
+fn sample_bilinear(buf: &FrameBuf, x: f64, y: f64) -> [f32; 4] {
+    let (fx, fy) = (x - 0.5, y - 0.5);
+    let (x0, y0) = (fx.floor(), fy.floor());
+    let (tx, ty) = ((fx - x0) as f32, (fy - y0) as f32);
+    let at = |xi: f64, yi: f64| -> [f32; 4] {
+        if xi < 0.0 || yi < 0.0 || xi >= buf.width as f64 || yi >= buf.height as f64 {
+            return [0.0; 4];
+        }
+        let i = (yi as usize * buf.width + xi as usize) * 4;
+        [buf.data[i], buf.data[i + 1], buf.data[i + 2], buf.data[i + 3]]
+    };
+    let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
+    std::array::from_fn(|k| {
+        let top = a[k] + (b[k] - a[k]) * tx;
+        let bot = c[k] + (d[k] - c[k]) * tx;
+        top + (bot - top) * ty
+    })
 }

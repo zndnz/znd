@@ -70,6 +70,7 @@ pub struct Host {
     pub mask_points: unsafe extern "C" fn(*mut c_void, u32, *mut f64, u32, *mut u32) -> u32,
     pub comp_size: unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32),
     pub param_at: unsafe extern "C" fn(*mut c_void, u32, f64, *mut f64) -> i32,
+    pub backdrop: unsafe extern "C" fn(*mut c_void, *mut Image) -> i32,
 }
 
 #[repr(C)]
@@ -116,6 +117,7 @@ const PARAM_PIXELS: u32 = 1;
 const EFFECT_TIME_DEPENDENT: u32 = 1;
 const EFFECT_THREAD_SAFE: u32 = 2;
 const EFFECT_AUDIO: u32 = 4;
+const EFFECT_READS_BELOW: u32 = 8;
 /// 出力画像の一辺の上限（誤った値で巨大な確保をしないため）。
 const MAX_SIDE: u32 = 16384;
 
@@ -209,7 +211,8 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<dyn Effect>>, String> {
             if is_audio && (abi < 3 || audio.is_none()) {
                 return Err(format!("{id}: 音声エフェクトには ABI 3 と znd_plugin_process_audio が必要です"));
             }
-            let pdescs = std::slice::from_raw_parts(e.params, e.param_count as usize);
+            // パラメータの無いエフェクトは params が NULL でもよい
+            let pdescs = if e.param_count == 0 { &[][..] } else { std::slice::from_raw_parts(e.params, e.param_count as usize) };
             let mut params = Vec::new();
             let mut defs = Vec::new();
             for p in pdescs {
@@ -251,6 +254,9 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<dyn Effect>>, String> {
                 time_dependent: e.flags & EFFECT_TIME_DEPENDENT != 0,
                 params: defs,
             });
+            if e.flags & EFFECT_READS_BELOW != 0 {
+                znd_core::effect::mark_reads_below(&kind);
+            }
             let params = Arc::new(params);
             let thread_safe = e.flags & EFFECT_THREAD_SAFE != 0;
             if is_audio {
@@ -315,6 +321,8 @@ struct HostState<'a, 'b> {
     keep: RefCell<Vec<FrameBuf>>,
     /// `set_output` で作った出力画像と、その左上の位置（入力の画素座標）。
     output: RefCell<Option<(FrameBuf, [i32; 2])>>,
+    /// 入力のバッファの大きさ。
+    size: (usize, usize),
 }
 
 impl HostState<'_, '_> {
@@ -338,6 +346,14 @@ unsafe fn state<'a>(ctx: *mut c_void) -> &'a HostState<'a, 'a> {
 unsafe extern "C" fn host_frame_at(ctx: *mut c_void, time: f64, out: *mut Image) -> i32 {
     let s = state(ctx);
     match (s.ctx.fetch_self)(znd_core::Time::from_seconds(time)) {
+        Some(buf) => s.hand_out(buf, out),
+        None => 1,
+    }
+}
+
+unsafe extern "C" fn host_backdrop(ctx: *mut c_void, out: *mut Image) -> i32 {
+    let s = state(ctx);
+    match (s.ctx.fetch_below)(s.size.0, s.size.1) {
         Some(buf) => s.hand_out(buf, out),
         None => 1,
     }
@@ -485,7 +501,14 @@ impl Effect for NativeEffect {
         };
         let (values, strings) = pack(&self.params, p, s, &color);
         let string_ptrs: Vec<*const c_char> = strings.iter().map(|s| s.as_ref().map_or(std::ptr::null(), |c| c.as_ptr())).collect();
-        let host_state = HostState { ctx, params: p, names: &self.params, keep: RefCell::default(), output: RefCell::default() };
+        let host_state = HostState {
+            ctx,
+            params: p,
+            names: &self.params,
+            keep: RefCell::default(),
+            output: RefCell::default(),
+            size: (buf.width, buf.height),
+        };
         let host = Host {
             ctx: &host_state as *const HostState as *mut c_void,
             frame_at: host_frame_at,
@@ -497,6 +520,7 @@ impl Effect for NativeEffect {
             mask_points: host_mask_points,
             comp_size: host_comp_size,
             param_at: host_param_at,
+            backdrop: host_backdrop,
         };
         let abi3 = self.lib.abi >= 3;
         let args = RenderArgs {

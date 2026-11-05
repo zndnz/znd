@@ -1,9 +1,10 @@
-/* サンプルプラグイン（ABI 3）: 画像を広げて縁を付けるエフェクトと、音量を変える音声エフェクト。
+/* サンプルプラグイン（ABI 3）: 画像を広げて縁を付けるエフェクトと、音量を変える音声エフェクトと、
+ * 下のレイヤーまでの絵を反転して透かすエフェクト。
  *
  *   cc -O2 -shared -fPIC -I../../sdk -o outline.dylib outline.c -lm
  *
  * ABI 3 のホスト関数（出力の大きさの変更 set_output・組み込みエフェクトの呼び出し apply_effect）と、
- * 音声エフェクト（znd_plugin_process_audio）の使い方を示す。
+ * 音声エフェクト（znd_plugin_process_audio）、下のレイヤーまでの絵（backdrop）の使い方を示す。
  */
 #include "znd_plugin.h"
 #include <math.h>
@@ -23,14 +24,32 @@ static const ZndParamDesc GAIN_PARAMS[] = {
 static const ZndEffectDesc EFFECTS[] = {
     {"org.znd.example.outline", "縁取り（ABI 3 サンプル）", "サンプル", ZND_EFFECT_THREAD_SAFE, 3, OUTLINE_PARAMS},
     {"org.znd.example.gain", "音量（ABI 3 サンプル）", "サンプル", ZND_EFFECT_THREAD_SAFE | ZND_EFFECT_AUDIO, 1, GAIN_PARAMS},
+    {"org.znd.example.see_through", "反転して透かす（ABI 3 サンプル）", "サンプル", ZND_EFFECT_THREAD_SAFE | ZND_EFFECT_READS_BELOW, 0, NULL},
 };
 
-static const ZndPluginDesc DESC = {ZND_PLUGIN_ABI, "znd サンプル", "1.0", "MIT OR Apache-2.0", 2, EFFECTS};
+static const ZndPluginDesc DESC = {ZND_PLUGIN_ABI, "znd サンプル", "1.0", "MIT OR Apache-2.0", 3, EFFECTS};
 
 const ZndPluginDesc *znd_plugin_describe(void) { return &DESC; }
 
+/* 下のレイヤーまでの絵の色を反転して、このレイヤーの形の中に描く */
+static int32_t see_through(const ZndRenderArgs *a) {
+  ZndImage below;
+  if (a->host->backdrop(a->host->ctx, &below) != 0) return 1;
+  if (below.width != a->width || below.height != a->height) return 1;
+  for (size_t i = 0; i < (size_t)a->width * a->height; i++) {
+    float *o = a->rgba + i * 4;
+    const float *b = below.rgba + i * 4;
+    float m = o[3];
+    for (int k = 0; k < 3; k++) o[k] = (b[3] - b[k]) * m;
+    o[3] = b[3] * m;
+  }
+  return 0;
+}
+
 int32_t znd_plugin_render(uint32_t effect, const ZndRenderArgs *a) {
-  if (effect != 0 || !a->host) return 1;
+  if (!a->host) return 1;
+  if (effect == 2) return see_through(a);
+  if (effect != 0) return 1;
   const double *v = a->values;
   int pad = (int)ceil(v[0]);
   if (pad <= 0) return 0;

@@ -177,6 +177,7 @@ pub(crate) fn apply_output_filters(comp: &Composition, t: Time, mut buf: FrameBu
                 cx,
                 fetch_layer: &none_layer,
                 fetch_self: &none_time,
+                fetch_below: &|_, _| None,
                 audio: &no_audio,
                 eval_at: &eval_at,
                 masks: &[],

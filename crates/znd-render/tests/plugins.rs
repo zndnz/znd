@@ -466,6 +466,31 @@ fn p5_abi3_effect_can_grow_the_layer_image() {
 }
 
 #[test]
+fn p5_abi3_effect_reads_layers_below() {
+    if native_abi3().is_none() {
+        return;
+    }
+    // 60x60 の青い平面の上に、20x20 の赤い平面（下の絵を反転して透かす）を中央から右へ 10px ずらして置く
+    let bg = solid("bg", 60, 60, [0.0, 0.0, 1.0], 60, 60);
+    let mut fg = solid("fg", 20, 20, RED, 60, 60);
+    fg.transform.position.value[0] += 10.0;
+    fg.effects = vec![fx("plugin:org.znd.example.see_through", 20, 20)];
+    assert!(znd_core::effect::reads_below("plugin:org.znd.example.see_through"));
+    let p = project(vec![comp("main", 60, 60, vec![fg, bg])]);
+    let buf = render(&p, "main");
+    // 赤い平面の中は、下の青を反転した黄色になる
+    let c = buf.pixel(40, 30);
+    close(c[0], 1.0, 1e-3, "反転の赤");
+    close(c[1], 1.0, 1e-3, "反転の緑");
+    close(c[2], 0.0, 1e-3, "反転の青");
+    // 外は青のまま
+    close(buf.pixel(10, 30)[2], 1.0, 1e-4, "外の青");
+    // 1/2 解像度でも同じ
+    let half = render_at(&p, "main", 0.0, RenderOptions { downsample: 2, ..ALPHA });
+    close(half.pixel(20, 15)[0], 1.0, 0.05, "1/2 解像度の反転");
+}
+
+#[test]
 fn p6_abi3_audio_effect_is_registered_as_audio_processor() {
     if native_abi3().is_none() {
         return;

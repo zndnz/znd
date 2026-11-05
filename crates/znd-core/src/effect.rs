@@ -949,6 +949,21 @@ pub fn register_effect(def: DynEffect) -> &'static EffectDef {
     leaked
 }
 
+fn reads_below_set() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// 下のレイヤーまでの合成結果を読むエフェクトとして登録する（プラグインの `READS_BELOW`）。
+pub fn mark_reads_below(kind: &str) {
+    reads_below_set().write().unwrap().insert(kind.to_string());
+}
+
+/// 下のレイヤーまでの合成結果を読むエフェクトか。そのようなエフェクトを持つレイヤーのあるコンポは CPU で合成する。
+pub fn reads_below(kind: &str) -> bool {
+    kind.starts_with("plugin:") && reads_below_set().read().unwrap().contains(kind)
+}
+
 pub fn effect_def(kind: &str) -> Option<&'static EffectDef> {
     EFFECTS.iter().find(|d| d.kind == kind).or_else(|| dynamic().read().unwrap().iter().copied().find(|d| d.kind == kind))
 }

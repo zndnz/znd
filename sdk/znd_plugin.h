@@ -51,6 +51,7 @@ enum {
 #define ZND_EFFECT_TIME_DEPENDENT 1u /* パラメータが同じでも時刻で結果が変わる（ノイズ等） */
 #define ZND_EFFECT_THREAD_SAFE 2u    /* render を複数スレッドから同時に呼んでよい */
 #define ZND_EFFECT_AUDIO 4u          /* ABI 3: 音声エフェクト。znd_plugin_process_audio が呼ばれ、映像には何もしない */
+#define ZND_EFFECT_READS_BELOW 8u    /* host->backdrop で下のレイヤーまでの合成結果を読む（そのコンポは CPU で合成する） */
 
 typedef struct ZndParamDesc {
   const char *id;      /* プロジェクトに保存される名前。英数字と _ 。後から変えないこと */
@@ -113,6 +114,9 @@ typedef struct ZndHost {
   /* index 番目のパラメータを、レイヤーのイン点から layer_time 秒の時刻で評価して out[4] に書く（render の値と同じ形）。
      時間で変わるカーブ（キーフレームで描いた曲線）を読むのに使う。文字列・レイヤーは 0。 */
   int32_t (*param_at)(void *ctx, uint32_t index, double layer_time, double *out);
+  /* 下のレイヤーまでの合成結果を、このバッファの画素に写して取得する（ガラス・屈折など背景を透かす効果用）。
+     ZND_EFFECT_READS_BELOW を付けたエフェクトだけが読める。読めないときは 1 */
+  int32_t (*backdrop)(void *ctx, ZndImage *out);
 } ZndHost;
 
 typedef struct ZndRenderArgs {
