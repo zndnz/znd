@@ -144,6 +144,7 @@ typedef struct ZndAudioArgs {
   uint32_t param_count;
   const double *values; /* param_count * 4 個（ブロックの先頭時刻で評価した値。px の縮尺は掛からない） */
   const char *const *strings;
+  int64_t length;       /* レイヤーの長さ（サンプル数、イン点からアウト点まで） */
 } ZndAudioArgs;
 
 /* プラグインの定義を返す。返したポインタはライブラリが読み込まれている間ずっと有効であること。 */

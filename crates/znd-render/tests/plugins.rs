@@ -476,7 +476,7 @@ fn p6_abi3_audio_effect_is_registered_as_audio_processor() {
     let mut samples = vec![1.0f32; 64];
     proc.process(
         &fx.eval(Time::ZERO),
-        znd_core::effect::AudioBlock { samples: &mut samples, sample_rate: 48000, start: 0, time: Time::ZERO, instance: 1, seed: 0 },
+        znd_core::effect::AudioBlock { samples: &mut samples, sample_rate: 48000, start: 0, time: Time::ZERO, instance: 1, seed: 0, length: 0 },
     );
     assert!(samples.iter().all(|v| (*v - 0.25).abs() < 1e-6));
     // 映像には何もしない

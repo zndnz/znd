@@ -252,6 +252,7 @@ fn apply_audio_effects(layer: &Layer, abs: i64, dry: &mut [f32]) {
                     time: if k == 0 { time } else { sample_to_time(at) },
                     instance,
                     seed,
+                    length: time_to_sample(layer.out_point) - time_to_sample(layer.in_point),
                 },
             );
         }

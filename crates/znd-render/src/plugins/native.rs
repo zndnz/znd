@@ -102,6 +102,7 @@ pub struct AudioArgs {
     pub param_count: u32,
     pub values: *const f64,
     pub strings: *const *const c_char,
+    pub length: i64,
 }
 
 const PARAM_FLOAT: u32 = 0;
@@ -561,6 +562,7 @@ impl AudioProcessor for NativeAudio {
             param_count: self.params.len() as u32,
             values: values.as_ptr(),
             strings: string_ptrs.as_ptr(),
+            length: block.length,
         };
         let _guard = (!self.thread_safe).then(|| self.lib.lock.lock().unwrap_or_else(|e| e.into_inner()));
         // SAFETY: samples は frames*2 要素で、呼び出しの間は排他的に借用している。
