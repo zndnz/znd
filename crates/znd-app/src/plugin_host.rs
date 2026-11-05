@@ -45,6 +45,8 @@ pub(crate) struct Origin {
     pub plugin: String,
     pub dir: PathBuf,
     pub source: std::sync::Arc<String>,
+    /// パネルから呼ばれたときは、そのパネルのキー（`host.openFile` のコールバックが状態を返せるように）。
+    pub panel: Option<String>,
 }
 
 /// ファイルを読み書きするスクリプトに許す上限。
@@ -262,7 +264,16 @@ impl App {
     fn run_plugin_call(&mut self, origin: &Origin, function: &str, args: &[Value]) {
         let context = self.plugin_context(&origin.dir, &origin.plugin);
         match znd_script::run_plugin(&self.shared, &origin.source, Some((function, args)), &context) {
-            Ok(run) => self.absorb_plugin_run(origin, false, run),
+            Ok(run) => {
+                // パネルのコールバックが返したオブジェクトは、そのパネルの新しい状態にする
+                if let (Some(key), true) = (&origin.panel, run.ret.is_object()) {
+                    if let Some(st) = self.plugins.panels.get_mut(key) {
+                        st.state = run.ret.clone();
+                        st.built_for = None;
+                    }
+                }
+                self.absorb_plugin_run(origin, false, run)
+            }
             Err(e) => {
                 self.status = format!("{}: {e}", origin.label);
                 self.plugins.logs.push(format!("[{}] エラー: {e}", origin.label));
@@ -273,7 +284,7 @@ impl App {
     pub(crate) fn run_plugin_command(&mut self, cmd: &Command) {
         let context = self.plugin_context(&cmd.dir, &cmd.plugin);
         let call = cmd.function.as_deref().map(|f| (f, &[][..]));
-        let origin = Origin { label: cmd.label.clone(), plugin: cmd.plugin.clone(), dir: cmd.dir.clone(), source: cmd.source.clone() };
+        let origin = Origin { label: cmd.label.clone(), plugin: cmd.plugin.clone(), dir: cmd.dir.clone(), source: cmd.source.clone(), panel: None };
         match znd_script::run_plugin(&self.shared, &cmd.source, call, &context) {
             Ok(run) => {
                 // スクリプトが host.status で出したものがあれば、そちらが上書きする
@@ -519,6 +530,7 @@ impl App {
                     plugin: panel.plugin.clone(),
                     dir: panel.dir.clone(),
                     source: panel.source.clone(),
+                    panel: Some(panel.key.clone()),
                 };
                 self.absorb_plugin_run(&origin, true, run);
             }
