@@ -117,6 +117,10 @@ typedef struct ZndHost {
   /* 下のレイヤーまでの合成結果を、このバッファの画素に写して取得する（ガラス・屈折など背景を透かす効果用）。
      ZND_EFFECT_READS_BELOW を付けたエフェクトだけが読める。読めないときは 1 */
   int32_t (*backdrop)(void *ctx, ZndImage *out);
+  /* LAYER パラメータで選ばれたレイヤーの内容（エフェクト前）を、そのレイヤー自身の大きさで取得する
+     （layer_image と違い引き伸ばさないので縦横比が分かる。大きさはバッファの縮尺 scale を掛けたもの）。
+     シェイプ・テキストはコンポ全体の大きさ。取得できないときは 1 */
+  int32_t (*layer_source)(void *ctx, uint32_t param, ZndImage *out);
 } ZndHost;
 
 typedef struct ZndRenderArgs {

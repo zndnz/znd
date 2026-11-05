@@ -67,6 +67,7 @@ fn cpu(kind: &str, p: &EvalParams, buf: FrameBuf, scale: f32, seconds: f64) -> F
         fetch_layer: &none_layer,
         fetch_self: &none_self,
         fetch_below: &|_, _| None,
+        fetch_source: &|_| None,
         audio: &audio,
         eval_at: &eval_at,
         masks: &[],

@@ -71,6 +71,7 @@ pub struct Host {
     pub comp_size: unsafe extern "C" fn(*mut c_void, *mut u32, *mut u32),
     pub param_at: unsafe extern "C" fn(*mut c_void, u32, f64, *mut f64) -> i32,
     pub backdrop: unsafe extern "C" fn(*mut c_void, *mut Image) -> i32,
+    pub layer_source: unsafe extern "C" fn(*mut c_void, u32, *mut Image) -> i32,
 }
 
 #[repr(C)]
@@ -369,6 +370,16 @@ unsafe extern "C" fn host_layer_image(ctx: *mut c_void, param: u32, out: *mut Im
     }
 }
 
+unsafe extern "C" fn host_layer_source(ctx: *mut c_void, param: u32, out: *mut Image) -> i32 {
+    let s = state(ctx);
+    let Some(p) = s.names.get(param as usize).filter(|p| p.kind == PARAM_LAYER) else { return 1 };
+    let Some(id) = s.params.layer(&p.name) else { return 1 };
+    match (s.ctx.fetch_source)(id) {
+        Some(buf) => s.hand_out(buf, out),
+        None => 1,
+    }
+}
+
 unsafe extern "C" fn host_audio(ctx: *mut c_void, param: u32, out: *mut f32, len: u32) -> i32 {
     let s = state(ctx);
     if out.is_null() || len == 0 || len > 1 << 22 {
@@ -521,6 +532,7 @@ impl Effect for NativeEffect {
             comp_size: host_comp_size,
             param_at: host_param_at,
             backdrop: host_backdrop,
+            layer_source: host_layer_source,
         };
         let abi3 = self.lib.abi >= 3;
         let args = RenderArgs {

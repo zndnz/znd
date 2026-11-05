@@ -851,6 +851,31 @@ impl<'a> Renderer<'a> {
         })
     }
 
+    /// レイヤーの内容（エフェクト前）を、そのレイヤー自身の大きさの画像で返す（`scale` はバッファ画素 / レイヤー座標 1 単位）。
+    /// 寸法を持たないレイヤー（シェイプ・テキスト・折りたたんだプリコンポ）はコンポ全体の大きさで描く。
+    fn source_image(&self, comp: &Composition, id: &LayerId, t: Time, scale: f64, opts: RenderOptions, depth: usize) -> Option<FrameBuf> {
+        let layer = comp.layer(id)?;
+        let s = scale.clamp(1e-3, 16.0);
+        let size = |w: f64, h: f64| (((w * s).round() as usize).clamp(1, 16384), ((h * s).round() as usize).clamp(1, 16384));
+        if matches!(layer.kind, LayerKind::Shape { .. } | LayerKind::Text { .. })
+            || (matches!(layer.kind, LayerKind::Precomp { .. }) && layer.collapse)
+        {
+            let (w, h) = size(comp.width as f64, comp.height as f64);
+            return self.map_image(comp, id, t, w, h, opts, depth);
+        }
+        let content = self.raw_content(comp, layer, t, opts, depth, false).ok()??;
+        Some(match content {
+            Content::Solid { width, height, color } => {
+                let (w, h) = size(width as f64, height as f64);
+                let mut b = FrameBuf::new(w, h);
+                b.data.chunks_exact_mut(4).for_each(|p| p.copy_from_slice(&color));
+                b
+            }
+            Content::Image { buf, .. } => buf,
+            Content::Shared { buf, .. } => (*buf).clone(),
+        })
+    }
+
     /// レイヤーのエフェクトを順に適用する。`scale` はバッファ画素 / レイヤー座標 1 単位、
     /// `mask_m` はレイヤー座標 → バッファ画素、`at_time` は別時刻のエフェクト前の絵、
     /// `below` は下のレイヤーまでの合成結果（出力画素）と、元のバッファ画素 → 出力画素の変換。
@@ -872,6 +897,7 @@ impl<'a> Renderer<'a> {
         let masks: Vec<BezPath> = layer.masks.iter().map(|k| transform_path(&k.path.eval(t), mask_m)).collect();
         let (w, h) = (buf.width, buf.height);
         let fetch_layer = |id: &LayerId| self.map_image(comp, id, t, w, h, opts, depth);
+        let fetch_source = |id: &LayerId| self.source_image(comp, id, t, scale as f64, opts, depth);
         let audio = |id: &LayerId, len: usize| match self.audio {
             Some(a) => a.window(self.project, &comp.id, id, t, len),
             None => Vec::new(),
@@ -933,6 +959,7 @@ impl<'a> Renderer<'a> {
                 fetch_layer: &fetch_layer,
                 fetch_self: at_time,
                 fetch_below: &fetch_below,
+                fetch_source: &fetch_source,
                 audio: &audio,
                 eval_at: &eval_at,
                 masks: &masks,
