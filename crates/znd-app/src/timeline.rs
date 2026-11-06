@@ -52,6 +52,15 @@ impl TlView {
     pub fn px_per_frame(&self) -> f64 {
         self.width as f64 / self.span
     }
+    /// ドラッグの刻み（1 フレームの何分の 1 か）。拡大するほど細かくし、1 刻みが画面で 8px 以上ある細かさまで分ける
+    /// （1 フレームが 16px 未満なら 1 フレーム刻み）。
+    pub fn subdiv(&self) -> u32 {
+        let mut n = 1u32;
+        while n < 1024 && self.px_per_frame() / (2 * n) as f64 >= 8.0 {
+            n *= 2;
+        }
+        n
+    }
 }
 
 /// 選択中のキーフレーム 1 つ（レイヤー・プロパティのパス・時刻）。
@@ -64,10 +73,12 @@ pub(crate) struct KeySel {
 
 /// タイムラインでドラッグ中の操作。
 pub(crate) enum TlDrag {
-    /// レイヤー全体の移動。`grab` は掴んだ位置の、イン点からのずれ。
+    /// レイヤー全体の移動。`grab` は掴んだ位置の、イン点からのずれ。`origin_y` は押した位置の高さ
+    /// （上下に動かして別の行へ移すかどうかを、離したフレームでも判断できるように覚えておく）。
     Move {
         layer: LayerId,
         grab: Time,
+        origin_y: f32,
     },
     TrimIn {
         layer: LayerId,
@@ -93,6 +104,24 @@ pub(crate) enum TlDrag {
     Reorder {
         layer: LayerId,
     },
+}
+
+/// 表示した行（並び替えや、別の行へ移すときの落とし先を決めるため）。
+pub(crate) struct RowBlock {
+    /// その行に並ぶレイヤーの、`layers` の添字の範囲。
+    range: std::ops::Range<usize>,
+    /// 行の上端。
+    top: f32,
+    /// 行の先頭のレイヤー。
+    first: LayerId,
+}
+
+/// レイヤーのバーを上下にドラッグして離したときの行き先。
+enum RowDrop {
+    /// 行 `first` に入る（時間をずらして並ぶ）。
+    Join { first: LayerId, top: f32 },
+    /// 重ね順の `to` 番目の手前に、自分だけの新しい行を作る。`y` は境目の線を引く位置。
+    New { to: usize, y: f32 },
 }
 
 /// 左ペインの列の位置。
@@ -441,19 +470,23 @@ impl App {
         let mut rows_ui = child(ui, area, Layout::top_down(Align::Min));
         rows_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         // 並び替えの落とし先を決めるための、(重ね順の位置, 行の上端) と最後の行の下端
-        let mut blocks: Vec<(usize, f32)> = Vec::new();
+        let mut blocks: Vec<RowBlock> = Vec::new();
         let mut rows_end = area.top();
         let reordering = matches!(self.tl_drag, Some(TlDrag::Reorder { .. }));
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(&mut rows_ui, |ui| {
-                for (index, layer) in comp.layers.iter().enumerate() {
-                    if (self.hide_shy && layer.shy) || !widgets::matches(&search, &layer.name) {
-                        continue;
-                    }
-                    let row = self.layer_row(ui, comp, layer, index + 1, view, geo);
-                    blocks.push((index, row.top()));
+                // 1 行に、時間をずらした複数のレイヤーが並ぶことがある
+                for range in edit::track_rows(comp) {
+                    let members: Vec<&Layer> = comp.layers[range.clone()]
+                        .iter()
+                        .filter(|l| !(self.hide_shy && l.shy) && widgets::matches(&search, &l.name))
+                        .collect();
+                    // 左の列・展開するプロパティは、行の代表のレイヤーのもの
+                    let Some(layer) = self.row_active(&members, t) else { continue };
+                    let row = self.layer_row(ui, comp, &members, layer, view, geo);
+                    blocks.push(RowBlock { range: range.clone(), top: row.top(), first: comp.layers[range.start].id.clone() });
                     if !self.tl_is_open(&layer.id.0, false) {
                         continue;
                     }
@@ -500,6 +533,8 @@ impl App {
                     }
                 }
             });
+        let lanes = Rect::from_min_max(pos2(time_l, area.top()), pos2(time_r, area.bottom()));
+        self.tl_drop(ui, comp, area, left_of(area), lanes, &blocks, rows_end);
         self.tl_reorder(ui, comp, left_of(area), &blocks, rows_end);
         self.tl_marquee(ui, Rect::from_min_max(pos2(time_l, area.top()), pos2(time_r, area.bottom())));
 
@@ -819,6 +854,17 @@ impl App {
             }
             f += minor;
         }
+        // フレームより細かく動かせるほど拡大しているときは、その刻みの目盛りも出す
+        let subdiv = view.subdiv();
+        if subdiv > 1 {
+            for f in first.max(0)..=last.min(total - 1) {
+                for k in 1..subdiv {
+                    let x = view.x(f as f64 + k as f64 / subdiv as f64).round() + 0.5;
+                    let len = if k * 2 == subdiv { 3.0 } else { 2.0 };
+                    p.vline(x, (rect.bottom() - len)..=rect.bottom(), Stroke::new(1.0_f32, Color32::from_gray(0x48)));
+                }
+            }
+        }
         self.tl_scrub(ui, &resp, view);
 
         // ワークエリアの操作: 両端を掴んで範囲を変える、中央を掴んで移動、ダブルクリックで解除
@@ -1063,7 +1109,9 @@ impl App {
                 self.tl_zoom = 1.0;
                 self.tl_scroll = 0.0;
             }
-            ui.label(egui::RichText::new(format!("×{:.1}", self.tl_zoom)).size(10.0).color(theme::TEXT_DIM));
+            let step = if view.subdiv() > 1 { format!("　1/{} フレーム刻み", view.subdiv()) } else { String::new() };
+            ui.label(egui::RichText::new(format!("×{:.1}{step}", self.tl_zoom)).size(10.0).color(theme::TEXT_DIM))
+                .on_hover_text("拡大するほど、レイヤーやキーフレームをフレームより細かい刻みで動かせます");
         }
 
         // 横スクロールバー
@@ -1091,12 +1139,14 @@ impl App {
     pub(crate) fn pointer_time(&self, comp: &Composition, view: TlView, x: f32, exclude: &LayerId, snap: bool) -> Time {
         let fr = comp.frame_rate;
         let t = Time::from_seconds(view.frame(x) / fr.fps());
+        // 拡大しているほど細かい刻みで動く（大きく拡大すればフレームより細かく）
+        let subdiv = view.subdiv();
         if !snap {
-            return beat::nearest_frame(t, fr);
+            return edit::nearest_step(t, fr, subdiv);
         }
         // 画面上で 6px 以内なら吸着
         let tolerance = Time::from_seconds(6.0 / view.px_per_frame() / fr.fps());
-        edit::snap_time(comp, t, Some(exclude), &[fr.frame_to_time(self.frame)], tolerance)
+        edit::snap_time_by(comp, t, Some(exclude), &[fr.frame_to_time(self.frame)], tolerance, subdiv)
     }
 
     pub(crate) fn select_layer(&mut self, id: &LayerId) {
@@ -1140,19 +1190,161 @@ impl App {
         self.status = format!("「{}」を削除しました（⌘Z で元に戻せます）", layer.name);
     }
 
-    /// レイヤーを重ね順の `to` 番目の手前へ移す（`to` は移動前の並びでの位置）。
+    /// レイヤーのいる行（1 行に並ぶレイヤーをまとめて）を、重ね順の `to` 番目の手前へ移す
+    /// （`to` は移動前の並びでの位置で、行の境目）。
     pub(crate) fn reorder_layer(&mut self, id: &LayerId, to: usize) {
-        let moves = self.shared.comp(&self.comp_id).and_then(|c| c.layer_index(id)).is_some_and(|from| to != from && to != from + 1);
+        let moves = self.shared.comp(&self.comp_id).is_some_and(|c| row_moves(c, id, to));
         if moves {
             let target = id.clone();
             self.edit_comp("重ね順", false, |c| {
-                edit::reorder_layer(c, &target, to);
+                edit::reorder_row(c, &target, to);
             });
         }
     }
 
+    /// レイヤーのいる行を、行 `delta` 個ぶん上（負）か下（正）へ移す。
+    pub(crate) fn move_row_by(&mut self, id: &LayerId, delta: i32) {
+        let Some(comp) = self.shared.comp(&self.comp_id) else { return };
+        let rows = edit::track_rows(comp);
+        let Some(k) = comp.layer_index(id).and_then(|i| rows.iter().position(|r| r.contains(&i))) else { return };
+        let to = match delta {
+            d if d < 0 && k > 0 => rows[k - 1].start,
+            d if d > 0 && k + 1 < rows.len() => rows[k + 1].end,
+            _ => return,
+        };
+        self.reorder_layer(id, to);
+    }
+
+    /// 行の中で、左の列に出して展開するレイヤー（選択中のもの、なければ再生ヘッドの位置にあるもの、なければ先頭）。
+    fn row_active<'a>(&self, members: &[&'a Layer], t: Time) -> Option<&'a Layer> {
+        members
+            .iter()
+            .copied()
+            .find(|l| self.selected.as_ref() == Some(&l.id))
+            .or_else(|| members.iter().copied().find(|l| l.active_at(t)))
+            .or_else(|| members.first().copied())
+    }
+
+    /// まだ使われていないレイヤーの ID を順に返す（重なりを切り詰めて、レイヤーが 2 つに分かれるとき用）。
+    fn layer_id_pool(&self) -> impl FnMut() -> LayerId {
+        let p = &self.project;
+        let mut used: std::collections::HashSet<String> = p
+            .footage
+            .iter()
+            .map(|f| f.id.0.clone())
+            .chain(p.compositions.iter().flat_map(|c| std::iter::once(c.id.0.clone()).chain(c.layers.iter().map(|l| l.id.0.clone()))))
+            .collect();
+        let mut n = 0;
+        move || loop {
+            n += 1;
+            let s = format!("layer-{n}");
+            if used.insert(s.clone()) {
+                return LayerId::new(s);
+            }
+        }
+    }
+
+    /// バーを上下にドラッグしたときの行き先。行の真ん中ならその行に入り、行の境目なら新しい行を作る。
+    /// 縦にほとんど動かしていなければ、元の行のまま。
+    #[allow(clippy::too_many_arguments)]
+    fn row_drop_target(
+        &self,
+        ui: &egui::Ui,
+        comp: &Composition,
+        id: &LayerId,
+        origin_y: f32,
+        area: Rect,
+        blocks: &[RowBlock],
+        rows_end: f32,
+    ) -> Option<RowDrop> {
+        let pos = ui.input(|i| i.pointer.latest_pos())?;
+        if (pos.y - origin_y).abs() < ROW * 0.5 || pos.y < area.top() || pos.y > area.bottom() {
+            return None;
+        }
+        let own = comp.layer_index(id).map(|i| edit::row_range(comp, i))?;
+        if let Some(b) = blocks.iter().find(|b| pos.y >= b.top + 4.0 && pos.y <= b.top + ROW - 4.0) {
+            return (b.range != own).then(|| RowDrop::Join { first: b.first.clone(), top: b.top });
+        }
+        let mut slot = None;
+        for (k, b) in blocks.iter().enumerate() {
+            if pos.y < b.top + ROW * 0.5 {
+                slot = Some((b.range.start, b.top));
+                break;
+            }
+            slot = Some((b.range.end, blocks.get(k + 1).map(|n| n.top).unwrap_or(rows_end)));
+        }
+        let (to, y) = slot?;
+        // 自分だけの行を、その行のすぐ上やすぐ下の境目に置いても何も変わらない
+        if own.len() == 1 && (to == own.start || to == own.end) {
+            return None;
+        }
+        Some(RowDrop::New { to, y })
+    }
+
+    /// バーのドラッグ（移動・トリム）を離したとき: 上下に動かしていれば別の行へ移し、動かしたレイヤーと
+    /// 同じ行で時間が重なる他のレイヤーを切り詰める。ドラッグ中は行き先の目印を描く。
+    #[allow(clippy::too_many_arguments)]
+    fn tl_drop(&mut self, ui: &egui::Ui, comp: &Composition, area: Rect, left: Rect, lanes: Rect, blocks: &[RowBlock], rows_end: f32) {
+        let (id, origin_y) = match &self.tl_drag {
+            Some(TlDrag::Move { layer, origin_y, .. }) => (layer.clone(), Some(*origin_y)),
+            Some(TlDrag::TrimIn { layer } | TlDrag::TrimOut { layer }) => (layer.clone(), None),
+            _ => return,
+        };
+        let target = origin_y.and_then(|oy| self.row_drop_target(ui, comp, &id, oy, area, blocks, rows_end));
+        let fr = comp.frame_rate;
+        match &target {
+            Some(RowDrop::Join { top, .. }) => {
+                // 入る行に、バーの外形を描く
+                if let (Some(l), Some(view)) = (self.shared.comp(&self.comp_id).and_then(|c| c.layer(&id)), self.tl_view) {
+                    let x_of = |t: Time| view.x(t.seconds() * fr.fps());
+                    let r = Rect::from_min_max(pos2(x_of(l.in_point), top + 2.0), pos2(x_of(l.out_point), top + ROW - 2.0));
+                    let p = ui.painter().with_clip_rect(lanes);
+                    p.rect_filled(r, 4.0, theme::ACCENT.gamma_multiply(0.25));
+                    p.rect_stroke(r, 4.0, Stroke::new(1.5_f32, Color32::WHITE));
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            Some(RowDrop::New { y, .. }) => {
+                let p = ui.painter().with_clip_rect(left.union(lanes).expand2(vec2(0.0, 1.0)));
+                let y = y.round() - 0.5;
+                p.hline(left.left()..=lanes.right(), y, Stroke::new(2.0_f32, theme::PLAYHEAD));
+                p.circle_filled(pos2(left.left() + 4.0, y), 3.0, theme::PLAYHEAD);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            None => {}
+        }
+        if !ui.input(|i| i.pointer.any_released()) {
+            return;
+        }
+        // 変わるかどうかを写しで確かめてから、ドラッグ中の編集と同じ取り消し単位で反映する
+        let Some(mut next) = self.project.comp(&self.comp_id).cloned() else { return };
+        match &target {
+            Some(RowDrop::Join { first, .. }) => {
+                edit::move_to_row(&mut next, &id, first);
+            }
+            Some(RowDrop::New { to, .. }) => {
+                edit::move_to_new_row(&mut next, &id, *to);
+            }
+            None => {}
+        }
+        let mut fresh = self.layer_id_pool();
+        let removed = edit::trim_row_overlaps(&mut next, &id, &mut fresh);
+        if self.project.comp(&self.comp_id) == Some(&next) {
+            return;
+        }
+        let label = self.last_edit.as_ref().map(|(l, _)| l.clone()).unwrap_or_else(|| "レイヤーを移動".into());
+        if let Some(e) = &mut self.last_edit {
+            e.1 = std::time::Instant::now();
+        }
+        self.edit_comp(&label, true, move |c| *c = next);
+        self.selected_keys.retain(|k| !removed.contains(&k.layer));
+        if self.selected.as_ref().is_some_and(|s| removed.contains(s)) {
+            self.selected = Some(id);
+        }
+    }
+
     /// 行のドラッグによる並び替え。落とし先の位置に線を引き、ボタンを離したら移す（Esc で中止）。
-    fn tl_reorder(&mut self, ui: &egui::Ui, comp: &Composition, left: Rect, blocks: &[(usize, f32)], rows_end: f32) {
+    fn tl_reorder(&mut self, ui: &egui::Ui, comp: &Composition, left: Rect, blocks: &[RowBlock], rows_end: f32) {
         let Some(TlDrag::Reorder { layer }) = &self.tl_drag else { return };
         let layer = layer.clone();
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1163,15 +1355,15 @@ impl App {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         // ポインタが行の上半分ならその行の手前、下半分ならその行（と展開したプロパティ）の後ろ
         let mut slot: Option<(usize, f32)> = None;
-        for (k, (index, top)) in blocks.iter().enumerate() {
-            if pos.y < top + ROW * 0.5 {
-                slot = Some((*index, *top));
+        for (k, b) in blocks.iter().enumerate() {
+            if pos.y < b.top + ROW * 0.5 {
+                slot = Some((b.range.start, b.top));
                 break;
             }
-            slot = Some((index + 1, blocks.get(k + 1).map(|b| b.1).unwrap_or(rows_end)));
+            slot = Some((b.range.end, blocks.get(k + 1).map(|n| n.top).unwrap_or(rows_end)));
         }
         let Some((to, y)) = slot else { return };
-        let moves = comp.layer_index(&layer).is_some_and(|from| to != from && to != from + 1);
+        let moves = row_moves(comp, &layer, to);
         if moves {
             let p = ui.painter().with_clip_rect(left.expand2(vec2(0.0, 1.0)));
             let y = y.round() - 0.5;
@@ -1190,7 +1382,9 @@ impl App {
             ui.close_menu();
             return;
         };
-        let last = comp.layers.len() - 1;
+        let rows = edit::track_rows(comp);
+        let k = rows.iter().position(|r| r.contains(&index)).unwrap_or(0);
+        let last = rows.len() - 1;
         ui.set_min_width(170.0);
         ui.label(egui::RichText::new(&layer.name).size(10.0).color(theme::TEXT_DIM));
         ui.separator();
@@ -1204,16 +1398,24 @@ impl App {
             self.run_action(Action::SplitLayer);
         }
         ui.separator();
+        // 重ね順は行ごとに変わる（1 行に並ぶレイヤーはまとめて動く）
         for (label, enabled, to) in [
-            ("最前面へ", index > 0, 0),
-            ("ひとつ前面へ", index > 0, index.saturating_sub(1)),
-            ("ひとつ背面へ", index < last, index + 2),
-            ("最背面へ", index < last, last + 1),
+            ("最前面へ", k > 0, 0),
+            ("ひとつ前面へ", k > 0, rows[k.saturating_sub(1)].start),
+            ("ひとつ背面へ", k < last, rows[(k + 1).min(last)].end),
+            ("最背面へ", k < last, comp.layers.len()),
         ] {
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 ui.close_menu();
                 self.reorder_layer(id, to);
             }
+        }
+        if rows[k].len() > 1 && ui.button("この行から出す").on_hover_text("同じ行に並んでいるレイヤーから離して、すぐ上に自分だけの行を作ります").clicked() {
+            ui.close_menu();
+            let (target, to) = (id.clone(), rows[k].start);
+            self.edit_comp("行から出す", false, |c| {
+                edit::move_to_new_row(c, &target, to);
+            });
         }
         ui.menu_button("コマ打ち", |ui| {
             for n in 1..=4u32 {
@@ -1255,13 +1457,13 @@ impl App {
         p.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, Color32::from_gray(0x29)));
     }
 
+    /// レイヤーの行。左の列は代表の `layer`、右には `members`（この行に時間をずらして並ぶレイヤー）のバーを描く。
     #[allow(clippy::too_many_arguments)]
-    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, _number: usize, view: TlView, geo: Geo) -> Rect {
+    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, members: &[&Layer], layer: &Layer, view: TlView, geo: Geo) -> Rect {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         if !ui.is_rect_visible(rect) {
             return rect;
         }
-        let fr = comp.frame_rate;
         let id = layer.id.clone();
         let rid = ui.id().with(("layer", &id.0));
         let selected = self.selected.as_ref() == Some(&id);
@@ -1414,13 +1616,60 @@ impl App {
             });
         }
 
-        // ---------- 右: レイヤーのバー ----------
+        // ---------- 右: レイヤーのバー（この行に時間をずらして並ぶものすべて） ----------
         let time = Rect::from_min_max(pos2(view.left, rect.top()), pos2(view.left + view.width, rect.bottom()));
-        let resp = ui.interact(time, rid.with("bar"), Sense::click_and_drag());
-        self.anchors.insert(format!("row:{}", id.0), time);
-        let p = ui.painter_at(time);
+        let single = members.len() <= 1;
+        if !single {
+            // バーの無いところ: ドラッグで矩形選択、クリックでキーの選択を外す、右クリックで代表のレイヤーのメニュー
+            let lane = ui.interact(time, ui.id().with(("row-lane", &members[0].id.0)), Sense::click_and_drag());
+            self.key_lane(ui, comp, layer, &lane, time, &[], None, view, true);
+            lane.context_menu(|ui| self.layer_context_menu(ui, comp, layer));
+        }
+        // 選択中のものを最後に描いて上に重ねる（ドラッグで重なっても見えるように）
+        let mut order: Vec<&Layer> = members.to_vec();
+        order.sort_by_key(|l| self.selected.as_ref() == Some(&l.id));
+        let fr = comp.frame_rate;
+        let span = |l: &Layer| (view.x(l.in_point.seconds() * fr.fps()), view.x(l.out_point.seconds() * fr.fps()));
+        for l in order {
+            let collapsed = !(l.id == id && open);
+            let hit = if single {
+                time
+            } else {
+                // 掴める範囲はバーの両端から GRAB まで。隣のバーと接していたら境目で分ける
+                // （境目の左を掴めば左のバーのアウト点、右なら右のバーのイン点）
+                let (a, b) = span(l);
+                let (mut lo, mut hi) = (a - GRAB, b + GRAB);
+                for o in members.iter().filter(|o| o.id != l.id) {
+                    let (c, d) = span(o);
+                    if d <= a && d > a - 2.0 * GRAB {
+                        lo = lo.max((a + d) * 0.5);
+                    }
+                    if c >= b && c < b + 2.0 * GRAB {
+                        hi = hi.min((b + c) * 0.5);
+                    }
+                }
+                Rect::from_min_max(pos2(lo, rect.top()), pos2(hi, rect.bottom())).intersect(time)
+            };
+            self.layer_bar(ui, comp, l, rect, time, hit, collapsed, view);
+        }
+        rect
+    }
+
+    /// 行の中の 1 つのレイヤーのバー。掴んで移動（上下で別の行へ）、端を掴んでトリム、畳んでいればキーフレームの点も。
+    /// `hit` は操作を受ける範囲（1 行に 1 つだけなら行の全体、並んでいるならバーとその端の周り）。
+    #[allow(clippy::too_many_arguments)]
+    fn layer_bar(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, rect: Rect, time: Rect, hit: Rect, collapsed: bool, view: TlView) {
+        let fr = comp.frame_rate;
+        let id = layer.id.clone();
+        let rid = ui.id().with(("layer", &id.0));
+        let selected = self.selected.as_ref() == Some(&id);
+        let color = theme::label_color(layer.label, &id.0);
         let x_of = |t: Time| view.x(t.seconds() * fr.fps());
         let (x0, x1) = (x_of(layer.in_point), x_of(layer.out_point));
+        let single = hit == time;
+        let resp = ui.interact(hit, rid.with("bar"), Sense::click_and_drag());
+        self.anchors.insert(format!("row:{}", id.0), time);
+        let p = ui.painter_at(time);
         // レイヤーは角の丸いクリップとして描き、中に種類のアイコンと名前を書く
         let bar = Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 2.0));
         let fill = if layer.visible { color } else { color.gamma_multiply(0.4) };
@@ -1445,7 +1694,9 @@ impl App {
             p.rect_stroke(bar, 4.0, Stroke::new(1.2_f32, Color32::WHITE));
         }
         // 畳んでいる間は、キーフレームのある時刻を小さな点で示す（掴むと、その時刻の全プロパティのキーが動く）
-        let keys = if open { Vec::new() } else { key_times(layer) };
+        // 並んでいる行では、バーの外のキーは隣のレイヤーと紛らわしいので出さない
+        let keys: Vec<Time> = if collapsed { key_times(layer) } else { Vec::new() };
+        let keys: Vec<Time> = if single { keys } else { keys.into_iter().filter(|t| hit.x_range().contains(x_of(*t))).collect() };
         for t in &keys {
             let picked = self.is_key_selected(&id, None, *t);
             let c = pos2(x_of(*t), bar.center().y);
@@ -1502,7 +1753,7 @@ impl App {
                     Some(TlDrag::TrimOut { layer: id.clone() })
                 } else if x > x0 && x < x1 {
                     let grab = Time::from_seconds(view.frame(x) / fr.fps()) - layer.in_point;
-                    Some(TlDrag::Move { layer: id.clone(), grab })
+                    Some(TlDrag::Move { layer: id.clone(), grab, origin_y: origin.y })
                 } else {
                     None
                 };
@@ -1513,7 +1764,7 @@ impl App {
                 let snap = self.snap && !ui.input(|i| i.modifiers.shift);
                 let mut drag = self.tl_drag.take();
                 match &mut drag {
-                    Some(TlDrag::Move { layer: lid, grab }) => {
+                    Some(TlDrag::Move { layer: lid, grab, .. }) => {
                         // イン点・アウト点のどちらか近いほうを吸着させる
                         let raw_in = Time::from_seconds(view.frame(pos.x) / fr.fps()) - *grab;
                         let len = layer.out_point - layer.in_point;
@@ -1521,8 +1772,8 @@ impl App {
                         let out_x = view.x((raw_in + len).seconds() * fr.fps());
                         let snapped_in = self.pointer_time(comp, view, in_x, lid, snap);
                         let snapped_out = self.pointer_time(comp, view, out_x, lid, snap);
-                        let round = beat::nearest_frame(raw_in, fr);
-                        let (d_in, d_out) = ((snapped_in - round).0.abs(), (snapped_out - beat::nearest_frame(raw_in + len, fr)).0.abs());
+                        let step = |t: Time| edit::nearest_step(t, fr, view.subdiv());
+                        let (d_in, d_out) = ((snapped_in - step(raw_in)).0.abs(), (snapped_out - step(raw_in + len)).0.abs());
                         let target = if d_out != 0 && (d_in == 0 || d_out < d_in) { snapped_out - len } else { snapped_in };
                         let dt = target - layer.in_point;
                         if dt != Time::ZERO {
@@ -1557,10 +1808,9 @@ impl App {
         let menu_keys: bool = ui.data(|d| d.get_temp(rid.with("menu-keys"))).unwrap_or(false);
         if menu_keys {
             resp.context_menu(|ui| self.key_menu(ui));
-            return rect;
+            return;
         }
         resp.context_menu(|ui| self.layer_context_menu(ui, comp, layer));
-        rect
     }
 
     /// グループの行（トランスフォーム・エフェクトなど）。
@@ -1793,6 +2043,14 @@ impl App {
             self.edit_layer(&label, e.coalesce(), &id, |l| apply_edit(l, &path, at, &e));
         }
     }
+}
+
+/// 行ごとの並び替えで、`id` のいる行を `to` 番目の手前へ移すと位置が変わるか。
+fn row_moves(comp: &Composition, id: &LayerId, to: usize) -> bool {
+    comp.layer_index(id).is_some_and(|i| {
+        let r = edit::row_range(comp, i);
+        to < r.start || to > r.end
+    })
 }
 
 /// スペクトログラムを画像にする。横は時間、縦は周波数（対数、下が低音）。

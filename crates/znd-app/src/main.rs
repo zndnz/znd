@@ -642,6 +642,8 @@ impl App {
         self.edit(label, coalesce, |p| {
             if let Some(c) = p.comp_mut(&id) {
                 f(c);
+                // タイムラインの 1 行に並ぶレイヤーの番号を整える（並び替えで別の行と混ざらないように）
+                edit::normalize_tracks(c);
             }
         });
     }

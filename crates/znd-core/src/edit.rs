@@ -99,8 +99,27 @@ pub fn delete_keys(layer: &mut Layer, at: Time) -> usize {
 /// スナップ先の候補: ビートグリッド、コンポマーカー、他のレイヤーのイン・アウト点、指定した追加の時刻。
 /// `t` から `tolerance` 以内で最も近い候補（フレーム境界に丸めたもの）を返す。無ければ `t` を最寄りフレームに丸める。
 pub fn snap_time(comp: &Composition, t: Time, exclude: Option<&LayerId>, extra: &[Time], tolerance: Time) -> Time {
+    snap_time_by(comp, t, exclude, extra, tolerance, 1)
+}
+
+/// 1 フレームを `subdiv` 等分した刻みのうち、`t` に最も近いもの（`subdiv` が 1 ならフレーム境界）。
+/// タイムラインを大きく拡大したときに、フレームより細かく動かすための刻み。
+pub fn nearest_step(t: Time, fr: FrameRate, subdiv: u32) -> Time {
+    if subdiv <= 1 {
+        return crate::beat::nearest_frame(t, fr);
+    }
+    let f = fr.time_to_frame(t);
+    let a = fr.frame_to_time(f);
+    let len = (fr.frame_to_time(f + 1) - a).0.max(1);
+    let n = subdiv as i64;
+    let k = (((t - a).0 as f64 / len as f64) * n as f64).round() as i64;
+    a + Time(len * k.clamp(0, n) / n)
+}
+
+/// `snap_time` の、丸めの刻みを 1 フレームの `subdiv` 分の 1 にしたもの。
+pub fn snap_time_by(comp: &Composition, t: Time, exclude: Option<&LayerId>, extra: &[Time], tolerance: Time, subdiv: u32) -> Time {
     let fr = comp.frame_rate;
-    let round = |t: Time| crate::beat::nearest_frame(t, fr);
+    let round = |t: Time| nearest_step(t, fr, subdiv);
     let mut best: Option<(i64, Time)> = None;
     let mut consider = |cand: Time| {
         let cand = round(cand);
@@ -141,7 +160,10 @@ pub fn duplicate_layer(comp: &mut Composition, id: &LayerId, new_id: LayerId) ->
     let mut copy = comp.layers[i].clone();
     copy.name = copy_name(comp, &copy.name);
     copy.id = new_id;
-    comp.layers.insert(i, copy);
+    // 同じ時間に重なるので、元の行には入れず、その行のすぐ上に自分だけの行として置く
+    copy.track = 0;
+    let at = row_range(comp, i).start;
+    comp.layers.insert(at, copy);
     true
 }
 
@@ -160,6 +182,8 @@ pub fn split_layer(comp: &mut Composition, id: &LayerId, t: Time, new_id: LayerI
     tail.id = new_id;
     tail.in_point = t;
     tail.markers.retain(|m| m.time >= t);
+    // 前半と後半は時間が重ならないので、タイムラインの同じ行に並べる
+    tail.track = ensure_track(comp, i);
     let head = &mut comp.layers[i];
     head.out_point = t;
     head.markers.retain(|m| m.time < t);
@@ -201,6 +225,148 @@ pub fn reorder_layer(comp: &mut Composition, id: &LayerId, to: usize) -> bool {
     let layer = comp.layers.remove(from);
     comp.layers.insert(dest, layer);
     true
+}
+
+// ---------- タイムライン: 1 行に並ぶレイヤー（トラック） ----------
+//
+// 重ね順で隣り合い、`track` が同じ 0 以外の番号のレイヤーは、タイムラインの 1 行に時間をずらして並ぶ。
+// 1 行の中のレイヤーは時間が重ならないようにしておくので、描画の重ね順は `layers` の並びのままでよい。
+
+/// タイムラインの行（`layers` の添字の範囲、上から順）。
+pub fn track_rows(comp: &Composition) -> Vec<std::ops::Range<usize>> {
+    let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, l) in comp.layers.iter().enumerate() {
+        match rows.last_mut() {
+            Some(r) if l.track != 0 && comp.layers[r.start].track == l.track => r.end = i + 1,
+            _ => rows.push(i..i + 1),
+        }
+    }
+    rows
+}
+
+/// `index` 番目のレイヤーがいる行の範囲。
+pub fn row_range(comp: &Composition, index: usize) -> std::ops::Range<usize> {
+    let track = comp.layers.get(index).map(|l| l.track).unwrap_or(0);
+    if track == 0 {
+        return index..index + 1;
+    }
+    let mut a = index;
+    while a > 0 && comp.layers[a - 1].track == track {
+        a -= 1;
+    }
+    let mut b = index + 1;
+    while b < comp.layers.len() && comp.layers[b].track == track {
+        b += 1;
+    }
+    a..b
+}
+
+/// まだ使われていない行の番号。
+fn fresh_track(comp: &Composition) -> u32 {
+    comp.layers.iter().map(|l| l.track).max().unwrap_or(0) + 1
+}
+
+/// `index` 番目のレイヤーに 0 以外の行の番号を付けて、その番号を返す（自分だけの行なら新しい番号）。
+pub fn ensure_track(comp: &mut Composition, index: usize) -> u32 {
+    if comp.layers[index].track == 0 {
+        comp.layers[index].track = fresh_track(comp);
+    }
+    comp.layers[index].track
+}
+
+/// 同じ番号が離れた 2 か所に現れたら、後ろのほうに新しい番号を振る（行どうしが隣り合っても混ざらないように）。
+/// 1 つしか入っていない行は 0（自分だけの行）に戻す。
+pub fn normalize_tracks(comp: &mut Composition) {
+    let rows = track_rows(comp);
+    let mut seen = std::collections::HashSet::new();
+    let mut next = fresh_track(comp);
+    for r in rows {
+        let track = comp.layers[r.start].track;
+        if r.len() == 1 {
+            comp.layers[r.start].track = 0;
+        } else if !seen.insert(track) {
+            comp.layers[r.clone()].iter_mut().for_each(|l| l.track = next);
+            seen.insert(next);
+            next += 1;
+        }
+    }
+}
+
+/// レイヤー `id` を、レイヤー `target` のいる行へ移す（その行の先頭に入る）。移したら true。
+/// 時間の重なりは直さないので、続けて `trim_row_overlaps` を呼ぶ。
+pub fn move_to_row(comp: &mut Composition, id: &LayerId, target: &LayerId) -> bool {
+    let (Some(from), Some(to)) = (comp.layer_index(id), comp.layer_index(target)) else { return false };
+    if row_range(comp, from).contains(&to) {
+        return false;
+    }
+    let track = ensure_track(comp, to);
+    let mut layer = comp.layers.remove(from);
+    layer.track = track;
+    let start = comp.layer_index(target).map(|i| row_range(comp, i).start).unwrap_or(0);
+    comp.layers.insert(start, layer);
+    true
+}
+
+/// レイヤー `id` を元の行から出して、自分だけの新しい行として重ね順の `to` 番目の手前に置く
+/// （`to` は移動前の並びでの位置で、行の境目）。並びか行が変わったら true。
+pub fn move_to_new_row(comp: &mut Composition, id: &LayerId, to: usize) -> bool {
+    let Some(from) = comp.layer_index(id) else { return false };
+    let alone = row_range(comp, from).len() == 1;
+    comp.layers[from].track = 0;
+    reorder_layer(comp, id, to) || !alone
+}
+
+/// 行ごと（その行に並ぶレイヤーをまとめて）重ね順の `to` 番目の手前へ移す（`to` は移動前の並びでの位置で、行の境目）。
+/// 位置が変わったら true。
+pub fn reorder_row(comp: &mut Composition, id: &LayerId, to: usize) -> bool {
+    let Some(i) = comp.layer_index(id) else { return false };
+    let r = row_range(comp, i);
+    let to = to.min(comp.layers.len());
+    if to >= r.start && to <= r.end {
+        return false;
+    }
+    let block: Vec<Layer> = comp.layers.drain(r.clone()).collect();
+    let dest = if to > r.start { to - r.len() } else { to };
+    comp.layers.splice(dest..dest, block);
+    true
+}
+
+/// レイヤー `id`（動かしたほう）と同じ行で時間が重なる他のレイヤーを切り詰める。
+/// はみ出した側だけを削り、すっかり覆われたものは消し、`id` を両側から挟むものは前後の 2 つに分ける
+/// （後ろ半分は `fresh` の ID）。消したレイヤーの ID を返す。
+pub fn trim_row_overlaps(comp: &mut Composition, id: &LayerId, fresh: &mut dyn FnMut() -> LayerId) -> Vec<LayerId> {
+    let mut removed = Vec::new();
+    let Some(i) = comp.layer_index(id) else { return removed };
+    let (a, b) = (comp.layers[i].in_point, comp.layers[i].out_point);
+    let others: Vec<LayerId> = row_range(comp, i).map(|k| comp.layers[k].id.clone()).filter(|o| o != id).collect();
+    for o in others {
+        let Some(k) = comp.layer_index(&o) else { continue };
+        let l = &comp.layers[k];
+        let (oa, ob) = (l.in_point, l.out_point);
+        if ob <= a || oa >= b {
+            continue;
+        }
+        if oa >= a && ob <= b {
+            remove_layer(comp, &o);
+            removed.push(o);
+        } else if oa < a && ob > b {
+            // 前半は元のレイヤー、後ろ半分は複製（ソースの位置はそのまま）
+            let mut tail = l.clone();
+            tail.name = copy_name(comp, &l.name);
+            tail.id = fresh();
+            tail.in_point = b;
+            tail.markers.retain(|m| m.time >= b);
+            let head = &mut comp.layers[k];
+            head.out_point = a;
+            head.markers.retain(|m| m.time < a);
+            comp.layers.insert(k, tail);
+        } else if oa < a {
+            comp.layers[k].out_point = a;
+        } else {
+            comp.layers[k].in_point = b;
+        }
+    }
+    removed
 }
 
 // ---------- ビューア: レイヤーの選択と移動 ----------
@@ -725,6 +891,130 @@ mod tests {
         assert_eq!(order(&c), "dbca");
         assert!(reorder_layer(&mut c, &LayerId::new("d"), 99));
         assert_eq!(order(&c), "bcad");
+    }
+
+    fn ids(c: &Composition) -> String {
+        c.layers.iter().map(|l| l.id.0.clone()).collect::<Vec<_>>().join("")
+    }
+
+    fn rows(c: &Composition) -> String {
+        track_rows(c).into_iter().map(|r| c.layers[r].iter().map(|l| l.id.0.clone()).collect::<String>()).collect::<Vec<_>>().join("|")
+    }
+
+    fn timed(id: &str, a: i64, b: i64) -> Layer {
+        let mut l = layer(id);
+        l.in_point = f(a);
+        l.out_point = f(b);
+        l
+    }
+
+    #[test]
+    fn neighbours_with_the_same_track_share_a_timeline_row() {
+        let mut c = comp(vec![layer("a"), layer("b"), layer("c"), layer("d"), layer("e")]);
+        assert_eq!(rows(&c), "a|b|c|d|e");
+        c.layers[1].track = 3;
+        c.layers[2].track = 3;
+        c.layers[4].track = 3;
+        // 離れた同じ番号は別の行
+        assert_eq!(rows(&c), "a|bc|d|e");
+        assert_eq!(row_range(&c, 2), 1..3);
+        assert_eq!(row_range(&c, 0), 0..1);
+        normalize_tracks(&mut c);
+        assert_eq!(c.layers[4].track, 0);
+        // 離れた行に同じ番号があったら振り直すので、並び替えて隣り合っても混ざらない
+        let mut c = comp(vec![layer("a"), layer("b"), layer("c"), layer("d"), layer("e")]);
+        for i in [0, 1, 3, 4] {
+            c.layers[i].track = 3;
+        }
+        assert_eq!(rows(&c), "ab|c|de");
+        normalize_tracks(&mut c);
+        assert_ne!(c.layers[3].track, 3);
+        assert!(reorder_row(&mut c, &LayerId::new("d"), 2));
+        assert_eq!(rows(&c), "ab|de|c");
+        assert!(reorder_row(&mut c, &LayerId::new("a"), 5));
+        assert_eq!(rows(&c), "de|c|ab");
+        // 自分の行の中や両端の隙間に落としても動かない
+        assert!(!reorder_row(&mut c, &LayerId::new("e"), 1));
+        assert!(!reorder_row(&mut c, &LayerId::new("e"), 2));
+    }
+
+    #[test]
+    fn moving_a_layer_into_another_row_and_back_out() {
+        let mut c = comp(vec![timed("a", 0, 10), timed("b", 20, 30), timed("c", 40, 50)]);
+        assert!(move_to_row(&mut c, &LayerId::new("c"), &LayerId::new("a")));
+        assert_eq!(rows(&c), "ca|b");
+        // 同じ行へは移らない
+        assert!(!move_to_row(&mut c, &LayerId::new("a"), &LayerId::new("c")));
+        assert!(move_to_row(&mut c, &LayerId::new("b"), &LayerId::new("a")));
+        assert_eq!(rows(&c), "bca");
+        // 行から出して、いちばん下に新しい行として置く
+        assert!(move_to_new_row(&mut c, &LayerId::new("c"), 3));
+        assert_eq!(rows(&c), "ba|c");
+        // 行の真ん中から出して、その場に置いても行は分かれる
+        assert!(move_to_row(&mut c, &LayerId::new("c"), &LayerId::new("b")));
+        assert_eq!(rows(&c), "cba");
+        assert!(move_to_new_row(&mut c, &LayerId::new("b"), 0));
+        assert_eq!(rows(&c), "b|ca");
+        // 自分だけの行をその場に置き直しても何も変わらない
+        assert!(!move_to_new_row(&mut c, &LayerId::new("b"), 1));
+    }
+
+    #[test]
+    fn overlaps_in_a_row_clip_the_layer_that_was_not_moved() {
+        let mut c = comp(vec![timed("m", 15, 25), timed("x", 0, 20), timed("y", 22, 40), timed("z", 16, 24), timed("w", 30, 50)]);
+        c.layers.iter_mut().for_each(|l| l.track = 1);
+        let mut n = 0;
+        let mut fresh = || {
+            n += 1;
+            LayerId::new(format!("t{n}"))
+        };
+        let removed = trim_row_overlaps(&mut c, &LayerId::new("m"), &mut fresh);
+        // すっかり覆われた z は消え、x は後ろ、y は前を削られる。重ならない w はそのまま
+        assert_eq!(removed, vec![LayerId::new("z")]);
+        assert_eq!(ids(&c), "mxyw");
+        let at = |id: &str| c.layer(&LayerId::new(id)).map(|l| (l.in_point, l.out_point)).unwrap();
+        assert_eq!(at("x"), (f(0), f(15)));
+        assert_eq!(at("y"), (f(25), f(40)));
+        assert_eq!(at("w"), (f(30), f(50)));
+
+        // 動かしたほうを両側から挟むレイヤーは、前後の 2 つに分かれる
+        let mut c = comp(vec![timed("m", 20, 30), timed("x", 0, 60)]);
+        c.layers.iter_mut().for_each(|l| l.track = 1);
+        trim_row_overlaps(&mut c, &LayerId::new("m"), &mut fresh);
+        assert_eq!(ids(&c), "mt1x");
+        assert_eq!(rows(&c), "mt1x");
+        let at = |id: &str| c.layer(&LayerId::new(id)).map(|l| (l.in_point, l.out_point)).unwrap();
+        assert_eq!(at("x"), (f(0), f(20)));
+        assert_eq!(at("t1"), (f(30), f(60)));
+
+        // 別の行のレイヤーは重なっていても切らない
+        let mut c = comp(vec![timed("m", 20, 30), timed("x", 0, 60)]);
+        assert!(trim_row_overlaps(&mut c, &LayerId::new("m"), &mut fresh).is_empty());
+        assert_eq!(c.layers[1].out_point, f(60));
+    }
+
+    #[test]
+    fn duplicates_get_their_own_row_and_splits_stay_in_the_row() {
+        let mut c = comp(vec![timed("a", 0, 10), timed("b", 20, 30)]);
+        c.layers.iter_mut().for_each(|l| l.track = 1);
+        assert!(duplicate_layer(&mut c, &LayerId::new("b"), LayerId::new("d")));
+        assert_eq!(rows(&c), "d|ab");
+        assert!(split_layer(&mut c, &LayerId::new("d"), f(25), LayerId::new("s")));
+        assert_eq!(rows(&c), "sd|ab");
+    }
+
+    #[test]
+    fn steps_finer_than_a_frame() {
+        let fr = fr();
+        let frame = f(1).0;
+        let t = Time(f(10).0 + frame * 3 / 10);
+        // 1 フレーム刻みなら 10f、4 等分なら 10f + 1/4
+        assert_eq!(nearest_step(t, fr, 1), f(10));
+        assert_eq!(nearest_step(t, fr, 4), Time(f(10).0 + frame / 4));
+        // 次のフレームの境界にも丸まる
+        assert_eq!(nearest_step(Time(f(10).0 + frame * 9 / 10), fr, 4), f(11));
+        let c = comp(vec![layer("a")]);
+        assert_eq!(snap_time_by(&c, t, None, &[], Time(1), 4), Time(f(10).0 + frame / 4));
     }
 
     #[test]

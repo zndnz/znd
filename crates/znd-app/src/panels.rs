@@ -943,6 +943,8 @@ impl App {
                             let mut tail = c.layers[i].clone();
                             tail.id = new_id;
                             tail.in_point = t;
+                            // 前半と後半はタイムラインの同じ行に並べる
+                            tail.track = edit::ensure_track(c, i);
                             c.layers[i].out_point = t;
                             c.layers.insert(i, tail);
                         }
@@ -952,20 +954,12 @@ impl App {
         }
         if ui.add_enabled(has, egui::Button::new("上へ")).clicked() {
             if let Some(id) = selected.clone() {
-                self.edit_comp("重ね順", false, |c| {
-                    if let Some(i) = c.layer_index(&id).filter(|i| *i > 0) {
-                        c.layers.swap(i, i - 1);
-                    }
-                });
+                self.move_row_by(&id, -1);
             }
         }
         if ui.add_enabled(has, egui::Button::new("下へ")).clicked() {
             if let Some(id) = selected.clone() {
-                self.edit_comp("重ね順", false, |c| {
-                    if let Some(i) = c.layer_index(&id).filter(|i| i + 1 < c.layers.len()) {
-                        c.layers.swap(i, i + 1);
-                    }
-                });
+                self.move_row_by(&id, 1);
             }
         }
         if ui.add_enabled(has, egui::Button::new("プリコンポーズ")).clicked() {

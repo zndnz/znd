@@ -302,6 +302,10 @@ pub struct Layer {
     pub casts_shadows: bool,
     #[serde(default, skip_serializing_if = "AudioProps::is_default")]
     pub audio: AudioProps,
+    /// タイムラインの行の番号（0 = 自分だけの行）。重ね順で隣り合う、同じ 0 以外の番号のレイヤーは
+    /// タイムラインの 1 行に時間をずらして並ぶ（`edit::track_rows`）。描画の重ね順は `layers` の並びのまま。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub track: u32,
 }
 
 /// レイヤーの音声設定。
@@ -604,6 +608,9 @@ fn one_u32() -> u32 {
 fn is_one_u32(v: &u32) -> bool {
     *v == 1
 }
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
 fn hundred() -> f64 {
     100.0
 }
@@ -643,6 +650,7 @@ impl Layer {
             accepts_lights: true,
             casts_shadows: false,
             audio: AudioProps::default(),
+            track: 0,
         }
     }
 
