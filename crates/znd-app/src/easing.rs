@@ -8,6 +8,7 @@
 //! - ショートカット（既定は E）で、いまのカーブを選択に付ける。
 
 use crate::timeline::KeySel;
+use crate::icons::Icon;
 use crate::{theme, widgets, App};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui};
 use serde::{Deserialize, Serialize};
@@ -176,12 +177,15 @@ impl App {
                     let c = self.ease.current;
                     self.apply_ease(Some(c), false);
                 }
-                if ui.add_enabled(n_keys > 0, egui::Button::new("拾う")).on_hover_text("選択中の区間のカーブを編集欄に読み込みます").clicked() {
-                    self.pick_ease();
-                }
-                if ui.add_enabled(n_keys > 0, egui::Button::new("外す")).on_hover_text("カーブを外して、キーのハンドル（速度・影響度）の補間に戻します").clicked() {
-                    self.apply_ease(None, false);
-                }
+                ui.add_enabled_ui(n_keys > 0, |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if widgets::icon_button(ui, Icon::Eyedropper, "拾う: 選択中の区間のカーブを編集欄に読み込みます").clicked() {
+                        self.pick_ease();
+                    }
+                    if widgets::icon_button(ui, Icon::Close, "外す: カーブを外して、キーのハンドル（速度・影響度）の補間に戻します").clicked() {
+                        self.apply_ease(None, false);
+                    }
+                });
                 ui.checkbox(&mut self.ease.live, "触ったらすぐ反映")
                     .on_hover_text("一覧から選んだり編集したりしたとき、選択中の区間にすぐ付けます");
             });

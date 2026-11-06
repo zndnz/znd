@@ -311,6 +311,8 @@ pub struct App {
     pub(crate) tl_view: Option<timeline::TlView>,
     /// タイムラインの左ペイン（レイヤーの列）の幅。
     pub(crate) tl_left: f32,
+    /// タイムラインにモード・マット・親の列を出す。
+    pub(crate) tl_detail: bool,
     /// タイムラインで開閉を既定から切り替えた行（レイヤー ID、または `レイヤー ID/グループ`）。
     pub(crate) tl_open: std::collections::HashSet<String>,
     pub(crate) tl_search: String,
@@ -438,6 +440,7 @@ impl App {
             tl_drag: None,
             tl_view: None,
             tl_left: timeline::LEFT_DEFAULT,
+            tl_detail: false,
             tl_open: Default::default(),
             tl_search: String::new(),
             selected_keys: Vec::new(),

@@ -27,6 +27,18 @@ impl KeyKind {
     pub const ALL: [KeyKind; 6] =
         [KeyKind::Linear, KeyKind::EasyEase, KeyKind::EaseIn, KeyKind::EaseOut, KeyKind::AutoBezier, KeyKind::Hold];
 
+    /// 補間の形を表すアイコン。
+    pub fn icon(self) -> Icon {
+        match self {
+            KeyKind::Linear => Icon::CurveLinear,
+            KeyKind::EasyEase => Icon::CurveEase,
+            KeyKind::EaseIn => Icon::CurveEaseIn,
+            KeyKind::EaseOut => Icon::CurveEaseOut,
+            KeyKind::AutoBezier => Icon::CurveAuto,
+            KeyKind::Hold => Icon::CurveHold,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             KeyKind::Linear => "リニア",
@@ -86,7 +98,7 @@ pub(crate) enum NewLayer {
 /// プロパティへの操作。値は成分の配列で持つので、どの型のプロパティにも使える。
 pub(crate) enum PropEdit {
     Set(Vec<f64>),
-    /// ストップウォッチ: アニメーションの開始（現在値でキー）／解除（現在値で固定）。
+    /// アニメーションの切り替え: 開始（現在値でキー）／解除（現在値で固定）。
     ToggleAnimation,
     AddKey,
     RemoveKey,
@@ -1409,14 +1421,14 @@ impl App {
         }
     }
 
-    /// プロパティ 1 行（ストップウォッチ・名前・値・キー・エクスプレッション）。操作があれば編集として適用する。
+    /// プロパティ 1 行（アニメーションの切り替え・名前・値・キー・エクスプレッション）。操作があれば編集として適用する。
     fn prop_row(&mut self, ui: &mut egui::Ui, layer: &Layer, row: &Row, t: Time) {
         let label = path_label(layer, &row.path);
         let mut edit: Option<PropEdit> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.spacing_mut().interact_size.y = 18.0;
-            if widgets::small_icon(ui, Icon::Stopwatch, row.animated, "ストップウォッチ: アニメーションのオン／オフ").clicked()
+            if widgets::small_icon(ui, Icon::Animate, row.animated, "アニメーション: オンにすると今の値でキーフレームを打ち、オフにすると今の値で固定します").clicked()
             {
                 edit = Some(PropEdit::ToggleAnimation);
             }

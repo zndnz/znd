@@ -18,7 +18,7 @@ use znd_core::*;
 use znd_core::keys;
 
 /// 左ペイン（レイヤーの列）の既定の幅。
-pub(crate) const LEFT_DEFAULT: f32 = 520.0;
+pub(crate) const LEFT_DEFAULT: f32 = 380.0;
 const ROW: f32 = theme::ROW_H;
 const HEAD_H: f32 = 26.0;
 const COLS_H: f32 = 18.0;
@@ -103,6 +103,8 @@ struct Geo {
     split: f32,
     show_parent: bool,
     show_matte: bool,
+    /// モードの列（詳しい列）を出す。
+    show_mode: bool,
 }
 
 const AV_W: f32 = 16.0;
@@ -111,7 +113,11 @@ const MODE_W: f32 = 66.0;
 const MATTE_W: f32 = 66.0;
 const PARENT_W: f32 = 78.0;
 /// 展開の三角・プロパティのインデントが始まる位置。
-const TREE_X: f32 = 88.0;
+const TREE_X: f32 = 58.0;
+/// 表示・ソロ・ロックの列の始まり（左端はラベルの色の帯）。
+const AV_X: f32 = 6.0;
+/// ラベルの色の帯の幅。
+const STRIPE_W: f32 = 3.0;
 
 impl Geo {
     fn parent(&self) -> f32 {
@@ -121,7 +127,7 @@ impl Geo {
         self.parent() - if self.show_matte { MATTE_W } else { 0.0 }
     }
     fn mode(&self) -> f32 {
-        self.matte() - MODE_W
+        self.matte() - if self.show_mode { MODE_W } else { 0.0 }
     }
     fn switches(&self) -> f32 {
         self.mode() - 4.0 * SW_W - 4.0
@@ -180,35 +186,43 @@ fn tick_steps(fps: f64, px_per_frame: f64) -> (i64, i64, i64) {
     (major, mid, minor)
 }
 
-/// キーフレームの印。補間の種類で形を変える（リニア = ひし形、停止 = 四角、イージーイーズ = 砂時計、
-/// イーズイン／アウト = 片側が平らな五角形、自動ベジェ = 円）。選択中は塗りつぶす。
+/// キーフレームの印。補間の種類で形を変える（リニア = 円、イーズ = 横長の丸、イーズイン／アウト = 減速する側が丸い半円、
+/// 停止 = 縦の棒、自動 = 二重丸）。選択中は塗りつぶす。
 fn key_shape(p: &egui::Painter, c: egui::Pos2, kind: KeyKind, selected: bool) {
-    let r = 4.5;
     let (fill, stroke) = if selected {
         (theme::KEY_SELECTED, Stroke::new(1.0_f32, Color32::WHITE))
     } else {
         (theme::BG0, Stroke::new(1.2_f32, Color32::from_gray(0xc4)))
     };
-    let poly = |pts: Vec<egui::Pos2>| {
+    // 半円と長方形をつないだ形（`left`・`right` が true の側を丸める）
+    let capsule = |left: bool, right: bool| {
+        let (w, h) = (5.5f32, 4.0f32);
+        let mut pts = Vec::new();
+        let n = 6;
+        for i in 0..=n {
+            let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+            pts.push(if left { pos2(c.x - w + h + h * a.cos(), c.y - h * a.sin()) } else { pos2(c.x - w, c.y - h * a.sin()) });
+        }
+        for i in 0..=n {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+            pts.push(if right { pos2(c.x + w - h + h * a.cos(), c.y - h * a.sin()) } else { pos2(c.x + w, c.y - h * a.sin()) });
+        }
+        pts.dedup();
         p.add(Shape::convex_polygon(pts, fill, stroke));
     };
     match kind {
-        KeyKind::Linear => poly(vec![pos2(c.x, c.y - r), pos2(c.x + r, c.y), pos2(c.x, c.y + r), pos2(c.x - r, c.y)]),
+        KeyKind::Linear => {
+            p.circle(c, 3.8, fill, stroke);
+        }
+        KeyKind::EasyEase => capsule(true, true),
+        KeyKind::EaseIn => capsule(true, false),
+        KeyKind::EaseOut => capsule(false, true),
         KeyKind::Hold => {
-            poly(vec![pos2(c.x - 3.5, c.y - 3.5), pos2(c.x + 3.5, c.y - 3.5), pos2(c.x + 3.5, c.y + 3.5), pos2(c.x - 3.5, c.y + 3.5)])
-        }
-        KeyKind::EasyEase => {
-            poly(vec![pos2(c.x - 4.0, c.y - r), pos2(c.x + 4.0, c.y - r), pos2(c.x, c.y + 0.5)]);
-            poly(vec![pos2(c.x - 4.0, c.y + r), pos2(c.x, c.y - 0.5), pos2(c.x + 4.0, c.y + r)]);
-        }
-        KeyKind::EaseIn => {
-            poly(vec![pos2(c.x - 3.5, c.y - r), pos2(c.x, c.y - r), pos2(c.x + r, c.y), pos2(c.x, c.y + r), pos2(c.x - 3.5, c.y + r)])
-        }
-        KeyKind::EaseOut => {
-            poly(vec![pos2(c.x + 3.5, c.y - r), pos2(c.x + 3.5, c.y + r), pos2(c.x, c.y + r), pos2(c.x - r, c.y), pos2(c.x, c.y - r)])
+            p.rect(Rect::from_center_size(c, vec2(4.0, 10.0)), 1.0, fill, stroke);
         }
         KeyKind::AutoBezier => {
-            p.circle(c, 4.0, fill, stroke);
+            p.circle(c, 4.2, fill, stroke);
+            p.circle_filled(c, 1.6, if selected { Color32::WHITE } else { Color32::from_gray(0xc4) });
         }
     }
 }
@@ -375,8 +389,10 @@ impl App {
         let geo = Geo {
             x0: full.left(),
             split: full.left() + self.tl_left,
-            show_parent: self.tl_left >= 440.0,
-            show_matte: self.tl_left >= 370.0,
+            // モード・マット・親は右のプロパティと右クリックでも変えられるので、詳しい列を選んだときだけ出す
+            show_parent: self.tl_detail && self.tl_left >= 440.0,
+            show_matte: self.tl_detail && self.tl_left >= 370.0,
+            show_mode: self.tl_detail,
         };
         // 先頭フレームのキーフレームが欠けないよう、左に少し余白を取る
         let (time_l, time_r) = (geo.split + 8.0, full.right() - theme::SCROLL_W);
@@ -680,16 +696,17 @@ impl App {
                         .custom_formatter(move |v, _| timecode(fr, v as i64))
                         .custom_parser(|s| s.trim().parse::<f64>().ok()),
                 )
-                .on_hover_text("現在の時刻。ドラッグで移動、クリックしてフレーム番号を入力")
+                .on_hover_text(format!("現在の時刻（{} フレーム目・{:.2} fps）。ドラッグで移動、クリックしてフレーム番号を入力", self.frame, fr.fps()))
                 .changed()
             })
             .inner;
         if changed {
             self.set_frame(f, false);
         }
-        ui.label(egui::RichText::new(format!("{:05} ({:.2} fps)", self.frame, fr.fps())).size(10.0).color(theme::TEXT_DIM));
         ui.add_space(4.0);
-        widgets::search_box(&mut ui, &mut self.tl_search, "レイヤーを検索", 96.0);
+        // 右に並ぶアイコン（8 個 × 24px）の残りを検索欄に使う
+        let search_w = (ui.available_width() - 8.0 * 24.0 - 24.0).clamp(36.0, 140.0);
+        widgets::search_box(&mut ui, &mut self.tl_search, "レイヤーを検索", search_w);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             if widgets::icon_toggle(
@@ -721,6 +738,9 @@ impl App {
             {
                 self.only_animated = !self.only_animated;
             }
+            if widgets::icon_toggle(ui, Icon::Columns, self.tl_detail, "描画モード・トラックマット・親の列を出す").clicked() {
+                self.tl_detail = !self.tl_detail;
+            }
             if widgets::icon_toggle(ui, Icon::Shy, self.hide_shy, "シャイのレイヤーを隠す").clicked() {
                 self.hide_shy = !self.hide_shy;
             }
@@ -735,26 +755,28 @@ impl App {
         let p = ui.painter_at(rect);
         let dim = theme::TEXT_DIM;
         for (i, icon) in [Icon::Eye, Icon::Solo, Icon::Lock].into_iter().enumerate() {
-            icons::paint_sized(&p, geo.cell(geo.x0 + 2.0 + i as f32 * AV_W, AV_W, rect), icon, dim, 12.0);
+            icons::paint_sized(&p, geo.cell(geo.x0 + AV_X + i as f32 * AV_W, AV_W, rect), icon, dim, 12.0);
         }
         let font = FontId::proportional(10.0);
         let text = |x: f32, s: &str| {
             p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, s, font.clone(), dim);
         };
-        text(geo.x0 + 70.0, "#");
-        text(geo.x0 + TREE_X + 14.0, "レイヤー名");
+        text(geo.x0 + TREE_X + 14.0, "レイヤー");
         for (i, icon) in [Icon::Shy, Icon::Fx, Icon::MotionBlur, Icon::Model].into_iter().enumerate() {
             icons::paint_sized(&p, geo.cell(geo.switches() + i as f32 * SW_W, SW_W, rect), icon, dim, 12.0);
         }
-        text(geo.mode() + 5.0, "モード");
+        if geo.show_mode {
+            text(geo.mode() + 5.0, "モード");
+        }
         if geo.show_matte {
             text(geo.matte() + 5.0, "マット");
         }
         if geo.show_parent {
             text(geo.parent() + 5.0, "親");
         }
-        for x in [geo.x0 + 51.0, geo.switches() - 2.0, geo.mode() - 1.0] {
-            p.vline(x, rect.y_range(), Stroke::new(1.0_f32, theme::LINE));
+        p.vline(geo.switches() - 2.0, rect.y_range(), Stroke::new(1.0_f32, theme::LINE));
+        if geo.show_mode {
+            p.vline(geo.mode() - 1.0, rect.y_range(), Stroke::new(1.0_f32, theme::LINE));
         }
     }
 
@@ -1234,7 +1256,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, number: usize, view: TlView, geo: Geo) -> Rect {
+    fn layer_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, _number: usize, view: TlView, geo: Geo) -> Rect {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
         if !ui.is_rect_visible(rect) {
             return rect;
@@ -1262,7 +1284,7 @@ impl App {
             ui.painter_at(left).rect_filled(left, 0.0, theme::ACCENT.gamma_multiply(0.35));
         }
         let off = theme::TEXT_OFF.gamma_multiply(0.6);
-        let av = |i: usize| geo.cell(geo.x0 + 2.0 + i as f32 * AV_W, AV_W, rect);
+        let av = |i: usize| geo.cell(geo.x0 + AV_X + i as f32 * AV_W, AV_W, rect);
         if widgets::icon_cell(ui, av(0), rid.with("eye"), Icon::Eye, layer.visible, off, "表示").clicked() {
             let v = !layer.visible;
             self.edit_layer("表示", false, &id, |l| l.visible = v);
@@ -1276,11 +1298,11 @@ impl App {
             self.edit_layer("ロック", false, &id, |l| l.locked = v);
         }
 
-        // ラベルの色（クリックで変更）
+        // ラベルの色は左端の帯（クリックで変更）
         let p = ui.painter_at(left);
-        let swatch = Rect::from_center_size(pos2(geo.x0 + 59.0, rect.center().y), vec2(10.0, 10.0));
-        p.rect_filled(swatch, 1.0, color);
-        let resp = ui.interact(swatch.expand(3.0), rid.with("label"), Sense::click()).on_hover_text("ラベルの色");
+        let stripe = Rect::from_min_max(pos2(geo.x0, rect.top() + 1.0), pos2(geo.x0 + STRIPE_W, rect.bottom() - 1.0));
+        p.rect_filled(stripe, 1.0, color);
+        let resp = ui.interact(stripe.expand2(vec2(2.0, 0.0)), rid.with("label"), Sense::click()).on_hover_text("ラベルの色");
         let popup = rid.with("label_popup");
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup));
@@ -1297,7 +1319,6 @@ impl App {
                 });
             }
         });
-        p.text(pos2(geo.x0 + 84.0, rect.center().y), Align2::RIGHT_CENTER, number.to_string(), FontId::proportional(10.5), theme::TEXT_DIM);
 
         let open = self.tl_is_open(&id.0, false);
         let twirl = geo.cell(geo.x0 + TREE_X, 12.0, rect);
@@ -1353,14 +1374,16 @@ impl App {
             self.edit_layer("3D", false, &id, |l| l.three_d = v);
         }
 
-        // モード・トラックマット・親
-        widgets::cell_menu(ui, geo.cell(geo.mode(), MODE_W, rect), rid.with("mode"), layer.blend_mode.label_ja(), BlendMode::ALL.len(), |ui, pick| {
-            for mode in BlendMode::ALL {
-                if pick.item(ui, mode == layer.blend_mode, mode.label_ja()) {
-                    self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
+        // モード・トラックマット・親（詳しい列を出しているときだけ）
+        if geo.show_mode {
+            widgets::cell_menu(ui, geo.cell(geo.mode(), MODE_W, rect), rid.with("mode"), layer.blend_mode.label_ja(), BlendMode::ALL.len(), |ui, pick| {
+                for mode in BlendMode::ALL {
+                    if pick.item(ui, mode == layer.blend_mode, mode.label_ja()) {
+                        self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
+                    }
                 }
-            }
-        });
+            });
+        }
         let name_of = |lid: &LayerId| comp.layer(lid).map(|l| l.name.clone()).unwrap_or_else(|| "（不明）".into());
         if geo.show_matte {
             let text = layer.track_matte.as_ref().map(|m| name_of(&m.layer)).unwrap_or_else(|| "なし".into());
@@ -1398,15 +1421,28 @@ impl App {
         let p = ui.painter_at(time);
         let x_of = |t: Time| view.x(t.seconds() * fr.fps());
         let (x0, x1) = (x_of(layer.in_point), x_of(layer.out_point));
-        let bar = Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 3.0));
+        // レイヤーは角の丸いクリップとして描き、中に種類のアイコンと名前を書く
+        let bar = Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 2.0));
         let fill = if layer.visible { color } else { color.gamma_multiply(0.4) };
-        p.rect_filled(bar, 1.0, fill.gamma_multiply(if selected { 1.0 } else { 0.82 }));
-        // イン点・アウト点の取っ手
-        let grip = Color32::from_white_alpha(if selected { 110 } else { 60 });
-        p.rect_filled(Rect::from_min_max(bar.min, pos2((bar.left() + 3.0).min(bar.right()), bar.bottom())), 0.0, grip);
-        p.rect_filled(Rect::from_min_max(pos2((bar.right() - 3.0).max(bar.left()), bar.top()), bar.max), 0.0, grip);
+        let body = fill.gamma_multiply(if selected { 0.95 } else { 0.62 });
+        p.rect_filled(bar, 4.0, body);
+        // 上の縁を明るくして、クリップの面を立たせる
+        p.rect_filled(Rect::from_min_max(bar.min + vec2(3.0, 0.0), pos2((bar.right() - 3.0).max(bar.left() + 3.0), bar.top() + 2.0)), 1.0, fill);
+        // イン点・アウト点の取っ手（短い縦の線）
+        let grip = Stroke::new(1.5_f32, Color32::from_white_alpha(if selected { 170 } else { 80 }));
+        for gx in [bar.left() + 3.0, bar.right() - 3.0] {
+            if bar.width() > 10.0 {
+                p.vline(gx, (bar.top() + 4.0)..=(bar.bottom() - 4.0), grip);
+            }
+        }
+        if bar.width() > 34.0 {
+            let inner = Rect::from_min_max(pos2(bar.left().max(time.left()) + 7.0, bar.top()), pos2(bar.right() - 7.0, bar.bottom()));
+            let tp = p.with_clip_rect(inner.intersect(time));
+            icons::paint_sized(&tp, Rect::from_min_size(pos2(inner.left(), bar.center().y - 6.0), vec2(12.0, 12.0)), kind_icon(&layer.kind), Color32::from_white_alpha(200), 11.0);
+            tp.text(pos2(inner.left() + 15.0, bar.center().y), Align2::LEFT_CENTER, &layer.name, FontId::proportional(10.5), Color32::from_white_alpha(if selected { 245 } else { 205 }));
+        }
         if selected {
-            p.rect_stroke(bar, 1.0, Stroke::new(1.0_f32, Color32::from_white_alpha(150)));
+            p.rect_stroke(bar, 4.0, Stroke::new(1.2_f32, Color32::WHITE));
         }
         // 畳んでいる間は、キーフレームのある時刻を小さな点で示す（掴むと、その時刻の全プロパティのキーが動く）
         let keys = if open { Vec::new() } else { key_times(layer) };
@@ -1565,7 +1601,7 @@ impl App {
             }
             if widgets::icon_cell(
                 ui,
-                geo.cell(geo.x0 + 2.0, AV_W, rect),
+                geo.cell(geo.x0 + AV_X, AV_W, rect),
                 rid.with("fx"),
                 Icon::Fx,
                 on,
@@ -1607,7 +1643,7 @@ impl App {
         }
     }
 
-    /// プロパティ 1 行。左にストップウォッチ・名前・値、右にキーフレーム。
+    /// プロパティ 1 行。左にアニメーションの切り替え・名前・値、右にキーフレーム。
     #[allow(clippy::too_many_arguments)]
     fn property_row(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, row: &Row, depth: usize, view: TlView, geo: Geo) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
@@ -1626,7 +1662,7 @@ impl App {
         let dim = theme::TEXT_DIM;
         if row.animated {
             // 前のキーへ／この時刻にキーを追加・削除／次のキーへ
-            let av = |i: usize| geo.cell(geo.x0 + 2.0 + i as f32 * AV_W, AV_W, rect);
+            let av = |i: usize| geo.cell(geo.x0 + AV_X + i as f32 * AV_W, AV_W, rect);
             let prev = row.keys.iter().map(|k| k.0).filter(|t| *t < now).max();
             let next = row.keys.iter().map(|k| k.0).filter(|t| *t > now).min();
             if widgets::icon_cell(ui, av(0), rid.with("prev"), Icon::KeyPrev, prev.is_some(), theme::TEXT_OFF, "前のキーフレームへ")
@@ -1660,11 +1696,11 @@ impl App {
         }
         let x = geo.x0 + TREE_X + depth as f32 * 12.0;
         let watch = geo.cell(x - 2.0, 16.0, rect);
-        let resp = ui.interact(watch, rid.with("watch"), Sense::click()).on_hover_text("ストップウォッチ: アニメーションのオン／オフ");
+        let resp = ui.interact(watch, rid.with("watch"), Sense::click()).on_hover_text("アニメーション: オンにすると今の値でキーフレームを打ち、オフにすると今の値で固定します");
         icons::paint_sized(
             ui.painter(),
             watch,
-            Icon::Stopwatch,
+            Icon::Animate,
             if row.animated {
                 theme::VALUE
             } else if resp.hovered() {

@@ -1,5 +1,6 @@
 //! フローティングウィンドウ: 書き出し・レンダーキュー、提出前チェック、履歴、版、レビュー、グラフエディター、スクリプト。
 
+use crate::icons::Icon;
 use crate::panels::{apply_edit, path_label, KeyKind, PropEdit};
 use crate::timeline::KeySel;
 use crate::{base_dir, theme, unix_now, widgets, App, Task};
@@ -602,8 +603,13 @@ impl App {
             let mut edit: Option<PropEdit> = None;
             ui.horizontal(|ui| {
                 ui.strong(format!("{} › {}", layer.name, path_label(layer, &path)));
-                ui.selectable_value(&mut self.export_ui.speed_graph, false, "値グラフ");
-                ui.selectable_value(&mut self.export_ui.speed_graph, true, "速度グラフ");
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if widgets::icon_toggle(ui, Icon::ValueGraph, !self.export_ui.speed_graph, "値のグラフ").clicked() {
+                    self.export_ui.speed_graph = false;
+                }
+                if widgets::icon_toggle(ui, Icon::SpeedGraph, self.export_ui.speed_graph, "速度のグラフ").clicked() {
+                    self.export_ui.speed_graph = true;
+                }
             });
             // 操作の対象: このプロパティで選択中のキー。無ければ再生ヘッドの位置のキー
             let mut targets: Vec<KeySel> =
@@ -614,11 +620,13 @@ impl App {
             let mut style: Option<(&str, keys::KeyStyle)> = None;
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("対象のキー {} 個:", targets.len()));
+                ui.spacing_mut().item_spacing.x = 0.0;
                 for k in KeyKind::ALL {
-                    if ui.small_button(k.label()).clicked() {
+                    if widgets::icon_button(ui, k.icon(), k.label()).clicked() {
                         style = Some(("キーフレーム補間", k.style()));
                     }
                 }
+                ui.add_space(6.0);
                 ui.menu_button("イージング", |ui| self.ease_menu(ui));
             });
             ui.horizontal(|ui| {
@@ -690,11 +698,11 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if ui.small_button("全体").on_hover_text("コンポの最初から最後までを表示").clicked() {
+                if widgets::icon_button(ui, Icon::Fit, "全体を表示（コンポの最初から最後まで）").clicked() {
                     (v0, v1) = (0.0, dur);
                 }
                 let key_secs: Vec<f64> = prop.key_times().iter().map(|t| t.seconds()).collect();
-                if ui.add_enabled(key_secs.len() >= 2, egui::Button::new("キーに合わせる").small()).on_hover_text("最初と最後のキーが収まるように拡大").clicked() {
+                if ui.add_enabled_ui(key_secs.len() >= 2, |ui| widgets::icon_button(ui, Icon::FitKeys, "キーに合わせる（最初と最後のキーが収まるように拡大）")).inner.clicked() {
                     let (a, b) = (key_secs.iter().copied().fold(f64::MAX, f64::min), key_secs.iter().copied().fold(f64::MIN, f64::max));
                     let m = ((b - a) * 0.08).max(min_span);
                     (v0, v1) = (a - m, b + m);
