@@ -8,7 +8,7 @@ use crate::panels::KeyKind;
 use crate::timeline::{KeySel, TlDrag, TlView};
 use crate::{theme, App};
 use eframe::egui;
-use znd_core::keys::{self, KeyAddr, KeyClipboard, KeyStyle, EASE_PRESETS};
+use znd_core::keys::{self, KeyAddr, KeyClipboard, KeyStyle};
 use znd_core::*;
 
 impl KeyKind {
@@ -27,7 +27,7 @@ impl KeyKind {
 }
 
 /// 選択をレイヤーごとにまとめる。
-fn by_layer(sel: &[KeySel]) -> Vec<(LayerId, Vec<KeyAddr>)> {
+pub(crate) fn by_layer(sel: &[KeySel]) -> Vec<(LayerId, Vec<KeyAddr>)> {
     let mut out: Vec<(LayerId, Vec<KeyAddr>)> = Vec::new();
     for k in sel {
         let addr = KeyAddr::new(&k.path, k.at);
@@ -306,14 +306,7 @@ impl App {
                     }
                 }
             });
-            ui.menu_button("イージングプリセット", |ui| {
-                for p in EASE_PRESETS {
-                    if ui.button(p.name).clicked() {
-                        ui.close_menu();
-                        self.style_selected_keys("イージング", p.style);
-                    }
-                }
-            });
+            ui.menu_button("イージング", |ui| self.ease_menu(ui));
             ui.separator();
             if ui.add(egui::Button::new("時間反転").shortcut_text(self.shortcut_text(Action::ReverseKeys))).clicked() {
                 ui.close_menu();

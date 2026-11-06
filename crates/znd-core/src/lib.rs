@@ -6,6 +6,7 @@ pub mod camera_import;
 pub mod collab;
 pub mod demo;
 pub mod dsp;
+pub mod ease;
 pub mod edit;
 pub mod effect;
 pub mod eval;
@@ -23,6 +24,7 @@ pub mod time;
 pub mod visit;
 
 pub use beat::BeatGrid;
+pub use ease::{EaseCurve, EaseDir};
 pub use effect::{EffectInstance, EvalParams, ParamValue};
 pub use eval::Affine;
 pub use model::*;

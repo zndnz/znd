@@ -417,12 +417,13 @@ impl App {
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
-        widgets::tab_strip(ui, &["プロパティ", "エフェクト", "オーディオ"], &mut self.right_tab);
+        widgets::tab_strip(ui, &["プロパティ", "エフェクト", "イージング", "オーディオ"], &mut self.right_tab);
         egui::ScrollArea::vertical().id_salt("right_upper_scroll").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             match self.right_tab {
                 0 => self.properties_tab(ui),
                 1 => self.effects_presets_tab(ui),
+                2 => self.easing_tab(ui),
                 _ => self.audio_tab(ui),
             }
         });

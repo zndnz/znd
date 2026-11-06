@@ -2,6 +2,7 @@
 
 mod audio;
 mod beatfit_ui;
+mod easing;
 mod font_preview;
 mod icons;
 mod keymap;
@@ -321,6 +322,8 @@ pub struct App {
     pub(crate) beat_ui: beatfit_ui::BeatUi,
     /// 利用者ごとの設定。
     pub(crate) prefs: prefs::Prefs,
+    /// イージングのパネルの状態。
+    pub(crate) ease: easing::EaseUi,
     /// キーボードショートカットの割り当て。
     pub(crate) keymap: keymap::Keymap,
     /// 割り当てを変更中の操作（次に押したキーを割り当てる）。
@@ -438,6 +441,7 @@ impl App {
             key_clip: None,
             beat_ui: Default::default(),
             prefs: prefs::Prefs::load(),
+            ease: Default::default(),
             keymap: keymap::Keymap::default(),
             keymap_capture: None,
             key_target: None,
@@ -1072,6 +1076,10 @@ impl App {
             TimelineZoomIn => self.tl_zoom *= 1.25,
             TimelineZoomOut => self.tl_zoom /= 1.25,
             ShowShortcuts => self.show.shortcuts = !self.show.shortcuts,
+            ApplyEase => {
+                let c = self.ease.current;
+                self.apply_ease(Some(c), false);
+            }
         }
     }
 

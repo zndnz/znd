@@ -111,6 +111,9 @@ pub struct Keyframe<V> {
     /// ロービング: 前後の固定キーの間で速度が一定になるよう、時刻を自動で決める。
     #[serde(default, skip_serializing_if = "is_false")]
     pub roving: bool,
+    /// このキーから次のキーまでの区間のイージングカーブ。あればハンドル（速度・影響度）より優先する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<crate::ease::EaseCurve>,
 }
 
 impl<V> Keyframe<V> {
@@ -125,6 +128,7 @@ impl<V> Keyframe<V> {
             bezier_mode: BezierMode::Manual,
             spatial: None,
             roving: false,
+            curve: None,
         }
     }
 
@@ -259,6 +263,25 @@ impl<V: Animatable> Property<V> {
     pub fn reverse_keys(&mut self, indices: &[usize]) {
         let times: Vec<Time> = indices.iter().filter_map(|i| self.keyframes.get(*i)).map(|k| k.time).collect();
         let (Some(lo), Some(hi)) = (times.iter().min().copied(), times.iter().max().copied()) else { return };
+        // 区間のカーブは区間の始めのキーが持つので、反転後の始めのキーへ時間を逆にして移す
+        let n = self.keyframes.len();
+        let valid: Vec<usize> = indices.iter().copied().filter(|i| *i < n).collect();
+        let mut curves: Vec<(usize, Option<crate::ease::EaseCurve>)> = Vec::new();
+        for &j in &valid {
+            if valid.contains(&(j + 1)) {
+                curves.push((j + 1, self.keyframes[j].curve.map(|c| c.mirrored())));
+            }
+        }
+        if let (Some(first), Some(last)) = (valid.iter().min().copied(), valid.iter().max().copied()) {
+            // 最後のキーから外へ出る区間は、反転後に最後になるキー（元の最初のキー）から出る
+            curves.push((first, self.keyframes[last].curve));
+        }
+        for &j in &valid {
+            self.keyframes[j].curve = None;
+        }
+        for (j, c) in curves {
+            self.keyframes[j].curve = c;
+        }
         for &i in indices {
             if let Some(k) = self.keyframes.get_mut(i) {
                 k.time = lo + (hi - k.time);
@@ -352,6 +375,9 @@ impl<V: Animatable> Property<V> {
         let dims = k0.value.dims();
         let dt = (k1.time - k0.time).seconds();
         let tau = (t - k0.time).seconds();
+        if let Some(curve) = &k0.curve {
+            return self.eval_curve(i, curve.eval(tau / dt));
+        }
         let both_linear = k0.interp_out == Interp::Linear && k1.interp_in != Interp::Bezier;
 
         if self.spatial {
@@ -380,6 +406,33 @@ impl<V: Animatable> Property<V> {
             };
         }
         k0.value.with_components(&out)
+    }
+
+    /// 区間 `i` を進み具合 `f`（0..1 を外れてもよい）で評価する（イージングカーブ用）。
+    fn eval_curve(&self, i: usize, f: f64) -> V {
+        let k0 = &self.keyframes[i];
+        let k1 = &self.keyframes[i + 1];
+        if self.spatial {
+            let path = self.path(i);
+            let len = path.length();
+            let s = len * f;
+            if (0.0..=len).contains(&s) || len <= 1e-9 {
+                return k0.value.with_components(&path.point_at_length(s.clamp(0.0, len)));
+            }
+            // 行き過ぎ・戻りは、端の向きに沿って延ばす
+            let eps = (len * 1e-3).max(1e-6);
+            let (base, near, over) = if s < 0.0 { (0.0, eps, s) } else { (len, len - eps, s - len) };
+            let a = path.point_at_length(base);
+            let b = path.point_at_length(near);
+            let sign = if s < 0.0 { 1.0 } else { -1.0 };
+            let c: Vec<f64> = a.iter().zip(&b).map(|(a, b)| a + (b - a) / eps * over * sign).collect();
+            return k0.value.with_components(&c);
+        }
+        let c: Vec<f64> = (0..k0.value.dims()).map(|d| {
+            let (v0, v1) = (k0.value.component(d), k1.value.component(d));
+            v0 + (v1 - v0) * f
+        }).collect();
+        k0.value.with_components(&c)
     }
 
     /// キー `i` の `side` 側の実効イーズ。`v0`,`v1`,`dt` はそのイーズが属する区間の端点値と時間幅。

@@ -619,14 +619,7 @@ impl App {
                         style = Some(("キーフレーム補間", k.style()));
                     }
                 }
-                ui.menu_button("イージングプリセット", |ui| {
-                    for p in keys::EASE_PRESETS {
-                        if ui.button(p.name).clicked() {
-                            style = Some(("イージング", p.style));
-                            ui.close_menu();
-                        }
-                    }
-                });
+                ui.menu_button("イージング", |ui| self.ease_menu(ui));
             });
             ui.horizontal(|ui| {
                 // ハンドルの数値入力（速度と影響度）

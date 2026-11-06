@@ -64,6 +64,8 @@ impl KeyKind {
         k.bezier_mode = mode;
         k.ease_in.clear();
         k.ease_out.clear();
+        // 補間をハンドルで決め直すので、区間のイージングカーブは外す
+        k.curve = None;
     }
 }
 
@@ -174,6 +176,8 @@ pub(crate) struct Row {
     pub expr: Option<String>,
     /// キーフレームの時刻と補間の種類（昇順）。
     pub keys: Vec<(Time, KeyKind)>,
+    /// キーごとの、次のキーまでの区間のイージングカーブ（`keys` と同じ並び）。
+    pub curves: Vec<Option<EaseCurve>>,
 }
 
 fn snapshot<V: Animatable>(path: &str, p: &Property<V>, t: Time, is_path: bool) -> Row {
@@ -186,6 +190,7 @@ fn snapshot<V: Animatable>(path: &str, p: &Property<V>, t: Time, is_path: bool) 
         on_key: p.key_index_at(t).map(|i| KeyKind::of(&p.keyframes[i])),
         expr: p.expression.as_ref().map(|e| e.source.clone()),
         keys: p.keyframes.iter().map(|k| (k.time, KeyKind::of(k))).collect(),
+        curves: p.keyframes.iter().map(|k| k.curve).collect(),
     }
 }
 

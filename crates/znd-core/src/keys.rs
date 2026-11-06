@@ -351,6 +351,8 @@ impl KeyStyle {
         }
         if let Some(i) = self.interp_out {
             k.interp_out = i;
+            // ハンドルで決め直すので、区間のイージングカーブは外す
+            k.curve = None;
             k.ease_out = match (i, self.ease_out) {
                 (Interp::Bezier, Some(e)) => vec![e; dims],
                 _ => Vec::new(),
@@ -378,6 +380,10 @@ pub fn set_style(layer: &mut Layer, sel: &[KeyAddr], style: &KeyStyle) -> usize 
                 let idx = indices(p, times);
                 for &i in &idx {
                     style.apply(&mut p.keyframes[i], spatial);
+                    // 入る側を変えたら、そこへ入る区間のカーブも外す（カーブがハンドルより優先されるため）
+                    if style.interp_in.is_some() && i > 0 {
+                        p.keyframes[i - 1].curve = None;
+                    }
                 }
                 idx.len()
             }
@@ -385,6 +391,74 @@ pub fn set_style(layer: &mut Layer, sel: &[KeyAddr], style: &KeyStyle) -> usize 
         });
     }
     n
+}
+
+/// 選択キーの区間にイージングカーブを付ける（`None` で外してハンドルに戻す）。付けた区間の数を返す。
+///
+/// プロパティごとに、選択した隣り合うキーの間の区間に付ける。そのプロパティで 1 つしか選んでいなければ、
+/// そのキーから次のキーまでの区間に付ける（最後のキーなら、前のキーからの区間）。
+pub fn set_curve(layer: &mut Layer, sel: &[KeyAddr], curve: Option<crate::ease::EaseCurve>) -> usize {
+    let mut n = 0;
+    for (path, times) in by_path(sel) {
+        edit_prop(layer, &path, &mut |m| {
+            fn go<V: Animatable>(p: &mut Property<V>, times: &[Time], curve: Option<crate::ease::EaseCurve>) -> usize {
+                let segs = segments(p, times);
+                for &i in &segs {
+                    let k = &mut p.keyframes[i];
+                    k.curve = curve.map(|c| c.sanitized());
+                    if curve.is_some() {
+                        // 停止のままだとカーブが効かない
+                        if k.interp_out == Interp::Hold {
+                            k.interp_out = Interp::Linear;
+                        }
+                    }
+                }
+                segs.len()
+            }
+            n += with_prop!(m, |p| go(p, &times, curve));
+        });
+    }
+    n
+}
+
+/// 選択キーの区間（区間の始めのキーの番号）。`set_curve` と同じ決め方。
+fn segments<V: Animatable>(p: &Property<V>, times: &[Time]) -> Vec<usize> {
+    let idx = indices(p, times);
+    let n = p.keyframes.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    if idx.len() == 1 {
+        let i = idx[0];
+        return vec![if i + 1 < n { i } else { i - 1 }];
+    }
+    idx.iter().copied().filter(|i| idx.contains(&(i + 1))).collect()
+}
+
+/// 選択キーの最初の区間のイージングカーブ（スポイトで拾う用）。区間が無いか、ハンドルで動いていれば `None`。
+pub fn curve_of(layer: &Layer, sel: &[KeyAddr]) -> Option<crate::ease::EaseCurve> {
+    let mut found = None;
+    for (path, times) in by_path(sel) {
+        visit::visit_layer(layer, &mut |p, r| {
+            if found.is_some() || p != path {
+                return;
+            }
+            fn go<V: Animatable>(p: &Property<V>, times: &[Time]) -> Option<crate::ease::EaseCurve> {
+                segments(p, times).first().and_then(|i| p.keyframes[*i].curve)
+            }
+            found = match r {
+                PropRef::F1(p) => go(p, &times),
+                PropRef::F2(p) => go(p, &times),
+                PropRef::F3(p) => go(p, &times),
+                PropRef::F4(p) => go(p, &times),
+                PropRef::Path(p) => go(p, &times),
+            };
+        });
+        if found.is_some() {
+            break;
+        }
+    }
+    found
 }
 
 /// イージングのプリセット。グラフエディターとキーの右クリックメニューに並ぶ。
@@ -542,5 +616,44 @@ mod tests {
         let every = all_keys(&l);
         assert_eq!(delete(&mut l, &every), 5);
         assert!(all_keys(&l).is_empty());
+    }
+
+    #[test]
+    fn curves_on_segments() {
+        use crate::ease::{EaseCurve, EaseDir};
+        let mut l = layer();
+        // 隣り合う 2 つを選ぶと、その間の区間に付く
+        let sel = keys_in_range(&l, f(0), f(10), Some(&["transform.opacity".into()]));
+        let bounce = EaseCurve::bounce(EaseDir::Out);
+        assert_eq!(set_curve(&mut l, &sel, Some(bounce)), 1);
+        assert_eq!(l.transform.opacity.keyframes[0].curve, Some(bounce));
+        assert_eq!(l.transform.opacity.keyframes[1].curve, None);
+        assert_eq!(curve_of(&l, &sel), Some(bounce));
+        // 値は始点と終点のまま、間がカーブで動く
+        let v = l.transform.opacity.eval(f(5));
+        assert!((v - 50.0 * bounce.eval(0.5)).abs() < 1e-6, "{v}");
+        assert_eq!(l.transform.opacity.eval(f(10)), 50.0);
+        // 最後のキーだけ選ぶと、前の区間に付く
+        let last = keys_in_range(&l, f(20), f(20), Some(&["transform.opacity".into()]));
+        assert_eq!(set_curve(&mut l, &last, Some(EaseCurve::LINEAR)), 1);
+        assert_eq!(l.transform.opacity.keyframes[1].curve, Some(EaseCurve::LINEAR));
+        // ハンドルの補間を付け直すとカーブは外れる
+        let preset = EASE_PRESETS.iter().find(|p| p.name.starts_with("イージーイーズ")).unwrap();
+        set_style(&mut l, &last, &preset.style);
+        assert_eq!(l.transform.opacity.keyframes[1].curve, None);
+        // 空間プロパティでも行き過ぎを表せる（バック アウト）
+        let pos = keys_in_range(&l, f(0), f(30), Some(&["transform.position".into()]));
+        let back = EaseCurve::bezier(0.34, 1.56, 0.64, 1.0);
+        set_curve(&mut l, &pos, Some(back));
+        let max_x = (0..=30).map(|i| l.transform.position.eval(f(i))[0]).fold(0.0, f64::max);
+        assert!(max_x > 105.0, "{max_x}");
+        // 時間反転でカーブも逆になる
+        let mut p = l.transform.opacity.clone();
+        p.keyframes[0].curve = Some(EaseCurve::elastic(EaseDir::Out));
+        p.keyframes[1].curve = None;
+        p.reverse_keys(&[0, 1]);
+        assert_eq!(p.keyframes[0].curve, Some(EaseCurve::elastic(EaseDir::In)));
+        set_curve(&mut l, &sel, None);
+        assert_eq!(l.transform.opacity.keyframes[0].curve, None);
     }
 }

@@ -1700,6 +1700,18 @@ impl App {
             // 最初と最後のキーの間を線で結ぶ（アニメーションしている区間）
             p.hline(x_of(a.0)..=x_of(b.0), cy, Stroke::new(1.0_f32, Color32::from_gray(0x48)));
         }
+        // イージングカーブの付いた区間には、その形を小さく描く
+        for (i, c) in row.curves.iter().enumerate() {
+            let (Some(c), Some(next)) = (c, row.keys.get(i + 1)) else { continue };
+            let (x0, x1) = (x_of(row.keys[i].0) + 5.0, x_of(next.0) - 5.0);
+            if x1 - x0 < 10.0 {
+                continue;
+            }
+            let h = (rect.height() - 6.0).max(6.0);
+            let r = Rect::from_min_max(pos2(x0, cy - h / 2.0), pos2(x1, cy + h / 2.0));
+            p.rect_filled(r, 1.0, Color32::from_rgba_unmultiplied(120, 170, 255, 26));
+            crate::easing::paint_curve(&p, r, c, Color32::from_rgb(140, 185, 255), 1.0, (0.0, 1.0));
+        }
         for (t, kind) in &row.keys {
             key_shape(&p, pos2(x_of(*t), cy), *kind, self.is_key_selected(&id, Some(&row.path), *t));
         }
