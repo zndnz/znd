@@ -490,3 +490,13 @@ fn text_expression_replaces_the_source_text_each_frame() {
         _ => unreachable!(),
     }
 }
+
+#[test]
+fn x9_infinite_loop_is_stopped() {
+    let started = std::time::Instant::now();
+    let e = error_of("while (true) {}\n0");
+    assert!(e.message.contains("秒を超えた"), "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    // 止めたあとも、次の評価は普通にできる
+    assert!(error_of("foo.bar").message.contains("foo"));
+}

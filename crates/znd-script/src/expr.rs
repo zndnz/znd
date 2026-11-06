@@ -50,6 +50,15 @@ thread_local! {
     static JS: (Runtime, Context) = init();
     /// このスレッドの JS に読み込み済みの、プラグインのエクスプレッション用ライブラリの世代。
     static LIB_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 評価の打ち切り時刻（無限ループで描画が止まらないように）。
+    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// 1 回の評価（入れ子の評価とライブラリの読み込みを含む）の時間の上限。
+const EVAL_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn timed_out() -> bool {
+    DEADLINE.with(|d| d.get().is_some_and(|t| std::time::Instant::now() > t))
 }
 
 /// プラグインが追加したエクスプレッション用ライブラリを、まだならこのスレッドの JS に読み込む。
@@ -211,6 +220,8 @@ fn init() -> (Runtime, Context) {
     let rt = Runtime::new().expect("failed to create JS runtime");
     rt.set_memory_limit(256 * 1024 * 1024);
     rt.set_max_stack_size(1024 * 1024);
+    // エクスプレッションやプラグインのライブラリが無限ループしても、上限の時間で止める
+    rt.set_interrupt_handler(Some(Box::new(timed_out)));
     let context = Context::full(&rt).expect("failed to create JS context");
     context.with(|ctx| {
         let g = ctx.globals();
@@ -398,6 +409,7 @@ fn with_project<T>(project: &Project, f: impl FnOnce(&Ctx) -> rquickjs::Result<T
         let fresh = STATE.with(|s| s.borrow().is_none());
         if fresh {
             STATE.with(|s| *s.borrow_mut() = Some(State { project, stack: Vec::new(), error: None }));
+            DEADLINE.with(|d| d.set(Some(std::time::Instant::now() + EVAL_LIMIT)));
         }
         let result = context.with(|ctx| {
             if fresh {
@@ -405,6 +417,14 @@ fn with_project<T>(project: &Project, f: impl FnOnce(&Ctx) -> rquickjs::Result<T
             }
             f(&ctx).map_err(|_| {
                 let caught = ctx.catch();
+                if timed_out() {
+                    return ExprError {
+                        layer: String::new(),
+                        path: String::new(),
+                        line: None,
+                        message: format!("実行が {} 秒を超えたため止めました（無限ループになっていないか確かめてください）", EVAL_LIMIT.as_secs()),
+                    };
+                }
                 STATE.with(|s| s.borrow_mut().as_mut().and_then(|st| st.error.take())).unwrap_or_else(|| {
                     let (message, line) = describe(&caught);
                     ExprError { layer: String::new(), path: String::new(), line, message }
@@ -413,6 +433,7 @@ fn with_project<T>(project: &Project, f: impl FnOnce(&Ctx) -> rquickjs::Result<T
         });
         if fresh {
             STATE.with(|s| *s.borrow_mut() = None);
+            DEADLINE.with(|d| d.set(None));
         }
         result
     })
