@@ -675,20 +675,20 @@ impl App {
         let (sw, sh) = shared.source_size(&kind).unwrap_or((0.0, 0.0));
         let id = shared.fresh_id("layer");
         let mut layer = Layer::new(id.clone(), name, kind, Transform::centered(sw, sh, cw, ch), comp.duration);
-        // 素材レイヤーは再生位置から始める
-        let t = comp.frame_rate.frame_to_time(self.frame);
-        match &layer.kind {
-            LayerKind::Footage { footage } | LayerKind::Audio { footage } => {
-                let d = shared.footage_item(footage).and_then(|f| f.duration.or(f.audio.map(|a| a.duration)));
-                layer.in_point = t;
-                layer.start_time = t;
-                layer.out_point = d.map(|d| (t + d).min(comp.duration)).unwrap_or(comp.duration);
-            }
-            LayerKind::Model { .. } => layer.three_d = true,
-            _ => {}
+        // どのレイヤーも再生位置から始める（素材は素材の長さだけ、それ以外はコンポの終わりまで）
+        let t = self.playhead_time(comp);
+        place_at(&mut layer, t, comp.duration, &shared);
+        if let LayerKind::Model { .. } = &layer.kind {
+            layer.three_d = true;
         }
         self.edit_comp(label, false, |c| c.layers.insert(0, layer));
         self.selected = Some(LayerId::new(id));
+    }
+
+    /// 新しいレイヤーを置く時刻（再生ヘッド。コンポの最後のフレームより後ろにはしない）。
+    pub(crate) fn playhead_time(&self, comp: &Composition) -> Time {
+        let last = (comp.frame_count() - 1).max(0);
+        comp.frame_rate.frame_to_time(self.frame.clamp(0, last))
     }
 
     /// ファイルを選んで読み込む。`sequence` が true なら、選んだ 1 枚を含む連番をまとめて 1 本の動画にする。
@@ -1350,4 +1350,17 @@ impl eframe::App for App {
             }
         }
     }
+}
+
+/// レイヤーを時刻 `t` から始まるように置く。素材は素材の長さだけ、それ以外はコンポの終わりまで。
+pub(crate) fn place_at(layer: &mut Layer, t: Time, comp_duration: Time, project: &Project) {
+    let len = match &layer.kind {
+        LayerKind::Footage { footage } | LayerKind::Audio { footage } => {
+            project.footage_item(footage).and_then(|f| f.duration.or(f.audio.map(|a| a.duration)))
+        }
+        _ => None,
+    };
+    layer.in_point = t;
+    layer.start_time = t;
+    layer.out_point = len.map(|d| (t + d).min(comp_duration)).unwrap_or(comp_duration);
 }

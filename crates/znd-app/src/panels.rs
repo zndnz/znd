@@ -756,7 +756,10 @@ impl App {
             NewLayer::Adjustment => self.add_layer("調整レイヤー追加", "調整レイヤー", LayerKind::Adjustment),
             NewLayer::Camera => {
                 let id = self.shared.fresh_id("camera");
-                let cam = camera_import::default_camera(&id, w, h, dur);
+                let mut cam = camera_import::default_camera(&id, w, h, dur);
+                if let Some(comp) = self.shared.comp(&self.comp_id) {
+                    crate::place_at(&mut cam, self.playhead_time(comp), dur, &self.shared);
+                }
                 self.edit_comp("カメラ追加", false, |c| c.layers.insert(0, cam));
                 self.selected = Some(LayerId::new(id));
             }
