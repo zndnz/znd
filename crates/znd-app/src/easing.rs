@@ -340,7 +340,7 @@ impl App {
         // 数値
         match &mut c {
             EaseCurve::Bezier { x1, y1, x2, y2 } => {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.add(egui::DragValue::new(x1).range(0.0..=1.0).speed(0.005).fixed_decimals(2).prefix("x1 "));
                     ui.add(egui::DragValue::new(y1).range(-4.0..=5.0).speed(0.005).fixed_decimals(2).prefix("y1 "));
@@ -365,24 +365,26 @@ impl App {
         }
         // cubic-bezier の文字（他のツールとのやりとり用）
         if matches!(c, EaseCurve::Bezier { .. }) {
-            ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.ease.css).desired_width(ui.available_width() - 60.0).font(egui::TextStyle::Monospace));
-                if r.lost_focus() || r.changed() {
-                    if let Some(parsed) = EaseCurve::parse_css(&self.ease.css) {
-                        c = parsed;
-                    }
-                }
+            // ボタンを先に右端へ置き、残りの幅を入力欄にする（幅を引き算で決めると、文字の幅しだいではみ出す）
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("コピー").on_hover_text("cubic-bezier(...) の書式でコピーします").clicked() {
                     if let Some(t) = c.css() {
                         ui.ctx().copy_text(t);
                     }
                 }
+                let r = ui.add(egui::TextEdit::singleline(&mut self.ease.css).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+                if r.lost_focus() || r.changed() {
+                    if let Some(parsed) = EaseCurve::parse_css(&self.ease.css) {
+                        c = parsed;
+                    }
+                }
             });
         }
         // お気に入り
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.ease.fav_name).hint_text("名前").desired_width(ui.available_width() - 110.0));
-            if ui.button("お気に入りに保存").clicked() {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let save = ui.button("お気に入りに保存");
+            ui.add(egui::TextEdit::singleline(&mut self.ease.fav_name).hint_text("名前").desired_width(f32::INFINITY));
+            if save.clicked() {
                 let name = if self.ease.fav_name.trim().is_empty() {
                     format!("{} {}", c.kind_label(), self.prefs.ease_favorites.len() + 1)
                 } else {

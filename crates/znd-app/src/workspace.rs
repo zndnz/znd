@@ -415,7 +415,14 @@ impl App {
 
     // ---------- 右: プロパティ／エフェクト一覧／オーディオ ----------
 
-    fn right_panel(&mut self, ui: &mut egui::Ui) {
+    fn right_panel(&mut self, outer: &mut egui::Ui) {
+        // 中身が少しでもはみ出すと、パネルがその幅を覚えて次のフレームでさらに広がり続ける（イージングのタブなど）。
+        // 中身は決まった矩形の中に描き、パネルの幅を変えるのは境目のドラッグだけにする
+        let rect = outer.available_rect_before_wrap();
+        outer.allocate_rect(rect, egui::Sense::hover());
+        let mut inner = outer.new_child(egui::UiBuilder::new().max_rect(rect).layout(*outer.layout()));
+        inner.set_clip_rect(rect.intersect(outer.clip_rect()));
+        let ui = &mut inner;
         ui.spacing_mut().item_spacing.y = 0.0;
         widgets::tab_strip(ui, &["プロパティ", "エフェクト", "イージング", "オーディオ"], &mut self.right_tab);
         egui::ScrollArea::vertical().id_salt("right_upper_scroll").auto_shrink([false, false]).show(ui, |ui| {
