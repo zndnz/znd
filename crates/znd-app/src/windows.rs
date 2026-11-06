@@ -685,7 +685,7 @@ impl App {
                     _ => (0.0, dur),
                 };
             }
-            if !(v1 > v0) {
+            if v1.partial_cmp(&v0) != Some(std::cmp::Ordering::Greater) {
                 (v0, v1) = (0.0, dur);
             }
             ui.horizontal(|ui| {
