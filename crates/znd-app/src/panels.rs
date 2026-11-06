@@ -354,6 +354,65 @@ fn font_list() -> &'static Vec<(String, String)> {
     })
 }
 
+/// アニメーターに付けられる属性（キー, 表示名）。足した直後は「変化なし」の値になる。
+const ANIMATOR_PROPS: [(&str, &str); 13] = [
+    ("position", "位置"),
+    ("scale", "スケール"),
+    ("rotation", "回転"),
+    ("opacity", "不透明度"),
+    ("anchor", "アンカーポイント"),
+    ("tracking", "字間"),
+    ("fill_color", "塗りの色"),
+    ("stroke_color", "線の色"),
+    ("stroke_width", "線の幅"),
+    ("blur", "ブラー"),
+    ("character_offset", "文字のずらし"),
+    ("position_z", "Z 位置（3D）"),
+    ("rotation_x", "X 回転（3D）"),
+];
+
+fn animator_prop_set(p: &AnimatorProps, key: &str) -> bool {
+    match key {
+        "position" => p.position.is_some(),
+        "scale" => p.scale.is_some(),
+        "rotation" => p.rotation.is_some(),
+        "opacity" => p.opacity.is_some(),
+        "anchor" => p.anchor.is_some(),
+        "tracking" => p.tracking.is_some(),
+        "fill_color" => p.fill_color.is_some(),
+        "stroke_color" => p.stroke_color.is_some(),
+        "stroke_width" => p.stroke_width.is_some(),
+        "blur" => p.blur.is_some(),
+        "character_offset" => p.character_offset.is_some(),
+        "position_z" => p.position_z.is_some(),
+        "rotation_x" => p.rotation_x.is_some(),
+        _ => false,
+    }
+}
+
+/// 属性を足す（変化なしの値で）・外す。
+fn toggle_animator_prop(p: &mut AnimatorProps, key: &str, on: bool) {
+    fn set<T: Animatable>(slot: &mut Option<Property<T>>, on: bool, neutral: T) {
+        *slot = on.then(|| Property::constant(neutral));
+    }
+    match key {
+        "position" => set(&mut p.position, on, [0.0, 0.0]),
+        "scale" => set(&mut p.scale, on, [100.0, 100.0]),
+        "rotation" => set(&mut p.rotation, on, 0.0),
+        "opacity" => set(&mut p.opacity, on, 100.0),
+        "anchor" => set(&mut p.anchor, on, [0.0, 0.0]),
+        "tracking" => set(&mut p.tracking, on, 0.0),
+        "fill_color" => set(&mut p.fill_color, on, [1.0, 1.0, 1.0, 1.0]),
+        "stroke_color" => set(&mut p.stroke_color, on, [0.0, 0.0, 0.0, 1.0]),
+        "stroke_width" => set(&mut p.stroke_width, on, 0.0),
+        "blur" => set(&mut p.blur, on, 0.0),
+        "character_offset" => set(&mut p.character_offset, on, 0.0),
+        "position_z" => set(&mut p.position_z, on, 0.0),
+        "rotation_x" => set(&mut p.rotation_x, on, 0.0),
+        _ => {}
+    }
+}
+
 const CLEARANCES: [(Clearance, &str); 4] = [
     (Clearance::Unconfirmed, "未確認"),
     (Clearance::Cleared, "許諾済み"),
@@ -1812,93 +1871,49 @@ impl App {
                         }
                     });
                 }
+                // アニメーターは定型を選ぶのではなく、空のものを足して属性を選び、下の「テキストアニメーター」で値とキーを付ける
                 ui.horizontal_wrapped(|ui| {
-                    ui.menu_button("アニメーターを追加", |ui| {
-                        let range_in = |unit: SelectorUnit| match TextSelector::range() {
-                            TextSelector::Range { end, amount, shape, mode, randomize, seed, .. } => TextSelector::Range {
-                                start: Property::constant(0.0),
-                                end,
-                                // 0 秒 → 1 秒でオフセット 0 → 100%（先頭の文字から順に選択が外れる）
-                                offset: Property::constant(0.0).with_keys(vec![
-                                    Keyframe::linear(layer.in_point, 0.0),
-                                    Keyframe::linear(layer.in_point + Time::from_seconds(1.0), 100.0),
-                                ]),
-                                amount,
-                                unit,
-                                shape,
-                                mode,
-                                randomize,
-                                seed,
-                            },
-                            other => other,
-                        };
-                        let presets: [(&str, TextAnimator); 4] = [
-                            (
-                                "1 文字ずつ現れる",
-                                TextAnimator {
-                                    name: "出現".into(),
-                                    selectors: vec![range_in(SelectorUnit::Characters)],
-                                    props: AnimatorProps { opacity: Some(Property::constant(0.0)), ..Default::default() },
-                                },
-                            ),
-                            (
-                                "1 文字ずつ下から入る",
-                                TextAnimator {
-                                    name: "スライドイン".into(),
-                                    selectors: vec![range_in(SelectorUnit::Characters)],
-                                    props: AnimatorProps {
-                                        opacity: Some(Property::constant(0.0)),
-                                        position: Some(Property::constant([0.0, 60.0])),
-                                        ..Default::default()
-                                    },
-                                },
-                            ),
-                            (
-                                "単語ごとに拡大して入る",
-                                TextAnimator {
-                                    name: "ズームイン".into(),
-                                    selectors: vec![range_in(SelectorUnit::Words)],
-                                    props: AnimatorProps {
-                                        opacity: Some(Property::constant(0.0)),
-                                        scale: Some(Property::constant([250.0, 250.0])),
-                                        ..Default::default()
-                                    },
-                                },
-                            ),
-                            (
-                                "文字ごとに揺れる（ウィグリー）",
-                                TextAnimator {
-                                    name: "ウィグリー".into(),
-                                    selectors: vec![TextSelector::Wiggly {
-                                        max_amount: Property::constant(100.0),
-                                        min_amount: Property::constant(-100.0),
-                                        wiggles_per_second: Property::constant(4.0),
-                                        correlation: Property::constant(30.0),
-                                        unit: SelectorUnit::Characters,
-                                        mode: Default::default(),
-                                        seed: 1,
-                                    }],
-                                    props: AnimatorProps {
-                                        position: Some(Property::constant([0.0, 20.0])),
-                                        rotation: Some(Property::constant(8.0)),
-                                        ..Default::default()
-                                    },
-                                },
-                            ),
-                        ];
-                        for (label, anim) in presets {
-                            if ui.button(label).clicked() {
-                                ui.close_menu();
-                                self.edit_layer("アニメーター追加", false, &id, |l| {
-                                    if let LayerKind::Text { animators, .. } = &mut l.kind {
-                                        animators.push(anim);
-                                    }
-                                });
+                    if ui.button("＋ アニメーター").on_hover_text("文字ごとに動きを付けるアニメーターを足します。属性を選んでから、値やキーフレームを付けてください").clicked() {
+                        let name = format!("アニメーター {}", animators.len() + 1);
+                        self.edit_layer("アニメーター追加", false, &id, |l| {
+                            if let LayerKind::Text { animators, .. } = &mut l.kind {
+                                animators.push(TextAnimator { name, selectors: vec![TextSelector::range()], props: AnimatorProps::default() });
                             }
-                        }
-                    });
-                    for (i, a) in animators.iter().enumerate() {
+                        });
+                    }
+                });
+                for (i, a) in animators.iter().enumerate() {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(&a.name);
+                        ui.menu_button("属性", |ui| {
+                            for (key, label) in ANIMATOR_PROPS {
+                                let mut on = animator_prop_set(&a.props, key);
+                                if ui.checkbox(&mut on, label).changed() {
+                                    self.edit_layer("アニメーターの属性", false, &id, |l| {
+                                        if let LayerKind::Text { animators, .. } = &mut l.kind {
+                                            toggle_animator_prop(&mut animators[i].props, key, on);
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                        if let Some(TextSelector::Range { unit, .. }) = a.selectors.first() {
+                            let units = [(SelectorUnit::Characters, "文字ごと"), (SelectorUnit::Words, "単語ごと"), (SelectorUnit::Lines, "行ごと")];
+                            let current = units.iter().find(|(u, _)| u == unit).map(|(_, l)| *l).unwrap_or("");
+                            widgets::combo(ui, ("anim-unit", i), 0.0, current, units.len(), |ui, pick| {
+                                for (u, label) in units {
+                                    if pick.item(ui, u == *unit, label) {
+                                        self.edit_layer("アニメーターの単位", false, &id, |l| {
+                                            if let LayerKind::Text { animators, .. } = &mut l.kind {
+                                                if let Some(TextSelector::Range { unit, .. }) = animators[i].selectors.first_mut() {
+                                                    *unit = u;
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        }
                         if widgets::small_icon(ui, Icon::Close, false, "このアニメーターを削除").clicked() {
                             self.edit_layer("アニメーター削除", false, &id, |l| {
                                 if let LayerKind::Text { animators, .. } = &mut l.kind {
@@ -1906,8 +1921,8 @@ impl App {
                                 }
                             });
                         }
-                    }
-                });
+                    });
+                }
             }
             LayerKind::Shape { items } => {
                 ui.horizontal_wrapped(|ui| {
