@@ -836,7 +836,7 @@ impl App {
         let (first, last) = (view.start.floor() as i64, (view.start + view.span).ceil() as i64);
 
         // RAM プレビュー済みのフレーム
-        for f in self.engine.cached_frames(total, self.downsample) {
+        for f in self.engine.cached_frames(self.revision, total, self.downsample) {
             let x0 = view.x(f as f64);
             let x1 = view.x(f as f64 + 1.0).max(x0 + 1.0);
             p.rect_filled(Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.top() + 2.0)), 0.0, theme::CACHE);

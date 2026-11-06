@@ -1082,7 +1082,7 @@ impl App {
         // 現在フレームがキャッシュにあればテクスチャを差し替える。無ければ直前の絵を出し続ける。
         let key = (self.revision, self.frame, self.downsample);
         if self.shown != Some(key) {
-            if let Some(p) = self.engine.get(self.frame, self.downsample) {
+            if let Some(p) = self.engine.get(self.revision, self.frame, self.downsample) {
                 let image = channel_image(&p, self.channel);
                 match &mut self.texture {
                     Some(t) => t.set(image, egui::TextureOptions::LINEAR),
@@ -1155,7 +1155,7 @@ impl App {
             // ポインタの下の座標と色（情報パネル用）
             self.hover_info = resp.hover_pos().filter(|h| img.contains(*h)).and_then(|h| {
                 let pos = [((h.x - img.left()) / scale) as f64, ((h.y - img.top()) / scale) as f64];
-                let p = self.engine.get(self.frame, self.downsample)?;
+                let p = self.engine.get(self.revision, self.frame, self.downsample)?;
                 let (px, py) = (
                     ((pos[0] / comp.width as f64 * p.width as f64) as usize).min(p.width.saturating_sub(1)),
                     ((pos[1] / comp.height as f64 * p.height as f64) as usize).min(p.height.saturating_sub(1)),

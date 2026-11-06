@@ -753,7 +753,7 @@ impl App {
                     ui.painter().rect_stroke(r, 1.0, Stroke::new(1.0_f32, theme::LINE_HI));
                     ui.label(dim(format!("X{:>7.1} Y{:>7.1}", pos[0], pos[1])));
                 }
-                let cached = self.engine.cached_frames(total, self.downsample).len();
+                let cached = self.engine.cached_frames(self.revision, total, self.downsample).len();
                 ui.label(dim(format!("RAM {cached}/{total}"))).on_hover_text("RAM プレビュー済みのフレーム数");
                 if let Some((a, b)) = self.work_area {
                     let r = ui
@@ -763,7 +763,7 @@ impl App {
                         self.work_area = None;
                     }
                 }
-                if !self.engine.is_cached(self.frame, self.downsample) {
+                if !self.engine.is_cached(self.revision, self.frame, self.downsample) {
                     ui.label(egui::RichText::new("レンダリング中…").size(10.5).color(theme::TEXT_DIM));
                 }
             });
@@ -772,7 +772,7 @@ impl App {
 
     /// 表示中のフレーム（プレビュー解像度）を PNG で保存する。
     pub(crate) fn save_frame_image(&mut self) {
-        let Some(p) = self.engine.get(self.frame, self.downsample) else {
+        let Some(p) = self.engine.get(self.revision, self.frame, self.downsample) else {
             self.status = "このフレームはまだレンダリング中です".into();
             return;
         };

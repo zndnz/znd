@@ -148,11 +148,16 @@ impl PreviewEngine {
         cvar.notify_all();
     }
 
-    fn key(s: &mut Shared, frame: i64, downsample: u32) -> Option<u64> {
+    /// `revision` を渡すと、まだその版の指示を受け取っていない（古い版の指紋しか無い）ときは None を返す。
+    /// 編集した同じ画面更新の中でビューアが古い版の絵を「新しい版の絵」として拾ってしまうのを防ぐ。
+    fn key(s: &mut Shared, revision: Option<u64>, frame: i64, downsample: u32) -> Option<u64> {
+        let job = s.job.clone()?;
+        if revision.is_some_and(|r| r != job.revision) {
+            return None;
+        }
         if let Some(k) = s.keys.get(&(frame, downsample)) {
             return Some(*k);
         }
-        let job = s.job.clone()?;
         if job.downsample != downsample {
             return None;
         }
@@ -161,20 +166,21 @@ impl PreviewEngine {
         Some(k)
     }
 
-    pub fn get(&self, frame: i64, downsample: u32) -> Option<Arc<Preview>> {
+    /// 版 `revision` の、そのフレームの絵（まだできていなければ None）。
+    pub fn get(&self, revision: u64, frame: i64, downsample: u32) -> Option<Arc<Preview>> {
         let mut s = relock(&self.shared.0);
-        let k = Self::key(&mut s, frame, downsample)?;
+        let k = Self::key(&mut s, Some(revision), frame, downsample)?;
         s.cache.get(&k).cloned()
     }
 
-    pub fn is_cached(&self, frame: i64, downsample: u32) -> bool {
-        self.get(frame, downsample).is_some()
+    pub fn is_cached(&self, revision: u64, frame: i64, downsample: u32) -> bool {
+        self.get(revision, frame, downsample).is_some()
     }
 
     /// `frames` のうちキャッシュ済みのもの（タイムラインの緑のバー用）。
-    pub fn cached_frames(&self, total: i64, downsample: u32) -> Vec<i64> {
+    pub fn cached_frames(&self, revision: u64, total: i64, downsample: u32) -> Vec<i64> {
         let mut s = relock(&self.shared.0);
-        (0..total).filter(|f| Self::key(&mut s, *f, downsample).is_some_and(|k| s.cache.contains_key(&k))).collect()
+        (0..total).filter(|f| Self::key(&mut s, Some(revision), *f, downsample).is_some_and(|k| s.cache.contains_key(&k))).collect()
     }
 
     pub fn error(&self) -> Option<String> {
@@ -197,7 +203,7 @@ fn next_frames(s: &mut Shared, job: &Job, total: i64, batch: usize) -> Vec<(i64,
     let mut seen = HashSet::new();
     for d in 0..total {
         let f = (current + d) % total;
-        let Some(k) = PreviewEngine::key(s, f, job.downsample) else { break };
+        let Some(k) = PreviewEngine::key(s, None, f, job.downsample) else { break };
         // 同じ指紋（＝同じ絵）のフレームは 1 回だけレンダリングすればよい
         if s.cache.contains_key(&k) || s.failed.contains(&k) || !seen.insert(k) {
             continue;
