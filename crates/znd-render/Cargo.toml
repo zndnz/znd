@@ -10,6 +10,8 @@ znd-text.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 libloading = "0.8"
+# プラグイン（WebAssembly）をサンドボックスで動かす。WASI は入れない（ファイル・ネットワーク・プロセスに触れさせない）
+wasmtime = { version = "50.0.1", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation", "anyhow"] }
 libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
@@ -22,3 +24,4 @@ cc = "1"
 
 [dev-dependencies]
 znd-text.workspace = true
+wat = "1"

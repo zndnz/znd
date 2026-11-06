@@ -7,6 +7,9 @@ pub(crate) struct Prefs {
     /// 映像と音のずれの補正（ミリ秒）。正の値で映像を遅らせる（Bluetooth のイヤホンなど、音が遅れて聞こえる環境向け）。
     #[serde(default)]
     pub av_offset_ms: f64,
+    /// サンドボックスの外で動くネイティブのプラグイン（znd ABI・OpenFX）も読み込む。既定は false。
+    #[serde(default)]
+    pub allow_native_plugins: bool,
     /// イージングのお気に入り。
     #[serde(default)]
     pub ease_favorites: Vec<crate::easing::FavoriteEase>,

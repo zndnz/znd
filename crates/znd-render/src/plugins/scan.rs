@@ -417,6 +417,8 @@ const SCRIPT_DYN: &[&str] = &["eval(", "new function(", "function(\"", "settimeo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileKind {
+    /// WebAssembly。サンドボックスの中でしか動けない（ファイル・通信・プログラムの実行の手段を持たない）ので調べない。
+    Sandboxed,
     Binary,
     Script,
     /// マニフェスト・画像・文書など。URL だけ見る。
@@ -425,6 +427,9 @@ enum FileKind {
 
 fn classify(path: &Path, head: &[u8]) -> FileKind {
     let magic = head.get(..4).unwrap_or(&[]);
+    if magic == b"\0asm" {
+        return FileKind::Sandboxed;
+    }
     let is_macho = matches!(
         magic,
         [0xfe, 0xed, 0xfa, 0xce] | [0xfe, 0xed, 0xfa, 0xcf] | [0xce, 0xfa, 0xed, 0xfe] | [0xcf, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe]
@@ -585,6 +590,7 @@ fn finding(category: Category, score: u32, title: impl Into<String>, evidence: V
 
 fn scan_bytes(path: &Path, bytes: &[u8], declared: &Declared) -> FileScan {
     let kind = classify(path, bytes);
+    let sandboxed = kind == FileKind::Sandboxed;
     let mut fs = FileScan {
         findings: Vec::new(),
         endpoints: BTreeSet::new(),
@@ -597,6 +603,9 @@ fn scan_bytes(path: &Path, bytes: &[u8], declared: &Declared) -> FileScan {
         suspicious_host: false,
         kind,
     };
+    if sandboxed {
+        return fs;
+    }
     let text_owned;
     let strs: Vec<&str> = if kind == FileKind::Binary {
         strings(bytes)

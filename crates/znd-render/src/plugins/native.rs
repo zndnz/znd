@@ -107,20 +107,20 @@ pub struct AudioArgs {
     pub length: i64,
 }
 
-const PARAM_FLOAT: u32 = 0;
-const PARAM_BOOL: u32 = 1;
-const PARAM_CHOICE: u32 = 2;
-const PARAM_COLOR: u32 = 3;
-const PARAM_POINT: u32 = 4;
-const PARAM_TEXT: u32 = 5;
-const PARAM_LAYER: u32 = 6;
-const PARAM_PIXELS: u32 = 1;
-const EFFECT_TIME_DEPENDENT: u32 = 1;
-const EFFECT_THREAD_SAFE: u32 = 2;
-const EFFECT_AUDIO: u32 = 4;
-const EFFECT_READS_BELOW: u32 = 8;
+pub(crate) const PARAM_FLOAT: u32 = 0;
+pub(crate) const PARAM_BOOL: u32 = 1;
+pub(crate) const PARAM_CHOICE: u32 = 2;
+pub(crate) const PARAM_COLOR: u32 = 3;
+pub(crate) const PARAM_POINT: u32 = 4;
+pub(crate) const PARAM_TEXT: u32 = 5;
+pub(crate) const PARAM_LAYER: u32 = 6;
+pub(crate) const PARAM_PIXELS: u32 = 1;
+pub(crate) const EFFECT_TIME_DEPENDENT: u32 = 1;
+pub(crate) const EFFECT_THREAD_SAFE: u32 = 2;
+pub(crate) const EFFECT_AUDIO: u32 = 4;
+pub(crate) const EFFECT_READS_BELOW: u32 = 8;
 /// 出力画像の一辺の上限（誤った値で巨大な確保をしないため）。
-const MAX_SIDE: u32 = 16384;
+pub(crate) const MAX_SIDE: u32 = 16384;
 
 type DescribeFn = unsafe extern "C" fn() -> *const PluginDesc;
 type RenderFn = unsafe extern "C" fn(u32, *const RenderArgs) -> i32;
@@ -140,10 +140,10 @@ struct Lib {
 unsafe impl Send for Lib {}
 unsafe impl Sync for Lib {}
 
-struct Param {
-    name: String,
-    kind: u32,
-    pixels: bool,
+pub(crate) struct Param {
+    pub name: String,
+    pub kind: u32,
+    pub pixels: bool,
 }
 
 struct NativeEffect {
@@ -171,7 +171,7 @@ unsafe fn text(p: *const c_char) -> String {
     }
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
@@ -290,7 +290,7 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<dyn Effect>>, String> {
 }
 
 /// パラメータを ABI の並び（1 つあたり double 4 個 + 文字列 1 個）に詰める。
-fn pack(params: &[Param], p: &EvalParams, scale: f64, color: &dyn Fn([f64; 4]) -> [f64; 4]) -> (Vec<f64>, Vec<Option<CString>>) {
+pub(crate) fn pack(params: &[Param], p: &EvalParams, scale: f64, color: &dyn Fn([f64; 4]) -> [f64; 4]) -> (Vec<f64>, Vec<Option<CString>>) {
     let mut values = vec![0.0f64; params.len() * 4];
     let mut strings = Vec::with_capacity(params.len());
     for (param, v) in params.iter().zip(values.chunks_exact_mut(4)) {

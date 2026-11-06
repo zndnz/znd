@@ -346,6 +346,12 @@ pub fn export(
     if last <= first {
         return Err(MediaError::Invalid("書き出す範囲にフレームがありません".into()).into());
     }
+    // プラグインの書き出し形式の引数は、利用者が入力した値を含めてここでもう一度調べる
+    if let Format::Custom { video_args, audio_args, .. } = &settings.format {
+        for a in [video_args, audio_args] {
+            znd_render::plugins::hooks::check_ffmpeg_args(a).map_err(|e| MediaError::Invalid(format!("書き出し形式の引数: {e}")))?;
+        }
+    }
     let fr = comp.frame_rate;
     let (audio_only, single_frame) = match &settings.format {
         Format::Custom { audio_only, single_frame, .. } => (*audio_only, *single_frame),

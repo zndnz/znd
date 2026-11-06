@@ -9,8 +9,12 @@
 //! プロジェクトにはエフェクトの種類名とパラメータだけが保存される。プラグインが無い環境では
 //! そのエフェクトは何もせず（元の画像のまま）、`missing` で検出できる。
 //!
-//! プラグインはホストと同じプロセス・同じ権限で動く。信頼できるものだけを入れること。
-//! 読み込む前に `scan` で静的な安全性スキャンを行い、危険度が高いものは利用者が
+//! エフェクトの既定の形式は WebAssembly（`.wasm`、`wasm`）で、サンドボックスの中で動く。ファイル・ネットワーク・
+//! 別プログラムには触れられず、メモリと時間に上限があり、不具合を起こしてもアプリは止まらない。
+//!
+//! ネイティブのライブラリ（znd ABI 2/3 と OpenFX）はホストと同じプロセス・同じ権限で動き、何でもできてしまう。
+//! そのため既定では読み込まず、利用者が [`set_native_allowed`] で明示的に許可したときだけ読み込む。
+//! そのときも読み込む前に `scan` で静的な安全性スキャンを行い、危険度が高いものは利用者が
 //! 自己責任で許可（`trust`）するまで読み込まない。
 //!
 //! `plugin.json` を持つフォルダ（パッケージ、`package`）は、エフェクトに加えてコマンド・パネル・
@@ -23,6 +27,7 @@ pub mod ofx;
 pub mod package;
 pub mod scan;
 pub mod trust;
+pub mod wasm;
 
 pub use package::{Command, Package, PackageStatus, Panel};
 pub use scan::{RiskLevel, SecurityReport, DISCLAIMER};
@@ -31,6 +36,7 @@ use crate::effects::FxContext;
 use crate::frame::FrameBuf;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use znd_core::effect::EvalParams;
 use znd_core::Project;
@@ -39,13 +45,16 @@ use znd_core::Project;
 pub enum PluginApi {
     Native,
     OpenFx,
+    /// WebAssembly（サンドボックスで動く）。
+    Wasm,
 }
 
 impl PluginApi {
     pub fn label(self) -> &'static str {
         match self {
-            PluginApi::Native => "znd",
+            PluginApi::Native => "znd（ネイティブ）",
             PluginApi::OpenFx => "OpenFX",
+            PluginApi::Wasm => "znd（WASM・サンドボックス）",
         }
     }
 }
@@ -88,6 +97,24 @@ struct Registry {
     blocked: BTreeMap<PathBuf, SecurityReport>,
     packages: BTreeMap<PathBuf, Arc<Package>>,
 }
+
+static NATIVE_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// サンドボックスの外で動くネイティブのプラグイン（znd ABI 2/3・OpenFX）を読み込むか。既定は false。
+/// 環境変数 `ZND_ALLOW_NATIVE_PLUGINS=1` でも許可できる。
+pub fn native_allowed() -> bool {
+    NATIVE_ALLOWED.load(Ordering::Relaxed) || std::env::var("ZND_ALLOW_NATIVE_PLUGINS").is_ok_and(|v| v == "1")
+}
+
+/// ネイティブのプラグインの読み込みを許可する・やめる（次に読み込むものから効く）。
+pub fn set_native_allowed(on: bool) {
+    NATIVE_ALLOWED.store(on, Ordering::Relaxed);
+}
+
+/// ネイティブのプラグインを止めたときのエラー。
+pub const NATIVE_BLOCKED: &str = "サンドボックスの外で動くネイティブのプラグインは、既定では読み込みません\
+（ファイルの読み書きや通信など何でもできてしまうため）。WebAssembly 版を使うか、内容を確認したうえで\
+「ネイティブのプラグインを読み込む」を自己責任で許可してください";
 
 /// 読み込みを止めたときのエラーの先頭に付ける印。
 pub const BLOCKED_PREFIX: &str = "安全性スキャンで危険度";
@@ -142,6 +169,10 @@ pub fn user_plugin_dir() -> Option<PathBuf> {
 
 fn is_native_lib(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("dylib" | "so" | "dll"))
+}
+
+fn is_wasm(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("wasm")
 }
 
 fn is_ofx(path: &Path) -> bool {
@@ -203,8 +234,12 @@ pub(crate) fn load_unchecked(path: &Path) -> Result<Vec<PluginInfo>, String> {
     if let Some(prev) = registry().lock().unwrap().files.get(&key) {
         return prev.clone().map(|_| Vec::new());
     }
-    let result: Result<Vec<Arc<dyn Effect>>, String> = if is_ofx(path) {
+    let result: Result<Vec<Arc<dyn Effect>>, String> = if (is_ofx(path) || is_native_lib(path)) && !native_allowed() {
+        Err(NATIVE_BLOCKED.into())
+    } else if is_ofx(path) {
         ofx::load(path)
+    } else if is_wasm(path) {
+        wasm::load(path)
     } else if is_native_lib(path) {
         native::load(path)
     } else {
@@ -312,8 +347,24 @@ pub fn panels() -> Vec<Panel> {
 /// `plugin.json` のあるフォルダはパッケージとして読み込み、その中は個別に探さない。
 pub fn scan(dirs: &[PathBuf]) -> ScanReport {
     let mut report = ScanReport::default();
+    // WebAssembly のコンパイルは重いので、パッケージを順に読み込む前にまとめて並列でコンパイルしておく
+    let mut wasm_files = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if package::is_package(&p) {
+                if let Ok(m) = package::read_manifest(&p) {
+                    wasm_files.extend(m.effects.iter().filter_map(|rel| package::resolve_lib(&p, rel).ok()).filter(|f| is_wasm(f)));
+                }
+            } else if is_wasm(&p) {
+                wasm_files.push(p);
+            }
+        }
+    }
+    wasm::precompile(&wasm_files);
     let visit = |path: &Path, report: &mut ScanReport| {
-        if !(package::is_package(path) || is_ofx(path) || (is_native_lib(path) && path.is_file())) {
+        if !(package::is_package(path) || is_ofx(path) || ((is_native_lib(path) || is_wasm(path)) && path.is_file())) {
             return false;
         }
         match load_plugin_file(path) {

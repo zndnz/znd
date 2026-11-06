@@ -465,7 +465,11 @@ impl App {
             script: None,
             script_shot: None,
             // プラグインのエフェクトを、プロジェクトを開く前に使えるようにしておく
-            plugin_report: znd_render::plugins::scan_default().errors,
+            plugin_report: {
+                // ネイティブのプラグインは、利用者が許可していなければ読み込まない（WebAssembly はサンドボックスで動く）
+                znd_render::plugins::set_native_allowed(prefs::Prefs::load().allow_native_plugins);
+                znd_render::plugins::scan_default().errors
+            },
             plugins: Default::default(),
             recovery: None,
             plugin_crash: None,

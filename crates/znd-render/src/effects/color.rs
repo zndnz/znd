@@ -17,6 +17,17 @@ pub fn set_base_dir(dir: impl Into<PathBuf>) {
     *BASE_DIR.lock().unwrap() = Some(dir.into());
 }
 
+/// プロジェクトからの相対パスを解決する（絶対パスはそのまま）。
+pub(crate) fn resolve_path(p: &str) -> PathBuf {
+    let path = PathBuf::from(p);
+    if path.is_relative() {
+        if let Some(base) = BASE_DIR.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            return base.join(path);
+        }
+    }
+    path
+}
+
 pub struct Lut3d {
     pub size: usize,
     /// r が最も速く回る順（.cube の並び）。

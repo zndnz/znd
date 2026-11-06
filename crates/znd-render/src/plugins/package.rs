@@ -3,7 +3,8 @@
 //! エフェクトだけでなく、メニューのコマンド・パネル・ショートカット・ツールバーのボタン・
 //! 出力フィルター（レンダリングへの介入）・エクスプレッション用ライブラリをまとめて提供できる。
 //! スクリプト（JavaScript）は znd のスクリプト環境で動き、プロジェクトを読み書きできるが、
-//! ファイル・ネットワーク・別プログラムには触れない。ネイティブのライブラリは制限なく動く。
+//! ファイル・ネットワーク・別プログラムには触れない。エフェクトの WebAssembly もサンドボックスの中で動く。
+//! ネイティブのライブラリは制限なく動くので、既定では読み込まない（`super::native_allowed`）。
 //!
 //! 読み込む前にフォルダ全体を安全性スキャンにかけ、危険度が高いものは利用者が許可するまで読み込まない。
 //! スクリプトはスキャンした時点の中身をメモリに持ち、後からファイルが書き換えられても使わない。
@@ -32,7 +33,7 @@ pub struct Manifest {
     /// 必要とする権限の宣言（"network" / "process" / "filesystem"）。スキャン結果と突き合わせる。
     #[serde(default)]
     pub permissions: Vec<String>,
-    /// エフェクトのライブラリ（.dylib / .so / .dll / .ofx.bundle）。パッケージ内の相対パス。
+    /// エフェクトのライブラリ（.wasm。許可したときだけ .dylib / .so / .dll / .ofx.bundle も）。パッケージ内の相対パス。
     #[serde(default)]
     pub effects: Vec<String>,
     #[serde(default)]
@@ -199,12 +200,18 @@ pub fn resolve(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(dir.join(p))
 }
 
-/// エフェクトのライブラリのパスを解決する。拡張子を省いた `lib/fx` は、OS に合わせて
-/// `lib/fx.dylib` / `lib/libfx.dylib`（macOS）、`.so`（Linux）、`.dll`（Windows）を探す。
+/// エフェクトのライブラリのパスを解決する。拡張子を省いた `lib/fx` は、まずサンドボックスで動く
+/// `lib/fx.wasm` を、無ければ OS に合わせて `lib/fx.dylib` / `lib/libfx.dylib`（macOS）、`.so`（Linux）、
+/// `.dll`（Windows）を探す。
 pub fn resolve_lib(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     let p = resolve(dir, rel)?;
     if p.exists() {
         return Ok(p);
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let wasm = p.with_file_name(format!("{name}.wasm"));
+    if wasm.exists() {
+        return Ok(wasm);
     }
     let ext = if cfg!(target_os = "macos") {
         "dylib"
@@ -213,7 +220,6 @@ pub fn resolve_lib(dir: &Path, rel: &str) -> Result<PathBuf, String> {
     } else {
         "so"
     };
-    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let candidates = [p.with_file_name(format!("{name}.{ext}")), p.with_file_name(format!("lib{name}.{ext}"))];
     Ok(candidates.iter().find(|c| c.exists()).cloned().unwrap_or(p))
 }
@@ -290,11 +296,30 @@ pub(crate) fn activate(dir: &Path, manifest: Manifest, report: SecurityReport) -
         });
     }
     for e in &m.exporters {
-        // 出力先を引数で指定させない（書き出し先はホストが決める）
-        let bad = e.video_args.iter().chain(&e.audio_args).any(|a| a == "-i" || a == "-y" || a.starts_with("-filter_complex_script"));
         let ext_ok = !e.extension.is_empty() && e.extension.len() <= 16 && e.extension.chars().all(|c| c.is_ascii_alphanumeric());
-        if bad || !ext_ok || (e.audio_only && e.audio_args.is_empty()) {
-            pkg.warnings.push(format!("書き出し形式 {}: 引数か拡張子が不正です", e.id));
+        if !ext_ok || (e.audio_only && e.audio_args.is_empty()) {
+            pkg.warnings.push(format!("書き出し形式 {}: 拡張子か音声の引数が不正です", e.id));
+            continue;
+        }
+        // 引数はエンコードの設定だけ（書き出し先・入力はホストが決める）。既定値で展開したものを調べる
+        // （利用者が入力した値も、書き出すときにもう一度調べる）
+        let probe = hooks::Exporter {
+            key: String::new(),
+            plugin: String::new(),
+            label: String::new(),
+            extension: String::new(),
+            video_args: e.video_args.clone(),
+            audio_args: e.audio_args.clone(),
+            alpha: false,
+            even: false,
+            audio_only: false,
+            single_frame: false,
+            params: e.params.clone(),
+            description: String::new(),
+        };
+        let expanded = [probe.expand(&e.video_args, &Default::default()), probe.expand(&e.audio_args, &Default::default())];
+        if let Some(err) = expanded.iter().find_map(|a| hooks::check_ffmpeg_args(a).err()) {
+            pkg.warnings.push(format!("書き出し形式 {}: {err}", e.id));
             continue;
         }
         hooks::register_exporter(hooks::Exporter {

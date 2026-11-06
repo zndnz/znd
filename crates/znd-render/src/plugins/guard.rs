@@ -107,6 +107,16 @@ pub fn call<T>(kind: &str, fallback: impl FnOnce() -> T, f: impl FnOnce() -> T) 
     }
 }
 
+/// サンドボックスの中のプラグインがトラップした（範囲外アクセス・panic・時間切れなど）ことを記録し、
+/// このセッションの間止める（毎フレーム同じ失敗と時間切れを繰り返さないように）。
+pub(crate) fn report_error(kind: &str, msg: &str) {
+    lock(quarantine()).insert(kind.to_string());
+    let mut list = lock(fault_list());
+    if !list.iter().any(|(k, _)| k == kind) {
+        list.push((kind.to_string(), format!("プラグインの中でエラーが起きたため、このセッションの間は止めました: {msg}")));
+    }
+}
+
 /// 異常終了の記録ファイル。`ZND_CONFIG_DIR` があればその中。
 pub fn crash_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("plugin-crash.txt"))

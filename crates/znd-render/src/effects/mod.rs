@@ -7,7 +7,7 @@
 //! 既存ツールと同じ感覚で効くようにするため。
 
 mod blur;
-mod color;
+pub(crate) mod color;
 mod distort;
 mod generate;
 mod keying;

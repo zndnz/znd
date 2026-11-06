@@ -25,6 +25,8 @@ fn root() -> PathBuf {
 fn out_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
+        // ネイティブ（znd ABI・OpenFX）のプラグインは既定では読み込まないので、このテストでは明示的に許可する
+        plugins::set_native_allowed(true);
         let d = std::env::temp_dir().join(format!("znd-plugins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

@@ -612,10 +612,10 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button("プラグインを読み込む…")
-                .on_hover_text("ライブラリ（.dylib / .so / .dll / .ofx）を選びます。この起動の間だけ使えます。常に使うにはプラグインフォルダに置いてください")
+                .on_hover_text("エフェクトの WebAssembly（.wasm）を選びます（許可していればネイティブのライブラリも）。この起動の間だけ使えます。常に使うにはプラグインフォルダに置いてください")
                 .clicked()
             {
-                let picked = rfd::FileDialog::new().add_filter("プラグイン", &["dylib", "so", "dll", "ofx", "bundle"]).pick_file();
+                let picked = rfd::FileDialog::new().add_filter("プラグイン", &["wasm", "dylib", "so", "dll", "ofx", "bundle"]).pick_file();
                 if let Some(path) = picked {
                     self.load_plugin_path(&path);
                 }
@@ -685,7 +685,41 @@ impl App {
         });
     }
 
+    /// サンドボックスの説明と、ネイティブのプラグインを許可するかの設定。
+    fn plugin_sandbox_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new(
+                "エフェクトのプラグイン（WebAssembly）はサンドボックスの中で動き、ファイル・ネットワーク・別のプログラムには触れられません。\
+                 スクリプト（コマンド・パネル）も、ファイルは利用者がダイアログで選んだものだけを扱えます。",
+            )
+            .size(10.5)
+            .color(theme::TEXT_DIM),
+        );
+        let mut native = self.prefs.allow_native_plugins;
+        let r = ui
+            .checkbox(&mut native, "サンドボックスの外で動くネイティブのプラグイン（.dylib / .so / .dll / OpenFX）も読み込む")
+            .on_hover_text("ネイティブのプラグインはアプリと同じ権限で動き、ファイルの読み書きや通信など何でもできてしまいます。入手元を信頼できるものだけにしてください。変更は次の起動（または再走査）から効きます");
+        if r.changed() {
+            self.prefs.allow_native_plugins = native;
+            plugins::set_native_allowed(native);
+            if let Err(e) = self.prefs.save() {
+                self.status = format!("設定を保存できません: {e}");
+            } else {
+                self.status = if native {
+                    "ネイティブのプラグインを許可しました（自己責任）。再走査すると読み込みます".into()
+                } else {
+                    "ネイティブのプラグインを止めました。次の起動から読み込みません".into()
+                };
+            }
+        }
+        if native {
+            ui.colored_label(theme::WARN, "ネイティブのプラグインを許可しています。信頼できるものだけを入れてください。");
+        }
+        ui.separator();
+    }
+
     fn plugin_lists(&mut self, ui: &mut egui::Ui) {
+        self.plugin_sandbox_settings(ui);
         // 無効にしたもの・不具合で止めたもの
         let disabled = plugins::guard::disabled();
         let faults = plugins::guard::faults();
