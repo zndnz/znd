@@ -177,8 +177,8 @@ impl App {
     // ---------- 左: プロジェクト ----------
 
     fn project_items(&self, shared: &Project) -> Vec<Item> {
-        let search = self.project_search.trim().to_lowercase();
-        let keep = |name: &str| search.is_empty() || name.to_lowercase().contains(&search);
+        let search = self.project_search.trim().to_string();
+        let keep = |name: &str| widgets::matches(&search, name);
         let mut items = Vec::new();
         for c in shared.compositions.iter().filter(|c| keep(&c.name)) {
             items.push(Item {
@@ -483,7 +483,7 @@ impl App {
             let w = ui.available_width() - 22.0;
             widgets::search_box(ui, &mut self.fx_search, "エフェクトを検索", w);
         });
-        let search = self.fx_search.trim().to_lowercase();
+        let search = self.fx_search.trim().to_string();
         let effects = all_effects();
         let mut categories: Vec<&str> = Vec::new();
         for d in &effects {
@@ -494,7 +494,7 @@ impl App {
         let mut add = None;
         for cat in categories {
             let found: Vec<_> =
-                effects.iter().filter(|d| d.category == cat && (search.is_empty() || d.label.to_lowercase().contains(&search))).collect();
+                effects.iter().filter(|d| d.category == cat && widgets::matches(&search, &format!("{} {}", d.label, d.category))).collect();
             if found.is_empty() {
                 continue;
             }
@@ -681,22 +681,22 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             let zoom_label = if self.zoom <= 0.0 { "全体表示".to_string() } else { format!("{:.0}%", self.zoom * 100.0) };
-            egui::ComboBox::from_id_salt("zoom").width(64.0).selected_text(zoom_label).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.zoom, 0.0, "全体表示");
+            widgets::combo(ui, "zoom", 64.0, zoom_label, 6, |ui, pick| {
+                pick.value(ui, &mut self.zoom, 0.0, "全体表示");
                 for z in [0.25, 0.5, 1.0, 2.0, 4.0] {
-                    ui.selectable_value(&mut self.zoom, z, format!("{:.0}%", z * 100.0));
+                    pick.value(ui, &mut self.zoom, z, format!("{:.0}%", z * 100.0));
                 }
             });
-            egui::ComboBox::from_id_salt("resolution").width(48.0).selected_text(resolution_label(self.downsample)).show_ui(ui, |ui| {
+            widgets::combo(ui, "resolution", 48.0, resolution_label(self.downsample), 3, |ui, pick| {
                 for ds in [1, 2, 4] {
-                    ui.selectable_value(&mut self.downsample, ds, resolution_label(ds));
+                    pick.value(ui, &mut self.downsample, ds, resolution_label(ds));
                 }
             });
             const CHANNELS: [&str; 5] = ["RGB", "赤", "緑", "青", "輝度"];
             let before = self.channel;
-            egui::ComboBox::from_id_salt("channel").width(48.0).selected_text(CHANNELS[self.channel as usize % 5]).show_ui(ui, |ui| {
+            widgets::combo(ui, "channel", 48.0, CHANNELS[self.channel as usize % 5], CHANNELS.len(), |ui, pick| {
                 for (i, name) in CHANNELS.iter().enumerate() {
-                    ui.selectable_value(&mut self.channel, i as u8, *name);
+                    pick.value(ui, &mut self.channel, i as u8, *name);
                 }
             });
             if before != self.channel {

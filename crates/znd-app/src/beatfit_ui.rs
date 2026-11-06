@@ -1,6 +1,6 @@
 //! 「ビートに合わせる」ウィンドウ（レイヤーの自動配置・パルス）と、映像と音のずれの確認・補正。
 
-use crate::{base_dir, theme, App};
+use crate::{base_dir, theme, widgets, App};
 use eframe::egui;
 use znd_core::beatfit::{self, BeatSource, StampMode};
 use znd_core::*;
@@ -59,9 +59,9 @@ impl App {
         let layer = self.selected.as_ref().and_then(|id| comp.layer(id)).cloned();
         egui::Grid::new("beat-src").num_columns(2).show(ui, |ui| {
             ui.label("ビート");
-            egui::ComboBox::from_id_salt("beat-source").selected_text(SOURCES[self.beat_ui.source]).show_ui(ui, |ui| {
+            widgets::combo(ui, "beat-source", 0.0, SOURCES[self.beat_ui.source], SOURCES.len(), |ui, pick| {
                 for (i, s) in SOURCES.iter().enumerate() {
-                    ui.selectable_value(&mut self.beat_ui.source, i, *s);
+                    pick.value(ui, &mut self.beat_ui.source, i, *s);
                 }
             });
             ui.end_row();

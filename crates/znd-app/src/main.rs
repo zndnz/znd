@@ -2,6 +2,7 @@
 
 mod audio;
 mod beatfit_ui;
+mod font_preview;
 mod icons;
 mod keymap;
 mod keyops;
@@ -233,6 +234,8 @@ pub struct App {
     /// `project` のスナップショット。UI の読み取りとレンダースレッドが共有する。
     shared: Arc<Project>,
     revision: u64,
+    /// フォントの選択欄に出す見本の画像。
+    pub(crate) font_previews: font_preview::FontPreviews,
     path: Option<PathBuf>,
     dirty: bool,
     unsaved_since_autosave: bool,
@@ -372,6 +375,7 @@ impl App {
             project: demo_project(),
             shared: Arc::new(demo_project()),
             revision: 0,
+            font_previews: Default::default(),
             path: None,
             dirty: false,
             unsaved_since_autosave: false,

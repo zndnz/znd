@@ -2,7 +2,7 @@
 
 use crate::panels::{apply_edit, path_label, KeyKind, PropEdit};
 use crate::timeline::KeySel;
-use crate::{base_dir, unix_now, App, Task};
+use crate::{base_dir, unix_now, widgets, App, Task};
 use eframe::egui::{self, pos2, Color32, Sense, Stroke};
 use znd_core::keys;
 use znd_core::visit::find_prop;
@@ -255,17 +255,15 @@ impl App {
                 Some(i) => format!("{}（プラグイン）", exporters[i].label),
                 None => FORMATS[e.format].to_string(),
             };
-            egui::ComboBox::from_id_salt("format").width(330.0).selected_text(current).show_ui(ui, |ui| {
+            widgets::combo(ui, "format", 330.0, current, FORMATS.len() + exporters.len(), |ui, pick| {
                 for (i, f) in FORMATS.iter().enumerate() {
-                    ui.selectable_value(&mut e.format, i, *f);
+                    pick.value(ui, &mut e.format, i, *f);
                 }
                 if !exporters.is_empty() {
-                    ui.separator();
-                    ui.weak("プラグイン");
+                    pick.heading(ui, "プラグイン");
                     for (i, ex) in exporters.iter().enumerate() {
-                        let r = ui.selectable_value(&mut e.format, FORMATS.len() + i, &ex.label);
-                        if !ex.description.is_empty() {
-                            r.on_hover_text(&ex.description);
+                        if pick.item_tip(ui, e.format == FORMATS.len() + i, &ex.label, &ex.description) {
+                            e.format = FORMATS.len() + i;
                         }
                     }
                 }
@@ -280,9 +278,9 @@ impl App {
                             "choice" => {
                                 let choices = p.choices();
                                 let shown = choices.iter().find(|c| c.1 == *v).map(|c| c.0.clone()).unwrap_or_else(|| v.clone());
-                                egui::ComboBox::from_id_salt(("pexp", &p.id)).selected_text(shown).show_ui(ui, |ui| {
+                                widgets::combo(ui, ("pexp", &p.id), 0.0, shown, choices.len(), |ui, pick| {
                                     for (label, value) in &choices {
-                                        if ui.selectable_label(v == value, label).clicked() {
+                                        if pick.item(ui, v == value, label) {
                                             *v = value.clone();
                                         }
                                     }
@@ -856,9 +854,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("プリセット");
             let mut preset = self.keymap.preset;
-            egui::ComboBox::from_id_salt("km-preset").selected_text(preset.label()).show_ui(ui, |ui| {
+            widgets::combo(ui, "km-preset", 0.0, preset.label(), Preset::ALL.len(), |ui, pick| {
                 for p in Preset::ALL {
-                    ui.selectable_value(&mut preset, p, p.label());
+                    pick.value(ui, &mut preset, p, p.label());
                 }
             });
             if preset != self.keymap.preset {

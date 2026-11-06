@@ -1,7 +1,7 @@
 //! プラグインパッケージの画面側: メニュー・ツールバー・レイヤーの右クリック・ショートカットへのコマンドの配置、
 //! スクリプトで組み立てるパネル、出力フィルターの切り替え、安全性スキャンの結果の表示と自己責任での許可。
 
-use crate::{theme, App};
+use crate::{theme, widgets, App};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -1015,9 +1015,9 @@ fn panel_item(ui: &mut egui::Ui, item: &Value, events: &mut Vec<(String, Value)>
             let cur = num(item, "value", 0.0).max(0.0) as usize;
             ui.horizontal(|ui| {
                 ui.label(label);
-                egui::ComboBox::from_id_salt(("plugin-choice", &id)).selected_text(options.get(cur).cloned().unwrap_or_default()).show_ui(ui, |ui| {
+                widgets::combo(ui, ("plugin-choice", &id), 0.0, options.get(cur).cloned().unwrap_or_default(), options.len(), |ui, pick| {
                     for (i, o) in options.iter().enumerate() {
-                        if ui.selectable_label(i == cur, o).clicked() && i != cur {
+                        if pick.item(ui, i == cur, o) && i != cur {
                             events.push((id.clone(), json!(i)));
                         }
                     }

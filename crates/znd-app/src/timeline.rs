@@ -426,7 +426,7 @@ impl App {
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(&mut rows_ui, |ui| {
                 for (index, layer) in comp.layers.iter().enumerate() {
-                    if (self.hide_shy && layer.shy) || (!search.is_empty() && !layer.name.to_lowercase().contains(&search)) {
+                    if (self.hide_shy && layer.shy) || !widgets::matches(&search, &layer.name) {
                         continue;
                     }
                     let row = self.layer_row(ui, comp, layer, index + 1, view, geo);
@@ -1347,9 +1347,9 @@ impl App {
         }
 
         // モード・トラックマット・親
-        widgets::cell_menu(ui, geo.cell(geo.mode(), MODE_W, rect), rid.with("mode"), layer.blend_mode.label_ja(), |ui| {
+        widgets::cell_menu(ui, geo.cell(geo.mode(), MODE_W, rect), rid.with("mode"), layer.blend_mode.label_ja(), BlendMode::ALL.len(), |ui, pick| {
             for mode in BlendMode::ALL {
-                if ui.selectable_label(mode == layer.blend_mode, mode.label_ja()).clicked() {
+                if pick.item(ui, mode == layer.blend_mode, mode.label_ja()) {
                     self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
                 }
             }
@@ -1357,12 +1357,12 @@ impl App {
         let name_of = |lid: &LayerId| comp.layer(lid).map(|l| l.name.clone()).unwrap_or_else(|| "（不明）".into());
         if geo.show_matte {
             let text = layer.track_matte.as_ref().map(|m| name_of(&m.layer)).unwrap_or_else(|| "なし".into());
-            widgets::cell_menu(ui, geo.cell(geo.matte(), MATTE_W, rect), rid.with("matte"), &text, |ui| {
-                if ui.selectable_label(layer.track_matte.is_none(), "なし").clicked() {
+            widgets::cell_menu(ui, geo.cell(geo.matte(), MATTE_W, rect), rid.with("matte"), &text, comp.layers.len(), |ui, pick| {
+                if pick.item(ui, layer.track_matte.is_none(), "なし") {
                     self.edit_layer("トラックマット", false, &id, |l| l.track_matte = None);
                 }
                 for o in comp.layers.iter().filter(|l| l.id != id) {
-                    if ui.selectable_label(layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name).clicked() {
+                    if pick.item(ui, layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name) {
                         let mode = layer.track_matte.as_ref().map(|m| m.mode).unwrap_or(MatteMode::Alpha);
                         let mid = o.id.clone();
                         self.edit_layer("トラックマット", false, &id, |l| l.track_matte = Some(TrackMatte { layer: mid, mode }));
@@ -1372,12 +1372,12 @@ impl App {
         }
         if geo.show_parent {
             let text = layer.parent.as_ref().map(&name_of).unwrap_or_else(|| "なし".into());
-            widgets::cell_menu(ui, geo.cell(geo.parent(), PARENT_W, rect), rid.with("parent"), &text, |ui| {
-                if ui.selectable_label(layer.parent.is_none(), "なし").clicked() {
+            widgets::cell_menu(ui, geo.cell(geo.parent(), PARENT_W, rect), rid.with("parent"), &text, comp.layers.len(), |ui, pick| {
+                if pick.item(ui, layer.parent.is_none(), "なし") {
                     self.set_parent(&id, None);
                 }
                 for o in comp.layers.iter().filter(|l| l.id != id) {
-                    if ui.selectable_label(layer.parent.as_ref() == Some(&o.id), &o.name).clicked() {
+                    if pick.item(ui, layer.parent.as_ref() == Some(&o.id), &o.name) {
                         self.set_parent(&id, Some(o.id.clone()));
                     }
                 }

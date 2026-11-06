@@ -2,7 +2,7 @@
 
 use crate::icons::{self, Icon};
 use crate::{base_dir, theme, widgets, App, Task};
-use eframe::egui;
+use eframe::egui::{self, pos2, vec2, Align2, FontId};
 use std::sync::OnceLock;
 use znd_audio::analysis::{band_keyframes, detect_onsets, Band};
 use znd_audio::Mixer;
@@ -338,9 +338,20 @@ pub(crate) fn value_widgets(ui: &mut egui::Ui, row: &Row, rtl: bool) -> Option<P
     changed.then_some(PropEdit::Set(vals))
 }
 
-fn font_list() -> &'static Vec<String> {
-    static LIST: OnceLock<Vec<String>> = OnceLock::new();
-    LIST.get_or_init(znd_text::font_families)
+/// フォントのファミリー名と、検索に使う文字列（ファミリー名と日本語名などの別名）。
+fn font_list() -> &'static Vec<(String, String)> {
+    static LIST: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    LIST.get_or_init(|| {
+        znd_text::font_families_with_aliases()
+            .into_iter()
+            // 「.」で始まるのは OS が内部で使うフォント（macOS）なので一覧に出さない
+            .filter(|(f, _)| !f.starts_with('.'))
+            .map(|(f, aliases)| {
+                let keys = std::iter::once(f.clone()).chain(aliases).collect::<Vec<_>>().join(" ");
+                (f, keys)
+            })
+            .collect()
+    })
 }
 
 const CLEARANCES: [(Clearance, &str); 4] = [
@@ -658,6 +669,25 @@ impl App {
             ui.separator();
         }
         let effects = all_effects();
+        // 検索中は分類をたどらずに、一致したものを並べる
+        let mut pick = widgets::pick_search(ui, ui.make_persistent_id("effect-menu"), effects.len());
+        if pick.searching() {
+            let found: Vec<_> = effects.iter().filter(|d| pick.matches(&format!("{} {}", d.label, d.category))).collect();
+            if found.is_empty() {
+                ui.weak("一致するエフェクトがありません");
+            }
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for def in found {
+                    let enter = pick.take_enter();
+                    let r = ui.button(def.label).on_hover_text(def.category);
+                    if r.clicked() || enter {
+                        ui.close_menu();
+                        self.add_effect(def.kind);
+                    }
+                }
+            });
+            return;
+        }
         let mut categories: Vec<&str> = Vec::new();
         for d in &effects {
             if !categories.contains(&d.category) {
@@ -1124,9 +1154,9 @@ impl App {
                     c.height = h;
                 });
             }
-            egui::ComboBox::from_id_salt("fps").selected_text(format!("{:.3} fps", comp.frame_rate.fps())).show_ui(ui, |ui| {
+            widgets::combo(ui, "fps", 0.0, format!("{:.3} fps", comp.frame_rate.fps()), FrameRate::PRESETS.len(), |ui, pick| {
                 for fr in FrameRate::PRESETS {
-                    if ui.selectable_label(fr == comp.frame_rate, format!("{:.3}", fr.fps())).clicked() {
+                    if pick.item(ui, fr == comp.frame_rate, format!("{:.3}", fr.fps())) {
                         self.edit_comp("フレームレート", false, |c| c.frame_rate = fr);
                     }
                 }
@@ -1201,15 +1231,13 @@ impl App {
             if ui.checkbox(&mut linear, "リニアライト合成").changed() {
                 self.edit("合成設定", false, |p| p.settings.linear_blending = linear);
             }
-            egui::ComboBox::from_id_salt("depth")
-                .selected_text(match s.bit_depth {
+            widgets::combo(ui, "depth", 0.0, match s.bit_depth {
                     BitDepth::B8 => "8bpc",
                     BitDepth::B16 => "16bpc",
                     BitDepth::F32 => "32bpc",
-                })
-                .show_ui(ui, |ui| {
+                }, 3, |ui, pick| {
                     for (d, label) in [(BitDepth::B8, "8bpc"), (BitDepth::B16, "16bpc"), (BitDepth::F32, "32bpc（浮動小数）")] {
-                        if ui.selectable_label(d == s.bit_depth, label).clicked() {
+                        if pick.item(ui, d == s.bit_depth, label) {
                             self.edit("色深度", false, |p| p.settings.bit_depth = d);
                         }
                     }
@@ -1224,17 +1252,17 @@ impl App {
         let name_of = |c: ColorSpace| SPACES.iter().find(|(s, _)| *s == c).map(|(_, n)| *n).unwrap_or("");
         ui.horizontal_wrapped(|ui| {
             ui.label("作業色空間");
-            egui::ComboBox::from_id_salt("working").selected_text(name_of(s.working_space)).show_ui(ui, |ui| {
+            widgets::combo(ui, "working", 0.0, name_of(s.working_space), SPACES.len(), |ui, pick| {
                 for (space, label) in SPACES {
-                    if ui.selectable_label(space == s.working_space, label).clicked() {
+                    if pick.item(ui, space == s.working_space, label) {
                         self.edit("作業色空間", false, |p| p.settings.working_space = space);
                     }
                 }
             });
             ui.label("出力");
-            egui::ComboBox::from_id_salt("output").selected_text(name_of(s.output_space)).show_ui(ui, |ui| {
+            widgets::combo(ui, "output", 0.0, name_of(s.output_space), SPACES.len(), |ui, pick| {
                 for (space, label) in SPACES {
-                    if ui.selectable_label(space == s.output_space, label).clicked() {
+                    if pick.item(ui, space == s.output_space, label) {
                         self.edit("出力色空間", false, |p| p.settings.output_space = space);
                     }
                 }
@@ -1287,9 +1315,9 @@ impl App {
             ] {
                 ui.label(label);
                 let current = CLEARANCES.iter().find(|(c, _)| c == field).map(|(_, l)| *l).unwrap_or("");
-                egui::ComboBox::from_id_salt(label).selected_text(current).show_ui(ui, |ui| {
+                widgets::combo(ui, label, 0.0, current, CLEARANCES.len(), |ui, pick| {
                     for (c, l) in CLEARANCES {
-                        if ui.selectable_label(*field == c, l).clicked() {
+                        if pick.item(ui, *field == c, l) {
                             *field = c;
                             changed = true;
                         }
@@ -1488,9 +1516,9 @@ impl App {
                 self.kind_panel(ui, layer);
                 ui.horizontal(|ui| {
                     ui.label("描画モード");
-                    egui::ComboBox::from_id_salt("blend").selected_text(layer.blend_mode.label_ja()).show_ui(ui, |ui| {
+                    widgets::combo(ui, "blend", 0.0, layer.blend_mode.label_ja(), BlendMode::ALL.len(), |ui, pick| {
                         for mode in BlendMode::ALL {
-                            if ui.selectable_label(mode == layer.blend_mode, mode.label_ja()).clicked() {
+                            if pick.item(ui, mode == layer.blend_mode, mode.label_ja()) {
                                 self.edit_layer("描画モード", false, &id, |l| l.blend_mode = mode);
                             }
                         }
@@ -1501,12 +1529,12 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("親");
                     let current = layer.parent.as_ref().map(&name_of).unwrap_or_else(|| "なし".into());
-                    egui::ComboBox::from_id_salt("parent").selected_text(current).show_ui(ui, |ui| {
-                        if ui.selectable_label(layer.parent.is_none(), "なし").clicked() {
+                    widgets::combo(ui, "parent", 0.0, current, others.len() + 1, |ui, pick| {
+                        if pick.item(ui, layer.parent.is_none(), "なし") {
                             self.edit_layer("親", false, &id, |l| l.parent = None);
                         }
                         for o in &others {
-                            if ui.selectable_label(layer.parent.as_ref() == Some(&o.id), &o.name).clicked() {
+                            if pick.item(ui, layer.parent.as_ref() == Some(&o.id), &o.name) {
                                 let pid = o.id.clone();
                                 self.edit_layer("親", false, &id, |l| l.parent = Some(pid));
                                 if !self.project.validate().is_empty() {
@@ -1519,12 +1547,12 @@ impl App {
                     });
                     ui.label("マット");
                     let current = layer.track_matte.as_ref().map(|m| name_of(&m.layer)).unwrap_or_else(|| "なし".into());
-                    egui::ComboBox::from_id_salt("matte").selected_text(current).show_ui(ui, |ui| {
-                        if ui.selectable_label(layer.track_matte.is_none(), "なし").clicked() {
+                    widgets::combo(ui, "matte", 0.0, current, others.len() + 1, |ui, pick| {
+                        if pick.item(ui, layer.track_matte.is_none(), "なし") {
                             self.edit_layer("トラックマット", false, &id, |l| l.track_matte = None);
                         }
                         for o in &others {
-                            if ui.selectable_label(layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name).clicked() {
+                            if pick.item(ui, layer.track_matte.as_ref().is_some_and(|m| m.layer == o.id), &o.name) {
                                 let mode = layer.track_matte.as_ref().map(|m| m.mode).unwrap_or(MatteMode::Alpha);
                                 let mid = o.id.clone();
                                 self.edit_layer("トラックマット", false, &id, |l| {
@@ -1541,9 +1569,9 @@ impl App {
                             (MatteMode::LumaInverted, "ルミナンス反転"),
                         ];
                         let label = MODES.iter().find(|(mode, _)| *mode == m.mode).map(|(_, l)| *l).unwrap_or("");
-                        egui::ComboBox::from_id_salt("matte-mode").selected_text(label).show_ui(ui, |ui| {
+                        widgets::combo(ui, "matte-mode", 0.0, label, MODES.len(), |ui, pick| {
                             for (mode, label) in MODES {
-                                if ui.selectable_label(mode == m.mode, label).clicked() {
+                                if pick.item(ui, mode == m.mode, label) {
                                     self.edit_layer("マットモード", false, &id, |l| {
                                         if let Some(tm) = &mut l.track_matte {
                                             tm.mode = mode;
@@ -1605,20 +1633,16 @@ impl App {
                         {
                             self.edit_layer("再生速度", true, &id, |l| l.speed = speed / 100.0);
                         }
-                        egui::ComboBox::from_id_salt("hold")
-                            .selected_text(if layer.hold_frames <= 1 {
+                        widgets::combo(ui, "hold", 0.0, if layer.hold_frames <= 1 {
                                 "コマ打ちなし".to_string()
                             } else {
                                 format!("{} コマ打ち", layer.hold_frames)
-                            })
-                            .show_ui(ui, |ui| {
+                            }, 5, |ui, pick| {
                                 for n in [1u32, 2, 3, 4, 6] {
-                                    if ui
-                                        .selectable_label(
+                                    if pick.item(ui, 
                                             layer.hold_frames == n,
                                             if n == 1 { "コマ打ちなし".to_string() } else { format!("{n} コマ打ち") },
                                         )
-                                        .clicked()
                                     {
                                         self.edit_layer("コマ打ち", false, &id, |l| l.hold_frames = n);
                                     }
@@ -1706,18 +1730,39 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     let current =
                         if doc.font_family.is_empty() { "（既定のフォント）".to_string() } else { doc.font_family.clone() };
-                    egui::ComboBox::from_id_salt("font").width(150.0).selected_text(current).show_ui(ui, |ui| {
-                        if ui.selectable_label(doc.font_family.is_empty(), "（既定のフォント）").clicked() {
-                            doc.font_family.clear();
-                            changed = true;
-                        }
-                        for f in font_list() {
-                            if ui.selectable_label(&doc.font_family == f, f).clicked() {
-                                doc.font_family = f.clone();
+                    // 一覧の各行に、本文をそのフォントで描いた見本を出す
+                    let sample = crate::font_preview::sample_of(&doc.text);
+                    let previews = &mut self.font_previews;
+                    let fonts = font_list();
+                    widgets::combo(ui, "font", 150.0, current, fonts.len() + 1, |ui, pick| {
+                        let ctx = ui.ctx().clone();
+                        for (family, label, keys) in std::iter::once(("", "（既定のフォント）", "（既定のフォント）")).chain(fonts.iter().map(|(f, k)| (f.as_str(), f.as_str(), k.as_str()))) {
+                            let selected = doc.font_family == family;
+                            let mut row = |p: &egui::Painter, rect: egui::Rect| {
+                                let color = if selected { egui::Color32::WHITE } else { theme::TEXT };
+                                p.text(rect.left_top() + vec2(6.0, 3.0), Align2::LEFT_TOP, label, FontId::proportional(10.0), theme::TEXT_DIM);
+                                // （custom は見えている行でだけ描くので、見本も見えている行の分だけ作られる）
+                                let h = 22.0;
+                                let ppp = ctx.pixels_per_point();
+                                match previews.get(&ctx, family, &sample, h * ppp) {
+                                    Some(tex) => {
+                                        let size = tex.size_vec2() / ppp;
+                                        let r = egui::Rect::from_min_size(pos2(rect.left() + 6.0, rect.top() + 15.0), size);
+                                        let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                                        p.image(tex.id(), r, uv, color);
+                                    }
+                                    None => {
+                                        p.text(pos2(rect.left() + 6.0, rect.top() + 26.0), Align2::LEFT_CENTER, "…", FontId::proportional(11.0), theme::TEXT_DIM);
+                                    }
+                                }
+                            };
+                            if pick.custom(ui, selected, keys, 40.0, &mut row) {
+                                doc.font_family = family.to_string();
                                 changed = true;
                             }
                         }
-                    });
+                    })
+                    .on_hover_text(if doc.font_family.is_empty() { "既定のフォント" } else { doc.font_family.as_str() });
                     changed |= ui.add(egui::DragValue::new(&mut doc.size).range(1.0..=2000.0).suffix(" px")).changed();
                     changed |= ui.add(egui::DragValue::new(&mut doc.weight).range(100..=900).speed(100.0).prefix("太さ ")).changed();
                 });
@@ -1965,9 +2010,9 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(format!("マスク {}", i + 1));
                 let label = MODES.iter().find(|(m, _)| *m == mask.mode).map(|(_, l)| *l).unwrap_or("");
-                egui::ComboBox::from_id_salt(("mask-mode", i)).selected_text(label).show_ui(ui, |ui| {
+                widgets::combo(ui, ("mask-mode", i), 0.0, label, MODES.len(), |ui, pick| {
                     for (mode, label) in MODES {
-                        if ui.selectable_label(mode == mask.mode, label).clicked() {
+                        if pick.item(ui, mode == mask.mode, label) {
                             self.edit_layer("マスクモード", false, &id, |l| l.masks[i].mode = mode);
                         }
                     }
@@ -2087,11 +2132,9 @@ impl App {
                     (Pd::I(_, labels), Some(ParamValue::Choice(v))) => {
                         ui.horizontal(|ui| {
                             ui.label(p.label);
-                            egui::ComboBox::from_id_salt(("choice", i, p.name))
-                                .selected_text(labels.get(*v as usize).copied().unwrap_or(""))
-                                .show_ui(ui, |ui| {
+                            widgets::combo(ui, ("choice", i, p.name), 0.0, labels.get(*v as usize).copied().unwrap_or(""), labels.len(), |ui, pick| {
                                     for (k, label) in labels.iter().enumerate() {
-                                        if ui.selectable_label(*v as usize == k, *label).clicked() {
+                                        if pick.item(ui, *v as usize == k, *label) {
                                             let name = name.clone();
                                             self.edit_layer(p.label, false, &id, |l| {
                                                 l.effects[i].params.insert(name, ParamValue::Choice(k as u32));
@@ -2105,9 +2148,9 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(p.label);
                             let current = v.as_ref().and_then(|r| comp.layer(r)).map(|l| l.name.clone()).unwrap_or_else(|| "なし".into());
-                            egui::ComboBox::from_id_salt(("layer", i, p.name)).selected_text(current).show_ui(ui, |ui| {
+                            widgets::combo(ui, ("layer", i, p.name), 0.0, current, comp.layers.len(), |ui, pick| {
                                 for other in &comp.layers {
-                                    if ui.selectable_label(v.as_ref() == Some(&other.id), &other.name).clicked() {
+                                    if pick.item(ui, v.as_ref() == Some(&other.id), &other.name) {
                                         let (name, oid) = (name.clone(), other.id.clone());
                                         self.edit_layer(p.label, false, &id, |l| {
                                             l.effects[i].params.insert(name, ParamValue::Layer(Some(oid)));

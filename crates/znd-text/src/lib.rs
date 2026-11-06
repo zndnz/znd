@@ -92,6 +92,21 @@ pub fn font_families() -> Vec<String> {
     names
 }
 
+/// インストール済みフォントのファミリー名と、その別名（日本語名など。検索用）。ファミリー名の昇順。
+pub fn font_families_with_aliases() -> Vec<(String, Vec<String>)> {
+    let mut map: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for f in system().db.faces() {
+        let Some((name, _)) = f.families.first() else { continue };
+        let aliases = map.entry(name.clone()).or_default();
+        for (alias, _) in f.families.iter().skip(1) {
+            if !aliases.contains(alias) {
+                aliases.push(alias.clone());
+            }
+        }
+    }
+    map.into_iter().collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Glyph {
     /// 本文中の文字番号（改行を除く。`znd_core::text::char_infos` と同じ数え方）。
