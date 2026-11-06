@@ -2,8 +2,8 @@
 
 use crate::panels::{apply_edit, path_label, KeyKind, PropEdit};
 use crate::timeline::KeySel;
-use crate::{base_dir, unix_now, widgets, App, Task};
-use eframe::egui::{self, pos2, Color32, Sense, Stroke};
+use crate::{base_dir, theme, unix_now, widgets, App, Task};
+use eframe::egui::{self, pos2, Color32, Rect, Sense, Stroke};
 use znd_core::keys;
 use znd_core::visit::find_prop;
 use znd_core::*;
@@ -669,13 +669,82 @@ impl App {
                 }
             }
 
+            // 表示する時間の範囲（長い尺でもキーの周りを拡大して編集できるように）
+            let dur = comp.duration.seconds().max(1e-6);
+            let min_span = (4.0 / fr.fps()).min(dur);
+            let (mut v0, mut v1) = self.graph_view;
+            // 別のプロパティを開いたら、キーが収まる範囲から始める
+            if self.graph_view_for.as_deref() != Some(&format!("{}/{path}", layer.id.0)) {
+                self.graph_view_for = Some(format!("{}/{path}", layer.id.0));
+                let ks: Vec<f64> = prop.key_times().iter().map(|t| t.seconds()).collect();
+                (v0, v1) = match (ks.first(), ks.last()) {
+                    (Some(a), Some(b)) if b > a => {
+                        let m = ((b - a) * 0.08).max(min_span);
+                        (a - m, b + m)
+                    }
+                    _ => (0.0, dur),
+                };
+            }
+            if !(v1 > v0) {
+                (v0, v1) = (0.0, dur);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if ui.small_button("全体").on_hover_text("コンポの最初から最後までを表示").clicked() {
+                    (v0, v1) = (0.0, dur);
+                }
+                let key_secs: Vec<f64> = prop.key_times().iter().map(|t| t.seconds()).collect();
+                if ui.add_enabled(key_secs.len() >= 2, egui::Button::new("キーに合わせる").small()).on_hover_text("最初と最後のキーが収まるように拡大").clicked() {
+                    let (a, b) = (key_secs.iter().copied().fold(f64::MAX, f64::min), key_secs.iter().copied().fold(f64::MIN, f64::max));
+                    let m = ((b - a) * 0.08).max(min_span);
+                    (v0, v1) = (a - m, b + m);
+                }
+                if ui.small_button("タイムラインと同じ").on_hover_text("タイムラインに表示している範囲に合わせる").clicked() {
+                    let span = total as f64 / self.tl_zoom.max(1.0);
+                    (v0, v1) = (self.tl_scroll / fr.fps(), (self.tl_scroll + span) / fr.fps());
+                }
+                ui.label(egui::RichText::new("ホイール: 拡大縮小 / Shift+ホイール・横スクロール・中ボタンか Alt のドラッグ: 移動").size(9.5).color(theme::TEXT_DIM));
+            });
             let (rect, resp) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(200.0, 160.0)), Sense::click_and_drag());
+            if let Some(hover) = resp.hover_pos() {
+                let (scroll, zoom, shift) = ui.input(|i| (i.raw_scroll_delta, i.zoom_delta(), i.modifiers.shift));
+                let at = v0 + ((hover.x - rect.left()) / rect.width()) as f64 * (v1 - v0);
+                let factor = if (zoom - 1.0).abs() > 1e-3 {
+                    1.0 / zoom as f64
+                } else if !shift && scroll.y.abs() > 0.0 && scroll.x.abs() < scroll.y.abs() {
+                    (-scroll.y as f64 * 0.004).exp()
+                } else {
+                    1.0
+                };
+                if factor != 1.0 {
+                    let span = ((v1 - v0) * factor).clamp(min_span, dur * 1.2);
+                    let ratio = (at - v0) / (v1 - v0);
+                    v0 = at - ratio * span;
+                    v1 = v0 + span;
+                }
+                let dx = if scroll.x.abs() > 0.0 { scroll.x } else if shift { scroll.y } else { 0.0 };
+                if dx != 0.0 {
+                    let d = -dx as f64 / rect.width() as f64 * (v1 - v0);
+                    (v0, v1) = (v0 + d, v1 + d);
+                }
+            }
+            let panning = resp.dragged_by(egui::PointerButton::Middle) || (resp.dragged() && ui.input(|i| i.modifiers.alt));
+            if panning {
+                let d = -resp.drag_delta().x as f64 / rect.width() as f64 * (v1 - v0);
+                (v0, v1) = (v0 + d, v1 + d);
+            }
+            // 範囲をコンポの前後少しまでに収める
+            let span = (v1 - v0).clamp(min_span, dur * 1.2);
+            let lo_lim = -dur * 0.1;
+            v0 = v0.clamp(lo_lim, (lo_lim + dur * 1.2 - span).max(lo_lim));
+            v1 = v0 + span;
+            self.graph_view = (v0, v1);
             let p = ui.painter_at(rect);
             p.rect_filled(rect, 0.0, Color32::from_gray(28));
             // 画素列ごとに値（または速度）を求める
             let cols = rect.width().max(2.0) as usize;
             let dims = prop.dims().max(1);
-            let time_at = |c: usize| Time::from_seconds(comp.duration.seconds() * c as f64 / (cols - 1) as f64);
+            let time_at = |c: usize| Time::from_seconds(v0 + (v1 - v0) * c as f64 / (cols - 1) as f64);
             let h = 0.5 / fr.fps();
             let sample = |t: Time| -> Vec<f64> {
                 if self.export_ui.speed_graph {
@@ -692,7 +761,34 @@ impl App {
             let (lo, hi) = series.iter().flatten().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
             let (lo, hi) = if hi - lo < 1e-6 { (lo - 1.0, hi + 1.0) } else { (lo - (hi - lo) * 0.1, hi + (hi - lo) * 0.1) };
             let y_of = |v: f64| rect.bottom() - ((v - lo) / (hi - lo)) as f32 * rect.height();
-            let x_of = |t: Time| rect.left() + (t.seconds() / comp.duration.seconds().max(1e-9)) as f32 * rect.width();
+            let x_of = |t: Time| rect.left() + ((t.seconds() - v0) / (v1 - v0)) as f32 * rect.width();
+            // 時間の目盛り（表示範囲に合わせて 1 フレーム〜数十秒の刻み）
+            {
+                let fps = fr.fps();
+                let px_per_sec = rect.width() as f64 / (v1 - v0);
+                let steps = [1.0 / fps, 2.0 / fps, 5.0 / fps, 10.0 / fps, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0];
+                let step = steps.iter().copied().find(|s| s * px_per_sec >= 70.0).unwrap_or(600.0);
+                let mut t = (v0.max(0.0) / step).ceil() * step;
+                while t <= v1.min(dur) + 1e-9 {
+                    let x = x_of(Time::from_seconds(t));
+                    p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0_f32, Color32::from_white_alpha(10)));
+                    // 分:秒（1 秒より細かい刻みでは .フレーム を付ける）
+                    let ifps = fps.round().max(1.0) as i64;
+                    let f = (t * fps).round() as i64;
+                    let (secs, ff) = (f / ifps, f % ifps);
+                    let label = if step >= 1.0 { format!("{}:{:02}", secs / 60, secs % 60) } else { format!("{}:{:02}.{:02}", secs / 60, secs % 60, ff) };
+                    p.text(pos2(x + 2.0, rect.top() + 14.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(9.0), Color32::from_gray(110));
+                    t += step;
+                }
+                // コンポの外は暗くする
+                let (a, b) = (x_of(Time::ZERO), x_of(comp.duration));
+                if a > rect.left() {
+                    p.rect_filled(Rect::from_min_max(rect.min, pos2(a, rect.bottom())), 0.0, Color32::from_black_alpha(90));
+                }
+                if b < rect.right() {
+                    p.rect_filled(Rect::from_min_max(pos2(b, rect.top()), rect.max), 0.0, Color32::from_black_alpha(90));
+                }
+            }
             const COLORS: [Color32; 4] = [
                 Color32::from_rgb(255, 110, 110),
                 Color32::from_rgb(110, 220, 130),
@@ -718,7 +814,7 @@ impl App {
                 egui::FontId::monospace(10.0),
                 Color32::GRAY,
             );
-            let px = rect.left() + self.frame as f32 / total as f32 * rect.width();
+            let px = x_of(t_now);
             p.line_segment([pos2(px, rect.top()), pos2(px, rect.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(255, 90, 90)));
 
             // キー: クリックでその時刻へ、ドラッグで時刻（フレーム単位）と値を動かす
@@ -736,7 +832,7 @@ impl App {
                 );
             }
             let drag_id = ui.id().with("drag-key");
-            if resp.drag_started() || resp.clicked() {
+            if (resp.drag_started() || resp.clicked()) && !panning && !ui.input(|i| i.modifiers.alt) {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     // 最も近いキーをつかむ
                     let nearest = keys
@@ -756,11 +852,11 @@ impl App {
                     }
                 }
             }
-            if resp.dragged() {
+            if resp.dragged() && !panning {
                 let grabbed: Option<Time> = ui.data(|d| d.get_temp(drag_id)).flatten();
                 if let (Some(from), Some(pos)) = (grabbed, resp.interact_pointer_pos()) {
-                    let frame =
-                        (((pos.x - rect.left()) / rect.width()) as f64 * total as f64).round().clamp(0.0, (total - 1) as f64) as i64;
+                    let secs = v0 + ((pos.x - rect.left()) / rect.width()) as f64 * (v1 - v0);
+                    let frame = (secs * fr.fps()).round().clamp(0.0, (total - 1) as f64) as i64;
                     let to = fr.frame_to_time(frame);
                     if to != from && !keys.contains(&to) {
                         edit = Some(PropEdit::MoveKey { from, to });

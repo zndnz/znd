@@ -253,7 +253,7 @@ pub struct App {
     selected_footage: Option<FootageId>,
     downsample: u32,
     /// 再生開始の（実時刻, フレーム）。
-    playing: Option<(Instant, i64)>,
+    pub(crate) playing: Option<(Instant, i64)>,
     /// ワークエリア [開始, 終了) フレーム。ループ再生と書き出し範囲に使う。
     work_area: Option<(i64, i64)>,
     snap: bool,
@@ -324,6 +324,10 @@ pub struct App {
     pub(crate) prefs: prefs::Prefs,
     /// イージングのパネルの状態。
     pub(crate) ease: easing::EaseUi,
+    /// グラフエディターに表示している時間の範囲（秒）。終わりが始まり以下なら全体。
+    pub(crate) graph_view: (f64, f64),
+    /// `graph_view` を決めたときのレイヤーとプロパティ。
+    pub(crate) graph_view_for: Option<String>,
     /// キーボードショートカットの割り当て。
     pub(crate) keymap: keymap::Keymap,
     /// 割り当てを変更中の操作（次に押したキーを割り当てる）。
@@ -442,6 +446,8 @@ impl App {
             beat_ui: Default::default(),
             prefs: prefs::Prefs::load(),
             ease: Default::default(),
+            graph_view: (0.0, 0.0),
+            graph_view_for: None,
             keymap: keymap::Keymap::default(),
             keymap_capture: None,
             key_target: None,

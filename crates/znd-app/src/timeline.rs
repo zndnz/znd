@@ -388,6 +388,13 @@ impl App {
         let max_zoom = (total as f64 * MAX_PX_PER_FRAME / time_w as f64).max(1.0);
         self.tl_zoom = self.tl_zoom.clamp(1.0, max_zoom);
         let span = total as f64 / self.tl_zoom;
+        // 再生中に再生ヘッドが表示範囲の外へ出たら、ページをめくるように追いかける（長い尺のとき）
+        if self.playing.is_some() && span < total as f64 {
+            let f = self.frame as f64;
+            if f < self.tl_scroll || f > self.tl_scroll + span {
+                self.tl_scroll = f - span * 0.05;
+            }
+        }
         self.tl_scroll = self.tl_scroll.clamp(0.0, total as f64 - span);
         let view = TlView { left: time_l, width: time_w, start: self.tl_scroll, span };
         self.tl_view = Some(view);
