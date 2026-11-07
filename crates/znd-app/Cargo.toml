@@ -12,6 +12,7 @@ znd-gpu.workspace = true
 znd-audio.workspace = true
 znd-script.workspace = true
 znd-text.workspace = true
+znd-preview.workspace = true
 rayon.workspace = true
 image.workspace = true
 serde.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/znd-core", "crates/znd-text", "crates/znd-render", "crates/znd-audio", "crates/znd-script", "crates/znd-media", "crates/znd-gpu", "crates/znd-cli", "crates/znd-app"]
+members = ["crates/znd-core", "crates/znd-text", "crates/znd-render", "crates/znd-audio", "crates/znd-script", "crates/znd-media", "crates/znd-gpu", "crates/znd-cli", "crates/znd-app", "crates/znd-preview", "crates/znd-studio"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ znd-audio = { path = "crates/znd-audio" }
 znd-script = { path = "crates/znd-script" }
 znd-media = { path = "crates/znd-media" }
 znd-gpu = { path = "crates/znd-gpu" }
+znd-preview = { path = "crates/znd-preview" }
 
 # デバッグ情報とインクリメンタルビルドは成果物が数 GB になるので切っている
 [profile.dev]

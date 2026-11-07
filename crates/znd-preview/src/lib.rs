@@ -8,6 +8,7 @@
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use znd_audio::Mixer;
 use znd_core::{CompId, Project};
@@ -256,8 +257,8 @@ fn worker(
             .with_resolver(&*job.exprs)
             .with_audio(&mixer)
             .with_base_dir(&base_dir)
-            .with_accel(crate::gpu())
-            .with_composite(crate::gpu_composite());
+            .with_accel(gpu())
+            .with_composite(gpu_composite());
         let xf = renderer.output_xf();
         let opts = job.opts();
         let results: Vec<(u64, Result<Preview, String>)> = frames
@@ -320,6 +321,49 @@ fn worker(
 }
 
 /// パニックの内容を文字列にする。
-pub(crate) fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
+pub fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
     e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_else(|| "不明なエラー".into())
+}
+
+// ---------- GPU ----------
+
+/// エフェクトと合成を GPU で処理するか（アプリのメニューで切り替える）。
+pub static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
+
+fn gpu_backend() -> Option<&'static znd_gpu::GpuBackend> {
+    static GPU: std::sync::OnceLock<Option<znd_gpu::GpuBackend>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        // 環境変数 ZND_GPU=0 で、GPU を一切初期化しない
+        if std::env::var("ZND_GPU").is_ok_and(|v| v == "0") {
+            return None;
+        }
+        match znd_gpu::GpuBackend::new() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("GPU を使えません（CPU で処理します）: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// エフェクトの高速化バックエンド。GPU が無い・無効にしている場合は `None`（すべて CPU）。
+pub fn gpu() -> Option<&'static dyn znd_render::effects::EffectAccel> {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    gpu_backend().map(|g| g as &dyn znd_render::effects::EffectAccel)
+}
+
+/// 合成の GPU 化（エフェクトの GPU 処理と同じスイッチで切り替わる）。
+pub fn gpu_composite() -> Option<&'static dyn znd_render::gpu_composite::CompositeAccel> {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    gpu_backend().map(|g| g as &dyn znd_render::gpu_composite::CompositeAccel)
+}
+
+pub fn gpu_name() -> Option<&'static str> {
+    gpu_backend().map(|g| g.name())
 }

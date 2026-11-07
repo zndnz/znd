@@ -1,0 +1,21 @@
+[package]
+name = "znd-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 新しい UI。実行（評価・レンダリング・プロジェクトの保持）は Rust、操作と画面は TypeScript（../../studio）。
+# Tauri v2 でひとつのアプリにまとめる。
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+znd-core.workspace = true
+znd-render.workspace = true
+znd-media.workspace = true
+znd-preview.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.12", features = [] }
+rfd = "0.15"

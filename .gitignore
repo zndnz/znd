@@ -3,3 +3,4 @@
 *.mp4
 /out/
 *.actual.png
+/crates/znd-studio/gen/

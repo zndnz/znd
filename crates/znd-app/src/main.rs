@@ -10,7 +10,6 @@ mod keyops;
 mod panels;
 mod plugin_host;
 mod prefs;
-mod preview;
 mod rescue;
 mod theme;
 mod timeline;
@@ -21,7 +20,8 @@ mod windows;
 mod workspace;
 
 use eframe::egui;
-use preview::PreviewEngine;
+use znd_preview as preview;
+use znd_preview::PreviewEngine;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -126,46 +126,7 @@ fn install_japanese_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// エフェクトを GPU で処理するか（表示メニューで切り替える）。
-static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
-
-fn gpu_backend() -> Option<&'static znd_gpu::GpuBackend> {
-    static GPU: std::sync::OnceLock<Option<znd_gpu::GpuBackend>> = std::sync::OnceLock::new();
-    GPU.get_or_init(|| {
-        // 環境変数 ZND_GPU=0 で、GPU を一切初期化しない
-        if std::env::var("ZND_GPU").is_ok_and(|v| v == "0") {
-            return None;
-        }
-        match znd_gpu::GpuBackend::new() {
-            Ok(g) => Some(g),
-            Err(e) => {
-                eprintln!("GPU を使えません（CPU で処理します）: {e}");
-                None
-            }
-        }
-    })
-    .as_ref()
-}
-
-/// エフェクトの高速化バックエンド。GPU が無い・無効にしている場合は `None`（すべて CPU）。
-pub(crate) fn gpu() -> Option<&'static dyn znd_render::effects::EffectAccel> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) {
-        return None;
-    }
-    gpu_backend().map(|g| g as &dyn znd_render::effects::EffectAccel)
-}
-
-/// 合成の GPU 化（エフェクトの GPU 処理と同じスイッチで切り替わる）。
-pub(crate) fn gpu_composite() -> Option<&'static dyn znd_render::gpu_composite::CompositeAccel> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) {
-        return None;
-    }
-    gpu_backend().map(|g| g as &dyn znd_render::gpu_composite::CompositeAccel)
-}
-
-pub(crate) fn gpu_name() -> Option<&'static str> {
-    gpu_backend().map(|g| g.name())
-}
+pub(crate) use znd_preview::{gpu, gpu_composite, gpu_name, GPU_ENABLED};
 
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
