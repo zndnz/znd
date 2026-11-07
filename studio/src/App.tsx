@@ -10,7 +10,9 @@ import { newComposition, ProjectList } from "./components/ProjectList";
 import { deleteSelectedKey, Timeline } from "./components/Timeline";
 import { createLayer, Viewer } from "./components/Viewer";
 import { fps } from "./model";
-import { adopt, currentComp, get, run, set, setFrame, totalFrames, useUi } from "./store";
+import { adopt, currentComp, get, keysOp, run, set, setFrame, totalFrames, useUi } from "./store";
+import { applyRememberedEase } from "./components/Easing";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 function onMenu(id: string) {
   const s = get();
@@ -84,8 +86,12 @@ function onKey(e: KeyboardEvent) {
       return set((st) => ({ workArea: [s.frame, st.workArea?.[1] ?? totalFrames()] }));
     case "n":
       return set((st) => ({ workArea: [st.workArea?.[0] ?? 0, Math.max(s.frame + 1, (st.workArea?.[0] ?? 0) + 1)] }));
+    case "e":
+      return applyRememberedEase();
+    case "F9":
+      return void keysOp("イージーイーズ", { op: "kind", kind: "easy_ease" });
     case "Escape":
-      return set({ selected: null, selectedFootage: null, selectedKey: null });
+      return set({ selected: null, selectedFootage: null, selectedKeys: null });
     case "Backspace":
     case "Delete":
       if (deleteSelectedKey()) return;
@@ -146,26 +152,28 @@ export function App() {
 
   if (!ready) return <div className="app loading" />;
   return (
-    <div className={`app ${showProject ? "" : "no-left"} ${showInspector ? "" : "no-right"}`}>
-      <header className="titlebar" data-tauri-drag-region>
-        <span className="titlebar-left" data-tauri-drag-region>
-          <IconButton icon="sidebarL" title="プロジェクト (⌘1)" on={showProject} onClick={() => set({ showProject: !showProject })} />
-        </span>
-        <span className="title" data-tauri-drag-region>
-          {title}
-          {dirty && <span className="dirty" title="保存していない変更があります" />}
-        </span>
-        <span className="titlebar-right" data-tauri-drag-region>
-          {status && <span className="status">{status}</span>}
-          <IconButton icon="sidebarR" title="インスペクタ (⌘2)" on={showInspector} onClick={() => set({ showInspector: !showInspector })} />
-        </span>
-      </header>
-      {showProject && <ProjectList />}
-      <main className="center">
-        <Viewer />
-        <Timeline />
-      </main>
-      {showInspector && <Inspector />}
-    </div>
+    <TooltipProvider delay={500}>
+      <div className={`app ${showProject ? "" : "no-left"} ${showInspector ? "" : "no-right"}`}>
+        <header className="titlebar" data-tauri-drag-region>
+          <span className="titlebar-left" data-tauri-drag-region>
+            <IconButton icon="sidebarL" title="プロジェクト (⌘1)" on={showProject} onClick={() => set({ showProject: !showProject })} />
+          </span>
+          <span className="title" data-tauri-drag-region>
+            {title}
+            {dirty && <span className="dirty" title="保存していない変更があります" />}
+          </span>
+          <span className="titlebar-right" data-tauri-drag-region>
+            {status && <span className="status">{status}</span>}
+            <IconButton icon="sidebarR" title="インスペクタ (⌘2)" on={showInspector} onClick={() => set({ showInspector: !showInspector })} />
+          </span>
+        </header>
+        {showProject && <ProjectList />}
+        <main className="center">
+          <Viewer />
+          <Timeline />
+        </main>
+        {showInspector && <Inspector />}
+      </div>
+    </TooltipProvider>
   );
 }

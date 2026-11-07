@@ -17,6 +17,7 @@ pub mod log;
 pub mod lyrics;
 pub mod model;
 pub mod property;
+pub mod props;
 pub mod rights;
 pub mod shape;
 pub mod text;

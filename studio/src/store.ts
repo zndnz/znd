@@ -6,15 +6,15 @@
 
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
-import { type Composition, frameCount, type Layer, type Project, type Snapshot, timeToFrame } from "./model";
+import { type Composition, frameCount, frameToTime, type KeyAddr, type Layer, type Project, type PropEdit, type Snapshot, type Time, timeToFrame } from "./model";
 import { findComp } from "./ops";
 
 export type Tool = "select" | "hand";
 
-export interface SelectedKey {
+/** 選んでいるキーフレーム（1 つのレイヤーの中で複数）。 */
+export interface SelectedKeys {
   layer: string;
-  path: string;
-  time: number;
+  keys: KeyAddr[];
 }
 
 export interface UiState {
@@ -24,7 +24,7 @@ export interface UiState {
   compId: string;
   selected: string | null;
   selectedFootage: string | null;
-  selectedKey: SelectedKey | null;
+  selectedKeys: SelectedKeys | null;
   frame: number;
   playing: boolean;
   tool: Tool;
@@ -52,7 +52,7 @@ let state: UiState = {
   compId: "",
   selected: null,
   selectedFootage: null,
-  selectedKey: null,
+  selectedKeys: null,
   frame: 0,
   playing: false,
   tool: "select",
@@ -198,3 +198,70 @@ export function frameOfTime(t: number): number {
   const c = currentComp();
   return c ? timeToFrame(c.frame_rate, t) : 0;
 }
+
+/** 再生ヘッドの時刻。 */
+export function nowTime(): Time {
+  const c = currentComp();
+  return c ? frameToTime(c.frame_rate, state.frame) : 0;
+}
+
+// ---------- Rust の計算を使う編集 ----------
+
+let chain: Promise<void> = Promise.resolve();
+
+/**
+ * レイヤーを Rust の純粋な計算（`f`）で書き換え、編集として送る。前の計算が終わってから次を始めるので、
+ * ドラッグ中に続けて呼んでも、いつも最新のレイヤーから計算する。
+ */
+export function computeLayer(label: string, layerId: string, f: (layer: Layer) => Promise<Layer | null>, coalesce = false): Promise<void> {
+  chain = chain.then(async () => {
+    const layer = currentComp()?.layers.find((l) => l.id === layerId);
+    if (!layer || layer.locked) return;
+    try {
+      const next = await f(layer);
+      if (!next) return;
+      editComp(label, (c) => {
+        const i = c.layers.findIndex((l) => l.id === layerId);
+        if (i < 0) return false;
+        c.layers[i] = next;
+      }, coalesce);
+    } catch (e) {
+      set({ status: `${label}できません: ${e}` });
+    }
+  });
+  return chain;
+}
+
+/** プロパティ（`path`）への操作を、再生ヘッドの時刻で行う。 */
+export function propOp(label: string, layerId: string, path: string, op: PropEdit, coalesce = false) {
+  const t = nowTime();
+  return computeLayer(label, layerId, (l) => api.propEdit(l, path, t, op), coalesce);
+}
+
+/** 選んでいるキーへの一括操作。操作後の選択に置き換える。 */
+export function keysOp(label: string, op: Parameters<typeof api.keysOp>[2], coalesce = false) {
+  const sel = state.selectedKeys;
+  if (!sel || sel.keys.length === 0) return Promise.resolve();
+  return computeLayer(label, sel.layer, async (l) => {
+    const cur = state.selectedKeys?.layer === sel.layer ? state.selectedKeys.keys : sel.keys;
+    const r = await api.keysOp(l, cur, op);
+    set({ selectedKeys: r.keys.length ? { layer: sel.layer, keys: r.keys } : null });
+    return r.layer;
+  }, coalesce);
+}
+
+/** キーを選ぶ。`add` なら今の選択に足す（同じレイヤーのとき）／外す。 */
+export function selectKey(layer: string, key: KeyAddr, add: boolean) {
+  set((s) => {
+    const same = (k: KeyAddr) => k.path === key.path && k.time === key.time;
+    if (add && s.selectedKeys?.layer === layer) {
+      const has = s.selectedKeys.keys.some(same);
+      const keys = has ? s.selectedKeys.keys.filter((k) => !same(k)) : [...s.selectedKeys.keys, key];
+      return { selected: layer, selectedKeys: keys.length ? { layer, keys } : null };
+    }
+    return { selected: layer, selectedFootage: null, selectedKeys: { layer, keys: [key] } };
+  });
+}
+
+export const isKeySelected = (s: UiState, layer: string, key: KeyAddr) =>
+  s.selectedKeys?.layer === layer && s.selectedKeys.keys.some((k) => k.path === key.path && k.time === key.time);

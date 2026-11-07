@@ -2,10 +2,22 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { frameToTime } from "../model";
-import { getProp, setValue } from "../ops";
-import { currentComp, editComp, editLayer, get, run, selectedLayer, set, useUi } from "../store";
-import { IconButton, MenuItem, Popover } from "./controls";
+import { currentComp, editComp, get, propOp, run, selectedLayer, set, useUi } from "../store";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Separator } from "@/components/ui/separator";
+import { IconButton } from "./controls";
 import { Icon } from "./icons";
 
 const ZOOMS: [number, string][] = [
@@ -81,18 +93,17 @@ export function Viewer() {
     const layer = selectedLayer();
     if (!panning && (!layer || layer.locked || e.button !== 0)) return;
     const start = { x: e.clientX, y: e.clientY, pan: get().viewPan };
-    const t = frameToTime(comp.frame_rate, get().frame);
     // 動かし始めの位置（キーフレームを補間した値）。届くまでの動きは届いてから反映する
     let base: [number, number] | null = null;
     let last: [number, number] = [0, 0];
     const apply = () => {
       if (!layer || !base) return;
       const p: [number, number] = [Math.round((base[0] + last[0] / scale) * 10) / 10, Math.round((base[1] + last[1] / scale) * 10) / 10];
-      editLayer("移動", layer.id, (l) => setValue(l, "position", t, p), true);
+      void propOp("移動", layer.id, "transform.position", { op: "set", value: p }, true);
     };
     if (!panning && layer) {
       void api.evalLayer(comp.id, layer.id, get().frame).then((v) => {
-        base = v?.position ?? (getProp(layer, "position")?.value as [number, number]);
+        base = v?.position ?? (layer.transform.position.value as [number, number]);
         apply();
       });
     }
@@ -129,32 +140,42 @@ export function Viewer() {
         )}
       </div>
 
-      <div className="float top-left pill">
-        <Popover
-          trigger={(open, toggle) => (
-            <button type="button" className={`pill-btn ${open ? "on" : ""}`} onClick={toggle} title="表示の設定">
-              {zoom > 0 ? `${Math.round(zoom * 100)}%` : "全体表示"}
-              <span className="dim">・{RESOLUTIONS.find((r) => r[0] === downsample)?.[1]}</span>
-              <Icon name="chevron" size={12} />
-            </button>
-          )}
-        >
-          {(close) => (
-            <>
-              <div className="menu-heading">拡大率</div>
-              {ZOOMS.map(([z, label]) => (
-                <MenuItem key={label} label={label} checked={zoom === z} onClick={() => (set({ viewZoom: z, viewPan: [0, 0] }), close())} />
-              ))}
-              <div className="menu-heading">画質</div>
-              {RESOLUTIONS.map(([d, label]) => (
-                <MenuItem key={label} label={label} checked={downsample === d} onClick={() => (set({ downsample: d }), close())} />
-              ))}
-              <div className="menu-sep" />
-              <MenuItem label="セーフマージン" checked={guides} onClick={() => setGuides((g) => !g)} />
-            </>
-          )}
-        </Popover>
-        {rendering && <span className="pill-note">レンダリング中…</span>}
+      <div className="float top-left">
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="rounded-3xl" />}>
+            {zoom > 0 ? `${Math.round(zoom * 100)}%` : "全体表示"}
+            <span className="text-muted-foreground">{RESOLUTIONS.find((r) => r[0] === downsample)?.[1]}</span>
+            <Icon name="chevron" size={14} className="text-muted-foreground" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-52">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>拡大率</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={String(zoom)} onValueChange={(v) => set({ viewZoom: Number(v), viewPan: [0, 0] })}>
+                {ZOOMS.map(([z, label]) => (
+                  <DropdownMenuRadioItem key={label} value={String(z)}>
+                    {label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>画質</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={String(downsample)} onValueChange={(v) => set({ downsample: Number(v) })}>
+                {RESOLUTIONS.map(([d, label]) => (
+                  <DropdownMenuRadioItem key={label} value={String(d)}>
+                    {label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem checked={guides} onCheckedChange={setGuides}>
+              セーフマージン
+            </DropdownMenuCheckboxItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {rendering && <span className="px-3 text-xs text-muted-foreground">レンダリング中…</span>}
       </div>
 
       <ToolPalette />
@@ -193,27 +214,31 @@ export async function createLayer(kind: string) {
 function ToolPalette() {
   const tool = useUi((s) => s.tool);
   const [shape, setShape] = useState(0);
+  const menu = (items: [string, string, string][], pick?: (i: number) => void) => (
+    <DropdownMenuContent side="top" align="center" sideOffset={12} className="w-56">
+      {items.map(([kind, icon, label], i) => (
+        <DropdownMenuItem key={kind} onClick={() => (pick?.(i), void createLayer(kind))}>
+          <Icon name={icon} />
+          {label}
+        </DropdownMenuItem>
+      ))}
+    </DropdownMenuContent>
+  );
   return (
     <div className="float bottom-center palette">
-      <IconButton icon="select" title="選択ツール (V)" on={tool === "select"} onClick={() => set({ tool: "select" })} />
-      <IconButton icon="hand" title="手のひらツール (H)" on={tool === "hand"} onClick={() => set({ tool: "hand" })} />
-      <span className="palette-sep" />
-      <IconButton icon="text" title="テキスト (T)" onClick={() => void createLayer("text")} />
-      <span className="split">
-        <IconButton icon={SHAPES[shape][1]} title={`シェイプ（${SHAPES[shape][2]}）`} onClick={() => void createLayer(SHAPES[shape][0])} />
-        <Popover
-          placement="above"
-          align="center"
-          trigger={(_, toggle) => <IconButton icon="chevron" size={12} className="chev" title="シェイプの種類" onClick={toggle} />}
-        >
-          {(close) =>
-            SHAPES.map(([kind, icon, label], i) => (
-              <MenuItem key={kind} icon={icon} label={label} onClick={() => (setShape(i), close(), void createLayer(kind))} />
-            ))
-          }
-        </Popover>
-      </span>
+      <IconButton size="icon" icon="select" title="選択ツール (V)" on={tool === "select"} onClick={() => set({ tool: "select" })} />
+      <IconButton size="icon" icon="hand" title="手のひらツール (H)" on={tool === "hand"} onClick={() => set({ tool: "hand" })} />
+      <Separator orientation="vertical" className="mx-1.5 my-2" />
+      <IconButton size="icon" icon="text" title="テキスト (T)" onClick={() => void createLayer("text")} />
+      <IconButton size="icon" icon={SHAPES[shape][1]} title={`シェイプ（${SHAPES[shape][2]}）`} onClick={() => void createLayer(SHAPES[shape][0])} />
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" className="-ml-1 text-muted-foreground" aria-label="シェイプの種類" />}>
+          <Icon name="chevron" size={12} />
+        </DropdownMenuTrigger>
+        {menu(SHAPES, setShape)}
+      </DropdownMenu>
       <IconButton
+        size="icon"
         icon="image"
         title="素材を読み込む (⌘I)"
         onClick={() => {
@@ -221,15 +246,12 @@ function ToolPalette() {
           void run(() => api.import(s.compId, s.frame, false), "素材を読み込みました");
         }}
       />
-      <Popover
-        placement="above"
-        align="center"
-        trigger={(open, toggle) => <IconButton icon="more" title="ほかのレイヤー" on={open} onClick={toggle} />}
-      >
-        {(close) =>
-          MORE.map(([kind, icon, label]) => <MenuItem key={kind} icon={icon} label={label} onClick={() => (close(), void createLayer(kind))} />)
-        }
-      </Popover>
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="text-muted-foreground" aria-label="ほかのレイヤー" />}>
+          <Icon name="more" />
+        </DropdownMenuTrigger>
+        {menu(MORE)}
+      </DropdownMenu>
     </div>
   );
 }

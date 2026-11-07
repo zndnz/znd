@@ -11,6 +11,7 @@
 mod effects;
 mod layers;
 mod menu;
+mod props;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -284,6 +285,50 @@ fn make_effect(state: State<'_, Shared>, kind: String, comp: String, layer: Stri
     EffectInstance::new(&kind, w, h).ok_or_else(|| format!("エフェクト「{kind}」がありません"))
 }
 
+/// レイヤーの全プロパティと、時刻 `time` での値（画面が持っているレイヤーをそのまま渡す）。
+#[tauri::command]
+fn layer_props(layer: Layer, time: Time) -> Vec<props::PropInfo> {
+    props::list(&layer, time)
+}
+
+/// プロパティへの操作（値の設定・キーフレーム・補間・エクスプレッション）。書き換えたレイヤーを返す。
+#[tauri::command]
+fn prop_edit(layer: Layer, path: String, time: Time, op: znd_core::props::PropEdit) -> Layer {
+    props::edit(layer, &path, time, &op)
+}
+
+/// 選んだキーへの一括操作（イージングカーブ・補間・移動・削除）。
+#[tauri::command]
+fn keys_op(layer: Layer, keys: Vec<znd_core::keys::KeyAddr>, op: props::KeysOp) -> props::KeysResult {
+    props::keys_op(layer, keys, &op)
+}
+
+#[tauri::command]
+fn curve_of(layer: Layer, keys: Vec<znd_core::keys::KeyAddr>) -> Option<EaseCurve> {
+    props::curve_of(&layer, &keys)
+}
+
+#[tauri::command]
+fn curve_presets() -> Vec<props::Preset> {
+    props::presets()
+}
+
+#[tauri::command]
+fn curve_samples(curve: EaseCurve, n: usize) -> Vec<f64> {
+    props::samples(&curve, n)
+}
+
+#[tauri::command]
+fn parse_curve(text: String) -> Option<EaseCurve> {
+    props::parse_curve(&text)
+}
+
+/// インストール済みのフォント（ファミリー名と、日本語名などの別名）。
+#[tauri::command]
+fn fonts() -> Vec<(String, Vec<String>)> {
+    znd_text::font_families_with_aliases()
+}
+
 fn main() {
     // 使い方: znd-studio [プロジェクト.znd.json]
     let arg = std::env::args().nth(1).map(PathBuf::from);
@@ -321,7 +366,15 @@ fn main() {
             make_layer,
             eval_layer,
             effect_catalog,
-            make_effect
+            make_effect,
+            layer_props,
+            prop_edit,
+            keys_op,
+            curve_of,
+            curve_presets,
+            curve_samples,
+            parse_curve,
+            fonts
         ])
         .run(tauri::generate_context!())
         .expect("znd studio を起動できません");

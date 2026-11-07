@@ -1,11 +1,21 @@
 // タイムライン。左の列は置かず、レイヤーは名前の入った角丸のバーとして時間の上に並べる。
 // バーの ▸ で開くと、その下にプロパティの行（キーフレームの ◆）が出る。
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { type Composition, fps, frameToTime, type Layer, seconds, timecode, timeToFrame } from "../model";
-import { deleteKey, getProp, isAnimated, keyTimes, moveKey, type PropPath, shiftLayer, THREE_D_PROPS, TRANSFORM_PROPS } from "../ops";
-import { currentComp, editComp, editLayer, get, set, setFrame, totalFrames, useUi } from "../store";
-import { IconButton, MenuItem, NumberField } from "./controls";
+import { useLayoutEffect, useRef, useState } from "react";
+import { type Composition, fps, frameToTime, type Layer, type PropInfo, seconds, timecode, timeToFrame } from "../model";
+import { shiftLayer } from "../ops";
+import { currentComp, editComp, editLayer, get, isKeySelected, keysOp, selectKey, set, setFrame, totalFrames, useUi } from "../store";
+import { useLayerKeys } from "./PropRow";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import { Slider } from "@/components/ui/slider";
+import { IconButton, NumberField } from "./controls";
 import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
 
@@ -38,7 +48,6 @@ export function Timeline() {
   const start = useUi((s) => s.tlStart);
   const body = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
-  const [menu, setMenu] = useState<{ x: number; y: number; layer: string } | null>(null);
 
   useLayoutEffect(() => {
     const el = body.current;
@@ -47,12 +56,6 @@ export function Timeline() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, [menu]);
 
   if (!comp) return <div className="timeline" />;
   const total = totalFrames();
@@ -108,20 +111,19 @@ export function Timeline() {
           <span className="playhead-cap" style={{ left: px }} />
         </div>
         <div className="tracks">
-          <div className="grid">
+          <div className="tl-grid">
             {ticks.map((f) => (
               <span key={f} style={{ left: xOf(view, f) }} />
             ))}
           </div>
           {comp.layers.map((layer) => (
-            <LayerTrack key={layer.id} comp={comp} layer={layer} view={view} onMenu={(x, y) => setMenu({ x, y, layer: layer.id })} />
+            <LayerTrack key={layer.id} comp={comp} layer={layer} view={view} />
           ))}
           {comp.layers.length === 0 && <div className="tl-empty">下のパレットからレイヤーを作るか、素材を読み込んでください</div>}
           <div className="tl-spacer" />
         </div>
         <span className="playhead" style={{ left: px }} />
       </div>
-      {menu && <LayerMenu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
 }
@@ -140,21 +142,28 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
   const maxZoom = Math.max(1, total / 8);
   return (
     <div className="transport">
-      <IconButton icon={playing ? "pause" : "play"} title="再生／停止 (Space)" className="play" size={18} onClick={() => set((s) => ({ playing: !s.playing }))} />
+      <IconButton
+        icon={playing ? "pause" : "play"}
+        title="再生／停止 (Space)"
+        size="icon"
+        iconSize={18}
+        filled
+        className="text-foreground"
+        onClick={() => set((s) => ({ playing: !s.playing }))}
+      />
       <span className="timecode" title={`${frame} / ${total} フレーム・${fps(fr).toFixed(2)} fps`}>
         {timecode(fr, frame)}
       </span>
       <span className="grow" />
       <IconButton icon="magnet" title="スナップ（再生ヘッド・レイヤーの端・キーフレームに吸着）" on={snapping} onClick={() => set((s) => ({ snapping: !s.snapping }))} />
-      <input
-        className="zoom-slider"
-        type="range"
+      <Slider
+        className="w-40"
         min={0}
         max={1000}
         value={Math.round((Math.log(zoom) / Math.log(maxZoom || 2)) * 1000) || 0}
-        title="タイムラインの拡大率"
-        onChange={(e) => {
-          const z = Math.exp((Number(e.target.value) / 1000) * Math.log(maxZoom || 2));
+        aria-label="タイムラインの拡大率"
+        onValueChange={(v) => {
+          const z = Math.exp(((Array.isArray(v) ? v[0] : v) / 1000) * Math.log(maxZoom || 2));
           set((s) => ({ tlZoom: z, tlStart: Math.max(0, Math.min(total - total / z, s.frame - total / z / 2)) }));
         }}
       />
@@ -164,7 +173,7 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
         digits={2}
         step={1 / fps(fr)}
         min={0}
-        width={64}
+        className="max-w-20"
         onChange={(v) => set({ workArea: [Math.min(toFrame(v), b - 1), b] })}
       />
       <span className="field-label">終了</span>
@@ -173,7 +182,7 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
         digits={2}
         step={1 / fps(fr)}
         min={0}
-        width={64}
+        className="max-w-20"
         onChange={(v) => set({ workArea: [a, Math.max(a + 1, Math.min(total, toFrame(v)))] })}
       />
     </div>
@@ -210,7 +219,7 @@ function snapFrame(comp: Composition, f: number, ppf: number, exclude: string): 
   return best;
 }
 
-function LayerTrack({ comp, layer, view, onMenu }: { comp: Composition; layer: Layer; view: View; onMenu: (x: number, y: number) => void }) {
+function LayerTrack({ comp, layer, view }: { comp: Composition; layer: Layer; view: View }) {
   const selected = useUi((s) => s.selected === layer.id);
   const open = useUi((s) => !!s.expanded[layer.id]);
   const fr = comp.frame_rate;
@@ -220,7 +229,7 @@ function LayerTrack({ comp, layer, view, onMenu }: { comp: Composition; layer: L
   const x1 = xOf(view, outF);
   const ppf = view.width / view.span;
   const audio = layer.kind.type === "audio";
-  const cls = ["bar", selected && "selected", layer.visible === false && "hidden", audio && "audio", layer.locked && "locked"].filter(Boolean).join(" ");
+  const cls = ["bar", selected && "selected", layer.visible === false && "is-hidden", audio && "audio", layer.locked && "locked"].filter(Boolean).join(" ");
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -256,80 +265,89 @@ function LayerTrack({ comp, layer, view, onMenu }: { comp: Composition; layer: L
     window.addEventListener("pointerup", up);
   };
 
-  const props = [...TRANSFORM_PROPS, ...(layer.three_d ? THREE_D_PROPS : [])];
+  // 開いたときの行: トランスフォーム（3D レイヤーでなければ 2D のものだけ）と、ほかの動きのあるプロパティすべて
+  const all = useLayerKeys(layer);
+  const three = !!layer.three_d || ["camera", "light", "model"].includes(layer.kind.type);
+  const rows = all.filter((p) =>
+    p.path.startsWith("transform.") ? three || !["transform.position_z", "transform.anchor_z", "transform.rotation_x", "transform.rotation_y"].includes(p.path) : p.animated,
+  );
   return (
     <div className="track">
       <div className="track-row" style={{ height: ROW }}>
-        <div
-          className={cls}
-          style={{ left: x0, width: Math.max(4, x1 - x0) }}
-          onPointerDown={onPointerDown}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            set({ selected: layer.id });
-            onMenu(e.clientX, e.clientY);
-          }}
-          title={layer.name}
-        >
-          <button
-            type="button"
-            className={`twirl-btn ${open ? "open" : ""}`}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => set((s) => ({ expanded: { ...s.expanded, [layer.id]: !s.expanded[layer.id] } }))}
-            title={open ? "閉じる" : "プロパティを開く"}
+        <ContextMenu>
+          <ContextMenuTrigger
+            render={<div className={cls} style={{ left: x0, width: Math.max(4, x1 - x0) }} title={layer.name} />}
+            onPointerDown={onPointerDown}
+            onContextMenu={() => set({ selected: layer.id, selectedFootage: null })}
           >
-            <Icon name="twirl" size={10} />
-          </button>
-          <span className="bar-name">{layer.name}</span>
-          {layer.locked && <Icon name="lock" size={12} className="bar-flag" />}
-          {!open &&
-            keyTimes(layer).map((t) => <span key={t} className="key-dot" style={{ left: xOf(view, timeToFrame(fr, t)) - x0 }} />)}
-        </div>
+            <button
+              type="button"
+              className={`twirl-btn ${open ? "open" : ""}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => set((s) => ({ expanded: { ...s.expanded, [layer.id]: !s.expanded[layer.id] } }))}
+              aria-label={open ? "閉じる" : "プロパティを開く"}
+            >
+              <Icon name="twirl" size={12} />
+            </button>
+            <span className="bar-name">{layer.name}</span>
+            {layer.locked && <Icon name="lock" size={12} className="bar-flag" />}
+            {!open && [...new Set(all.flatMap((p) => p.keys.map((k) => k.time)))].map((t) => (
+              <span key={t} className="key-dot" style={{ left: xOf(view, timeToFrame(fr, t)) - x0 }} />
+            ))}
+          </ContextMenuTrigger>
+          <LayerMenu layer={layer} />
+        </ContextMenu>
       </div>
-      {open &&
-        props.map((p) => <PropTrack key={p.path} comp={comp} layer={layer} path={p.path} label={p.label} view={view} x0={x0} />)}
+      {open && rows.map((p) => <PropTrack key={p.path} comp={comp} layer={layer} prop={p} view={view} x0={x0} />)}
     </div>
   );
 }
 
-function PropTrack(props: { comp: Composition; layer: Layer; path: PropPath; label: string; view: View; x0: number }) {
-  const { comp, layer, path, view } = props;
+function PropTrack(props: { comp: Composition; layer: Layer; prop: PropInfo; view: View; x0: number }) {
+  const { comp, layer, prop, view } = props;
   const fr = comp.frame_rate;
-  const prop = getProp(layer, path);
-  const keys = prop?.keyframes ?? [];
-  const sel = useUi((s) => s.selectedKey);
+  const keys = prop.keys;
+  const ui = useUi((s) => s);
   const ppf = view.width / view.span;
   const xs = keys.map((k) => xOf(view, timeToFrame(fr, k.time)));
   return (
     <div className="track-row sub" style={{ height: SUB }}>
-      <span className="prop-label" style={{ left: Math.max(props.x0 + 22, 4) }}>
-        {props.label}
+      <span className="prop-label" style={{ left: Math.max(props.x0 + 26, 4) }}>
+        {prop.label}
       </span>
-      {isAnimated(prop) && xs.length > 1 && <span className="key-span" style={{ left: xs[0], width: xs[xs.length - 1] - xs[0] }} />}
+      {keys.slice(0, -1).map((k, i) => (
+        <span
+          key={k.time}
+          className={`key-span ${k.kind === "hold" ? "hold" : ""} ${k.curve ? "curve" : ""}`}
+          style={{ left: xs[i], width: xs[i + 1] - xs[i] }}
+          title={k.curve ? "イージングカーブあり" : undefined}
+        />
+      ))}
       {keys.map((k, i) => {
-        const on = sel?.layer === layer.id && sel.path === path && sel.time === k.time;
+        const addr = { path: prop.path, time: k.time };
+        const on = isKeySelected(ui, layer.id, addr);
         return (
           <span
             key={k.time}
-            className={`key ${on ? "on" : ""} ${k.interp_out === "hold" ? "hold" : ""}`}
+            className={`key kind-${k.kind} ${on ? "on" : ""}`}
             style={{ left: xs[i] }}
-            title={`${props.label}: ${timecode(fr, timeToFrame(fr, k.time))}`}
+            title={`${prop.label}: ${timecode(fr, timeToFrame(fr, k.time))}`}
             onPointerDown={(e) => {
               e.stopPropagation();
               const f0 = timeToFrame(fr, k.time);
-              set({ selected: layer.id, selectedKey: { layer: layer.id, path, time: k.time } });
+              if (!on || e.shiftKey) selectKey(layer.id, addr, e.shiftKey);
               setFrame(f0);
               if (layer.locked) return;
+              // 選んでいるキーをまとめて動かす。動かした量は、最初からの差で決める
               const startX = e.clientX;
-              let cur = k.time;
+              let moved = 0;
               const move = (ev: PointerEvent) => {
                 const f = Math.max(0, snapFrame(comp, f0 + (ev.clientX - startX) / ppf, ppf, ""));
-                const t = frameToTime(fr, f);
-                if (t === cur) return;
-                const from = cur;
-                cur = t;
-                editLayer("キーフレームを移動", layer.id, (l) => moveKey(l, path, from, t), true);
-                set({ selectedKey: { layer: layer.id, path, time: t } });
+                const dt = frameToTime(fr, f) - k.time;
+                if (dt === moved) return;
+                const step = dt - moved;
+                moved = dt;
+                void keysOp("キーフレームを移動", { op: "shift", dt: step }, true);
                 setFrame(f);
               };
               const up = () => {
@@ -348,47 +366,43 @@ function PropTrack(props: { comp: Composition; layer: Layer; path: PropPath; lab
 
 /** 選んだキーフレームを消す（Delete キー）。消したら true。 */
 export function deleteSelectedKey(): boolean {
-  const k = get().selectedKey;
-  if (!k) return false;
-  editLayer("キーフレームを削除", k.layer, (l) => deleteKey(l, k.path as PropPath, k.time));
-  set({ selectedKey: null });
+  if (!get().selectedKeys?.keys.length) return false;
+  void keysOp("キーフレームを削除", { op: "delete" });
   return true;
 }
 
-function LayerMenu({ x, y, layer, onClose }: { x: number; y: number; layer: string; onClose: () => void }) {
-  const comp = currentComp();
-  const l = comp?.layers.find((l) => l.id === layer);
-  if (!comp || !l) return null;
-  const a = layerActions(layer);
-  const item = (label: string, f: () => void, hint?: string) => (
-    <MenuItem
-      label={label}
-      hint={hint}
-      onClick={() => {
-        f();
-        onClose();
-      }}
-    />
-  );
+function LayerMenu({ layer }: { layer: Layer }) {
+  const a = layerActions(layer.id);
   return (
-    <div className="popover context" style={{ left: x, top: y }} onPointerDown={(e) => e.stopPropagation()}>
-      {item(l.visible === false ? "表示する" : "隠す", a.toggleVisible)}
-      {item(l.locked ? "ロックを外す" : "ロック", a.toggleLock)}
-      {item(l.solo ? "ソロを外す" : "ソロ", a.toggleSolo)}
-      <div className="menu-sep" />
-      {item("複製", a.duplicate, "⌘D")}
-      {item("前面へ", () => a.reorder(-1), "⌘]")}
-      {item("背面へ", () => a.reorder(1), "⌘[")}
-      {item("再生ヘッドの位置から始める", () =>
-        editComp("レイヤーを移動", (c) => {
-          const t = frameToTime(c.frame_rate, get().frame);
-          const target = c.layers.find((x) => x.id === layer);
-          if (!target || target.locked) return false;
-          shiftLayer(target, t - target.in_point);
-        }),
-      )}
-      <div className="menu-sep" />
-      {item("削除", a.remove, "⌫")}
-    </div>
+    <ContextMenuContent className="w-60">
+      <ContextMenuItem onClick={a.toggleVisible}>{layer.visible === false ? "表示する" : "隠す"}</ContextMenuItem>
+      <ContextMenuItem onClick={a.toggleLock}>{layer.locked ? "ロックを外す" : "ロック"}</ContextMenuItem>
+      <ContextMenuItem onClick={a.toggleSolo}>{layer.solo ? "ソロを外す" : "ソロ"}</ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onClick={a.duplicate}>
+        複製<ContextMenuShortcut>⌘D</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => a.reorder(-1)}>
+        前面へ<ContextMenuShortcut>⌘]</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => a.reorder(1)}>
+        背面へ<ContextMenuShortcut>⌘[</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem
+        onClick={() =>
+          editComp("レイヤーを移動", (c) => {
+            const target = c.layers.find((x) => x.id === layer.id);
+            if (!target || target.locked) return false;
+            shiftLayer(target, frameToTime(c.frame_rate, get().frame) - target.in_point);
+          })
+        }
+      >
+        再生ヘッドの位置から始める
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem variant="destructive" onClick={a.remove}>
+        削除<ContextMenuShortcut>⌫</ContextMenuShortcut>
+      </ContextMenuItem>
+    </ContextMenuContent>
   );
 }

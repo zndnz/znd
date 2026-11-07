@@ -1,6 +1,6 @@
 //! フローティングウィンドウ: 書き出し・レンダーキュー、提出前チェック、履歴、版、レビュー、グラフエディター、スクリプト。
 
-use crate::icons::Icon;
+use crate::icons::{Icon, KeyKindIcon};
 use crate::panels::{apply_edit, path_label, KeyKind, PropEdit};
 use crate::timeline::KeySel;
 use crate::{base_dir, theme, unix_now, widgets, App, Task};
@@ -877,7 +877,7 @@ impl App {
                         // 1 次元のプロパティは、上下ドラッグで値を変えられる
                         let v = lo + (rect.bottom() - pos.y) as f64 / rect.height() as f64 * (hi - lo);
                         self.frame = fr.time_to_frame(from);
-                        edit = Some(PropEdit::Set(vec![v]));
+                        edit = Some(PropEdit::Set { value: vec![v] });
                     }
                 }
             }

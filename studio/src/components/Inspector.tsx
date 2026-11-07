@@ -1,28 +1,36 @@
 // インスペクタ（右）。選んだものの設定をすべてここに出す。
 // レイヤー → その全設定、素材 → その情報、どちらも選んでいなければ現在のコンポの設定。
 
-import { useEffect, useMemo, useState } from "react";
-import { api, type Evaluated } from "../api";
+import { useEffect, useState } from "react";
+import { api } from "../api";
 import {
   BLEND_MODES,
   type Composition,
   type EffectInfo,
   type EffectInstance,
   FRAME_RATES,
-  frameToTime,
   fromSeconds,
   type Layer,
   type ParamValue,
-  type Property,
+  type PropInfo,
   seconds,
   timecode,
   timeToFrame,
 } from "../model";
-import { getProp, isAnimated, type PropPath, setValue, THREE_D_PROPS, toggleAnimation, toggleKeyAt, TRANSFORM_PROPS } from "../ops";
 import { currentComp, editComp, editLayer, get, run, selectedLayer, set, useUi } from "../store";
-import { IconButton, MenuItem, NumberField, Popover, Row, Section, TextField } from "./controls";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Choice, IconButton, NumberField, Row, Section, TextField } from "./controls";
+import { EasingPanel } from "./Easing";
+import { FontPicker } from "./FontPicker";
 import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
+import { PropRow, useLayerProps } from "./PropRow";
+
+/** 選択欄の「なし」。 */
+const NONE = "__none";
 
 const toHex = (c: number[]) =>
   "#" + c.slice(0, 3).map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("");
@@ -42,145 +50,92 @@ export function Inspector() {
 
 // ---------- レイヤー ----------
 
-/** 今の時刻のトランスフォームの値（キーフレームを補間したもの）。 */
-function useEvaluated(comp: string, layer: Layer, frame: number): Evaluated | null {
-  const revision = useUi((s) => s.snap?.revision ?? 0);
-  const [v, setV] = useState<Evaluated | null>(null);
-  const animated = [...TRANSFORM_PROPS, ...THREE_D_PROPS].some((p) => isAnimated(getProp(layer, p.path)));
-  useEffect(() => {
-    if (!animated) return setV(null);
-    let alive = true;
-    void api.evalLayer(comp, layer.id, frame).then((r) => alive && setV(r));
-    return () => {
-      alive = false;
-    };
-  }, [comp, layer.id, frame, revision, animated, layer]);
-  return v;
-}
+/** 3D レイヤーでないときは出さないプロパティ。 */
+const ONLY_3D = ["transform.position_z", "transform.anchor_z", "transform.rotation_x", "transform.rotation_y"];
 
 function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
-  const frame = useUi((s) => s.frame);
-  const evaluated = useEvaluated(comp.id, layer, frame);
+  const props = useLayerProps(layer);
+  const hasKeys = useUi((s) => s.selectedKeys?.layer === layer.id);
+  // キーフレームを選んだら、イージングを開く
+  const [easeOpen, setEaseOpen] = useState(hasKeys);
+  useEffect(() => {
+    if (hasKeys) setEaseOpen(true);
+  }, [hasKeys]);
   const a = layerActions(layer.id);
   const fr = comp.frame_rate;
-  const t = frameToTime(fr, frame);
   const inF = timeToFrame(fr, layer.in_point);
   const outF = timeToFrame(fr, layer.out_point);
   const others = comp.layers.filter((l) => l.id !== layer.id);
-  const props = [...TRANSFORM_PROPS, ...(layer.three_d ? THREE_D_PROPS : [])];
+  const three = !!layer.three_d || ["camera", "light", "model"].includes(layer.kind.type);
+  const group = (f: (p: PropInfo) => boolean) => props.filter(f);
+  const transform = group((p) => (p.path.startsWith("transform.") && (three || !ONLY_3D.includes(p.path))) || /^(camera|light)\./.test(p.path));
+  const hasAudio = ["footage", "audio"].includes(layer.kind.type);
+  const timing = group((p) => p.path === "time_remap" || (p.path === "audio.level" && hasAudio));
+  const content = group((p) => p.path.startsWith("shape."));
+  const animators = group((p) => p.path.startsWith("text."));
+  const masks = group((p) => p.path.startsWith("mask."));
+  const rows = (list: PropInfo[]) => list.map((p) => <PropRow key={p.path} layer={layer} prop={p} />);
 
   return (
     <>
-      <div className="inspector-head">
-        <TextField value={layer.name} onChange={(v) => editLayer("名前", layer.id, (l) => void (l.name = v))} />
-        <div className="switches">
+      <div className="flex flex-col gap-2 px-4 pt-3.5 pb-3">
+        <TextField className="h-9 text-[15px] font-semibold" value={layer.name} onChange={(v) => editLayer("名前", layer.id, (l) => void (l.name = v))} />
+        <div className="flex items-center gap-0.5">
           <IconButton icon={layer.visible === false ? "eyeOff" : "eye"} title="表示" on={layer.visible !== false} onClick={a.toggleVisible} />
           <IconButton icon="solo" title="ソロ" on={!!layer.solo} onClick={a.toggleSolo} />
           <IconButton icon={layer.locked ? "lock" : "unlock"} title="ロック" on={!!layer.locked} onClick={a.toggleLock} />
           <IconButton icon="threeD" title="3D レイヤー" on={!!layer.three_d} onClick={a.toggle3d} />
           <IconButton icon="blur" title="モーションブラー" on={!!layer.motion_blur} onClick={a.toggleMotionBlur} />
-          <span className="grow" />
+          <span className="flex-1" />
           <IconButton icon="trash" title="削除" onClick={a.remove} />
         </div>
-        <div className="timing" title="イン点 – アウト点（長さ）">
-          {timecode(fr, inF)} – {timecode(fr, outF)} <span className="dim">（{timecode(fr, outF - inF)}）</span>
+        <div className="text-xs tabular-nums text-muted-foreground" title="イン点 – アウト点（長さ）">
+          {timecode(fr, inF)} – {timecode(fr, outF)}（{timecode(fr, outF - inF)}）
         </div>
       </div>
 
       <fieldset disabled={!!layer.locked} className="plain">
+        <Section title="イージング" open={easeOpen} onOpenChange={setEaseOpen}>
+          <EasingPanel />
+        </Section>
+
         <KindSection layer={layer} />
 
         <Section title="トランスフォーム">
-          {props.map((p) => {
-            const prop = getProp(layer, p.path);
-            const shown = (evaluated?.[p.path as keyof Evaluated] ?? prop?.value ?? 0) as number | [number, number];
-            const animated = isAnimated(prop);
-            const keyHere = !!prop?.keyframes?.some((k) => k.time === t);
-            const change = (v: number | [number, number], dragging: boolean) =>
-              editLayer(p.label, layer.id, (l) => setValue(l, p.path as PropPath, t, v), dragging);
-            return (
-              <div className="prop" key={p.path}>
-                <button
-                  type="button"
-                  className={`key-toggle ${animated ? "animated" : ""} ${keyHere ? "here" : ""}`}
-                  title={animated ? "この時刻にキーフレームを打つ／外す" : "アニメーションを始める（今の値でキーフレームを打つ）"}
-                  onClick={() =>
-                    editLayer("キーフレーム", layer.id, (l) =>
-                      animated ? toggleKeyAt(l, p.path as PropPath, t, shown) : toggleAnimation(l, p.path as PropPath, t, shown),
-                    )
-                  }
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (animated) editLayer("アニメーションを止める", layer.id, (l) => toggleAnimation(l, p.path as PropPath, t, shown));
-                  }}
-                >
-                  <Icon name="diamond" size={12} />
-                </button>
-                <span className="prop-name">{p.label}</span>
-                <span className="prop-values">
-                  {Array.isArray(shown) ? (
-                    <>
-                      <NumberField value={shown[0]} unit={p.unit} onChange={(v, d) => change([v, shown[1]], d)} />
-                      <NumberField value={shown[1]} unit={p.unit} onChange={(v, d) => change([shown[0], v], d)} />
-                    </>
-                  ) : (
-                    <NumberField
-                      value={shown}
-                      unit={p.unit}
-                      min={p.path === "opacity" ? 0 : undefined}
-                      max={p.path === "opacity" ? 100 : undefined}
-                      step={p.path === "opacity" ? 0.5 : 1}
-                      onChange={(v, d) => change(v, d)}
-                    />
-                  )}
-                </span>
-              </div>
-            );
-          })}
-          <p className="hint">◆ を押すとアニメーションが始まります。右クリックでアニメーションを止めます。</p>
+          {rows(transform)}
+          <p className="text-xs text-muted-foreground/70">◆ でキーフレームを打ちます（右クリックでアニメーションを止める）。= でエクスプレッション。</p>
         </Section>
+        {timing.length > 0 && <Section title="時間・音声">{rows(timing)}</Section>}
+        {content.length > 0 && <Section title="コンテンツ">{rows(content)}</Section>}
+        {animators.length > 0 && <Section title="テキストアニメーター">{rows(animators)}</Section>}
+        {masks.length > 0 && <Section title="マスク">{rows(masks)}</Section>}
 
         <Section title="合成">
           <Row label="描画モード">
-            <select value={layer.blend_mode ?? "normal"} onChange={(e) => editLayer("描画モード", layer.id, (l) => void (l.blend_mode = e.target.value))}>
-              {BLEND_MODES.map(([v, label]) => (
-                <option key={v} value={v}>
-                  {label}
-                </option>
-              ))}
-            </select>
+            <Choice value={layer.blend_mode ?? "normal"} options={BLEND_MODES} onChange={(v) => editLayer("描画モード", layer.id, (l) => void (l.blend_mode = v))} />
           </Row>
           <Row label="親">
-            <select value={layer.parent ?? ""} onChange={(e) => editLayer("親", layer.id, (l) => void (l.parent = e.target.value || null))}>
-              <option value="">なし</option>
-              {others.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
+            <Choice
+              value={layer.parent ?? NONE}
+              options={[[NONE, "なし"], ...others.map((o): [string, string] => [o.id, o.name])]}
+              onChange={(v) => editLayer("親", layer.id, (l) => void (l.parent = v === NONE ? null : v))}
+            />
           </Row>
           <Row label="トラックマット">
-            <select
-              value={(layer.track_matte as { layer: string } | null | undefined)?.layer ?? ""}
-              onChange={(e) =>
+            <Choice
+              value={(layer.track_matte as { layer: string } | null | undefined)?.layer ?? NONE}
+              options={[[NONE, "なし"], ...others.map((o): [string, string] => [o.id, o.name])]}
+              onChange={(v) =>
                 editLayer("トラックマット", layer.id, (l) => {
                   const cur = l.track_matte as { layer: string; mode: string } | null | undefined;
-                  l.track_matte = e.target.value ? { layer: e.target.value, mode: cur?.mode ?? "alpha" } : null;
+                  l.track_matte = v !== NONE ? { layer: v, mode: cur?.mode ?? "alpha" } : null;
                 })
               }
-            >
-              <option value="">なし</option>
-              {others.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
+            />
           </Row>
         </Section>
 
-        <EffectsSection comp={comp} layer={layer} />
+        <EffectsSection comp={comp} layer={layer} props={props} />
       </fieldset>
     </>
   );
@@ -207,15 +162,16 @@ function KindSection({ layer }: { layer: Layer }) {
           />
         </Row>
         <Row label="フォント">
-          <TextField
+          <FontPicker
             value={doc.font_family}
-            placeholder="既定のフォント"
+            text={doc.text}
             onChange={(v) => editLayer("フォント", layer.id, (l) => void (l.kind.type === "text" && (l.kind.document.font_family = v)))}
           />
         </Row>
         <Row label="塗り">
           <input
             type="color"
+            className="h-8 w-12 rounded-3xl"
             value={toHex(doc.fill ?? [1, 1, 1, 1])}
             onChange={(e) =>
               editLayer("文字の色", layer.id, (l) => {
@@ -233,6 +189,7 @@ function KindSection({ layer }: { layer: Layer }) {
         <Row label="色">
           <input
             type="color"
+            className="h-8 w-12 rounded-3xl"
             value={toHex(k.color)}
             onChange={(e) =>
               editLayer("色", layer.id, (l) => void ((l.kind.type === "solid" || l.kind.type === "light") && (l.kind.color = fromHex(e.target.value))), true)
@@ -250,15 +207,11 @@ function KindSection({ layer }: { layer: Layer }) {
 let catalogCache: Promise<EffectInfo[]> | null = null;
 const catalog = () => (catalogCache ??= api.effectCatalog());
 
-function EffectsSection({ comp, layer }: { comp: Composition; layer: Layer }) {
+function EffectsSection({ comp, layer, props }: { comp: Composition; layer: Layer; props: PropInfo[] }) {
   const [infos, setInfos] = useState<EffectInfo[]>([]);
-  const [query, setQuery] = useState("");
+  const [picking, setPicking] = useState(false);
   useEffect(() => void catalog().then(setInfos), []);
   const effects = layer.effects ?? [];
-  const found = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return infos.filter((i) => !q || `${i.label} ${i.category}`.toLowerCase().includes(q));
-  }, [infos, query]);
   const add = async (kind: string) => {
     try {
       const fx = await api.makeEffect(kind, comp.id, layer.id);
@@ -271,62 +224,61 @@ function EffectsSection({ comp, layer }: { comp: Composition; layer: Layer }) {
     <Section
       title="エフェクト"
       actions={
-        <Popover
-          align="end"
-          trigger={(open, toggle) => <IconButton icon="plus" title="エフェクトを追加" on={open} onClick={toggle} />}
-        >
-          {(close) => (
-            <div className="fx-picker">
-              <input autoFocus className="text-field" placeholder="エフェクトを検索" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
-              <div className="fx-list">
-                {found.map((i) => (
-                  <MenuItem key={i.kind} label={i.label} hint={i.category} onClick={() => (close(), setQuery(""), void add(i.kind))} />
+        <Popover open={picking} onOpenChange={setPicking}>
+          <PopoverTrigger render={<Button variant="ghost" size="icon-sm" aria-label="エフェクトを追加" className="text-muted-foreground" />}>
+            <Icon name="plus" />
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-72 p-0">
+            <Command>
+              <CommandInput placeholder="エフェクトを検索" onKeyDown={(e) => e.stopPropagation()} />
+              <CommandList className="max-h-80">
+                <CommandEmpty>一致するエフェクトがありません</CommandEmpty>
+                {infos.map((i) => (
+                  <CommandItem key={i.kind} value={`${i.label} ${i.category} ${i.kind}`} onSelect={() => (setPicking(false), void add(i.kind))}>
+                    <span className="flex-1">{i.label}</span>
+                    <span className="text-xs text-muted-foreground">{i.category}</span>
+                  </CommandItem>
                 ))}
-              </div>
-            </div>
-          )}
+              </CommandList>
+            </Command>
+          </PopoverContent>
         </Popover>
       }
     >
-      {effects.length === 0 && <p className="hint">＋ からエフェクトを追加できます。</p>}
+      {effects.length === 0 && <p className="text-xs text-muted-foreground/70">＋ からエフェクトを追加できます。</p>}
       {effects.map((fx, i) => (
-        <EffectCard key={i} layer={layer} fx={fx} index={i} info={infos.find((x) => x.kind === fx.kind)} />
+        <EffectCard key={i} layer={layer} fx={fx} index={i} info={infos.find((x) => x.kind === fx.kind)} props={props} />
       ))}
     </Section>
   );
 }
 
-function EffectCard({ layer, fx, index, info }: { layer: Layer; fx: EffectInstance; index: number; info?: EffectInfo }) {
+/**
+ * エフェクト 1 つ。数値・位置・色のパラメータはプロパティの行（◆ でキーフレーム、= でエクスプレッション）で、
+ * それ以外（スイッチ・選択肢・レイヤー・文字）はそのまま編集する。
+ */
+function EffectCard(props: { layer: Layer; fx: EffectInstance; index: number; info?: EffectInfo; props: PropInfo[] }) {
+  const { layer, fx, index, info } = props;
   const [open, setOpen] = useState(true);
-  const t = frameToTime(currentComp()!.frame_rate, get().frame);
-  const edit = (label: string, f: (fx: EffectInstance) => void, coalesce = false) =>
+  const edit = (label: string, f: (fx: EffectInstance) => void) =>
     editLayer(label, layer.id, (l) => {
       const e = l.effects?.[index];
       if (!e) return false;
       f(e);
-    }, coalesce);
-  const setProp = <V,>(p: Property<V>, v: V) => {
-    if (p.keyframes?.length) {
-      const k = p.keyframes.find((k) => k.time === t);
-      if (k) k.value = v;
-      else {
-        p.keyframes.push({ time: t, value: v, interp_in: "linear", interp_out: "linear" });
-        p.keyframes.sort((a, b) => a.time - b.time);
-      }
-    } else p.value = v;
-  };
+    });
   return (
-    <div className={`fx ${fx.enabled === false ? "off" : ""}`}>
-      <div className="fx-head">
-        <button type="button" className={`twirl-btn ${open ? "open" : ""}`} onClick={() => setOpen((o) => !o)}>
-          <Icon name="twirl" size={10} />
+    <div className={`flex flex-col gap-1.5 rounded-3xl bg-muted/50 p-2 ${fx.enabled === false ? "opacity-60" : ""}`}>
+      <div className="flex items-center gap-1.5 pl-1">
+        <button type="button" className={`twirl-btn ${open ? "open" : ""}`} onClick={() => setOpen((o) => !o)} aria-label="開く／閉じる">
+          <Icon name="twirl" size={12} />
         </button>
-        <input type="checkbox" checked={fx.enabled !== false} onChange={(e) => edit("エフェクトの有効", (f) => void (f.enabled = e.target.checked))} />
-        <span className="fx-name">{fx.name}</span>
-        {!info && <span className="warn">プラグインがありません</span>}
+        <Checkbox checked={fx.enabled !== false} onCheckedChange={(on) => edit("エフェクトの有効", (f) => void (f.enabled = on))} />
+        <span className="flex-1 truncate text-sm font-medium">{fx.name}</span>
+        {!info && <span className="text-xs text-amber-400">プラグインがありません</span>}
         <IconButton
           icon="up"
           title="上へ"
+          size="icon-xs"
           disabled={index === 0}
           onClick={() =>
             editLayer("エフェクトの順番", layer.id, (l) => {
@@ -335,73 +287,43 @@ function EffectCard({ layer, fx, index, info }: { layer: Layer; fx: EffectInstan
             })
           }
         />
-        <IconButton icon="close" title="外す" onClick={() => editLayer("エフェクトを削除", layer.id, (l) => void l.effects!.splice(index, 1))} />
+        <IconButton icon="close" title="外す" size="icon-xs" onClick={() => editLayer("エフェクトを削除", layer.id, (l) => void l.effects!.splice(index, 1))} />
       </div>
       {open &&
         info?.params.map((p) => {
           const v = fx.params[p.name] as ParamValue | undefined;
           if (!v) return null;
-          let control: React.ReactNode = <span className="dim">—</span>;
-          if (v.t === "scalar") {
-            const shown = v.v.keyframes?.find((k) => k.time === t)?.value ?? v.v.value;
-            control = (
-              <NumberField
-                value={shown}
-                min={p.min}
-                max={p.max}
-                step={p.max !== undefined && p.min !== undefined ? Math.max(0.01, (p.max - p.min) / 400) : 1}
-                digits={2}
-                onChange={(n, d) => edit(p.label, (f) => setProp((f.params[p.name] as { v: Property<number> }).v, n), d)}
-              />
-            );
-          } else if (v.t === "point") {
-            const s = v.v.value;
-            control = (
-              <>
-                <NumberField value={s[0]} onChange={(n, d) => edit(p.label, (f) => setProp((f.params[p.name] as { v: Property<[number, number]> }).v, [n, s[1]]), d)} />
-                <NumberField value={s[1]} onChange={(n, d) => edit(p.label, (f) => setProp((f.params[p.name] as { v: Property<[number, number]> }).v, [s[0], n]), d)} />
-              </>
-            );
-          } else if (v.t === "color") {
-            const c = v.v.value;
-            control = (
-              <input
-                type="color"
-                value={toHex(c)}
-                onChange={(e) => edit(p.label, (f) => setProp((f.params[p.name] as { v: Property<number[]> }).v, [...fromHex(e.target.value), c[3]]), true)}
-              />
-            );
-          } else if (v.t === "bool") {
-            control = <input type="checkbox" checked={v.v} onChange={(e) => edit(p.label, (f) => void ((f.params[p.name] as { v: boolean }).v = e.target.checked))} />;
+          if (v.t === "scalar" || v.t === "point" || v.t === "color") {
+            const prop = props.props.find((x) => x.path === `fx.${index}.${p.name}`);
+            return prop ? <PropRow key={p.name} layer={layer} prop={prop} label={p.label} /> : null;
+          }
+          let control: React.ReactNode = <span className="text-muted-foreground">—</span>;
+          if (v.t === "bool") {
+            control = <Checkbox checked={v.v} onCheckedChange={(on) => edit(p.label, (f) => void ((f.params[p.name] as { v: boolean }).v = on))} />;
           } else if (v.t === "choice") {
             control = (
-              <select value={v.v} onChange={(e) => edit(p.label, (f) => void ((f.params[p.name] as { v: number }).v = Number(e.target.value)))}>
-                {(p.choices ?? []).map((c, i) => (
-                  <option key={c} value={i}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <Choice
+                value={String(v.v)}
+                options={(p.choices ?? []).map((c, i): [string, string] => [String(i), c])}
+                onChange={(c) => edit(p.label, (f) => void ((f.params[p.name] as { v: number }).v = Number(c)))}
+              />
             );
           } else if (v.t === "text") {
             control = <TextField value={v.v} onChange={(s) => edit(p.label, (f) => void ((f.params[p.name] as { v: string }).v = s))} />;
           } else if (v.t === "layer") {
             const comp = currentComp()!;
             control = (
-              <select value={v.v ?? ""} onChange={(e) => edit(p.label, (f) => void ((f.params[p.name] as { v: string | null }).v = e.target.value || null))}>
-                <option value="">なし</option>
-                {comp.layers.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
+              <Choice
+                value={v.v ?? NONE}
+                options={[[NONE, "なし"], ...comp.layers.map((l): [string, string] => [l.id, l.name])]}
+                onChange={(id) => edit(p.label, (f) => void ((f.params[p.name] as { v: string | null }).v = id === NONE ? null : id))}
+              />
             );
           }
           return (
-            <Row key={p.name} label={p.label}>
-              {control}
-            </Row>
+            <div key={p.name} className="pl-7">
+              <Row label={p.label}>{control}</Row>
+            </div>
           );
         })}
     </div>
@@ -416,17 +338,16 @@ function FootageInspector({ id }: { id: string }) {
   const length = f.duration ?? f.audio?.duration;
   return (
     <>
-      <div className="inspector-head">
-        <div className="title">{f.name}</div>
-        <div className="timing dim">{f.path}</div>
+      <div className="flex flex-col gap-1 px-4 pt-3.5 pb-3">
+        <div className="text-[15px] font-semibold">{f.name}</div>
+        <div className="text-xs break-all text-muted-foreground">{f.path}</div>
       </div>
       <Section title="素材">
         {f.width > 0 && <Row label="大きさ">{`${f.width} × ${f.height}`}</Row>}
         {f.frame_rate && <Row label="フレームレート">{(f.frame_rate.num / f.frame_rate.den).toFixed(2)} fps</Row>}
         {length !== undefined && <Row label="長さ">{seconds(length).toFixed(2)} 秒</Row>}
-        <button
-          type="button"
-          className="wide-btn"
+        <Button
+          variant="secondary"
           onClick={async () => {
             const s = get();
             try {
@@ -439,7 +360,7 @@ function FootageInspector({ id }: { id: string }) {
           }}
         >
           現在のコンポに追加
-        </button>
+        </Button>
       </Section>
     </>
   );
@@ -452,9 +373,9 @@ function CompInspector({ comp }: { comp: Composition }) {
   const mb = comp.motion_blur ?? { enabled: false, shutter_angle: 180, shutter_phase: -90, samples: 16 };
   return (
     <>
-      <div className="inspector-head">
-        <TextField value={comp.name} onChange={(v) => editComp("コンポ名", (c) => void (c.name = v))} />
-        <div className="timing dim">
+      <div className="flex flex-col gap-2 px-4 pt-3.5 pb-3">
+        <TextField className="h-9 text-[15px] font-semibold" value={comp.name} onChange={(v) => editComp("コンポ名", (c) => void (c.name = v))} />
+        <div className="text-xs text-muted-foreground">
           {comp.layers.length} レイヤー・レイヤーを選ぶと、その設定をここで編集できます
         </div>
       </div>
@@ -464,20 +385,17 @@ function CompInspector({ comp }: { comp: Composition }) {
           <NumberField value={comp.height} digits={0} min={1} max={16384} onChange={(v, d) => editComp("コンポの大きさ", (c) => void (c.height = Math.round(v)), d)} />
         </Row>
         <Row label="フレームレート">
-          <select
-            value={rate?.label ?? ""}
-            onChange={(e) => {
-              const r = FRAME_RATES.find((x) => x.label === e.target.value);
+          <Choice
+            value={rate?.label ?? "custom"}
+            options={[
+              ...(rate ? [] : [["custom", `${(comp.frame_rate.num / comp.frame_rate.den).toFixed(3)} fps`] as [string, string]]),
+              ...FRAME_RATES.map((r): [string, string] => [r.label, `${r.label} fps`]),
+            ]}
+            onChange={(v) => {
+              const r = FRAME_RATES.find((x) => x.label === v);
               if (r) editComp("フレームレート", (c) => void (c.frame_rate = r.fr));
             }}
-          >
-            {!rate && <option value="">{(comp.frame_rate.num / comp.frame_rate.den).toFixed(3)}</option>}
-            {FRAME_RATES.map((r) => (
-              <option key={r.label} value={r.label}>
-                {r.label} fps
-              </option>
-            ))}
-          </select>
+          />
         </Row>
         <Row label="長さ">
           <NumberField value={seconds(comp.duration)} digits={2} step={0.05} min={0.04} unit="秒" onChange={(v, d) => editComp("コンポの長さ", (c) => void (c.duration = fromSeconds(v)), d)} />
@@ -488,7 +406,7 @@ function CompInspector({ comp }: { comp: Composition }) {
       </Section>
       <Section title="モーションブラー" defaultOpen={mb.enabled}>
         <Row label="有効">
-          <input type="checkbox" checked={mb.enabled} onChange={(e) => editComp("モーションブラー", (c) => void (c.motion_blur = { ...mb, enabled: e.target.checked }))} />
+          <Checkbox checked={mb.enabled} onCheckedChange={(on) => editComp("モーションブラー", (c) => void (c.motion_blur = { ...mb, enabled: on }))} />
         </Row>
         <Row label="シャッター角度">
           <NumberField value={mb.shutter_angle} min={0} max={720} unit="°" onChange={(v, d) => editComp("シャッター角度", (c) => void (c.motion_blur = { ...mb, shutter_angle: v }), d)} />
@@ -498,9 +416,9 @@ function CompInspector({ comp }: { comp: Composition }) {
         </Row>
       </Section>
       <Section title="ファイル" defaultOpen={false}>
-        <button type="button" className="wide-btn" onClick={() => void run(() => api.save(false), "保存しました")}>
+        <Button variant="secondary" onClick={() => void run(() => api.save(false), "保存しました")}>
           保存
-        </button>
+        </Button>
       </Section>
     </>
   );

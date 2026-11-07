@@ -11,21 +11,6 @@ use eframe::egui;
 use znd_core::keys::{self, KeyAddr, KeyClipboard, KeyStyle};
 use znd_core::*;
 
-impl KeyKind {
-    /// 一括変更用の指定にする。
-    pub(crate) fn style(self) -> KeyStyle {
-        let both = |i, o, m| KeyStyle { interp_in: Some(i), interp_out: Some(o), bezier_mode: Some(m), ease_in: None, ease_out: None };
-        match self {
-            KeyKind::Linear => both(Interp::Linear, Interp::Linear, BezierMode::Manual),
-            KeyKind::EasyEase => both(Interp::Bezier, Interp::Bezier, BezierMode::Manual),
-            KeyKind::EaseIn => both(Interp::Bezier, Interp::Linear, BezierMode::Manual),
-            KeyKind::EaseOut => both(Interp::Linear, Interp::Bezier, BezierMode::Manual),
-            KeyKind::AutoBezier => both(Interp::Bezier, Interp::Bezier, BezierMode::Auto),
-            KeyKind::Hold => KeyStyle { interp_out: Some(Interp::Hold), bezier_mode: Some(BezierMode::Manual), ..KeyStyle::new() },
-        }
-    }
-}
-
 /// 選択をレイヤーごとにまとめる。
 pub(crate) fn by_layer(sel: &[KeySel]) -> Vec<(LayerId, Vec<KeyAddr>)> {
     let mut out: Vec<(LayerId, Vec<KeyAddr>)> = Vec::new();

@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { EffectInfo, EffectInstance, Layer, Project, Snapshot, Vec2 } from "./model";
+import type { EaseCurve, EasePreset, EffectInfo, EffectInstance, KeyAddr, KeysOp, Layer, Project, PropEdit, PropInfo, Snapshot, Time, Vec2 } from "./model";
 
 export interface Frame {
   width: number;
@@ -36,6 +36,16 @@ export const api = {
   effectCatalog: () => invoke<EffectInfo[]>("effect_catalog"),
   makeEffect: (kind: string, comp: string, layer: string) => invoke<EffectInstance>("make_effect", { kind, comp, layer }),
   cached: (total: number, downsample: number) => invoke<number[]>("cached", { total, downsample }),
+
+  // ---- 純粋な計算（レイヤーを渡し、書き換えたものを受け取る） ----
+  layerProps: (layer: Layer, time: Time) => invoke<PropInfo[]>("layer_props", { layer, time }),
+  propEdit: (layer: Layer, path: string, time: Time, op: PropEdit) => invoke<Layer>("prop_edit", { layer, path, time, op }),
+  keysOp: (layer: Layer, keys: KeyAddr[], op: KeysOp) => invoke<{ layer: Layer; keys: KeyAddr[] }>("keys_op", { layer, keys, op }),
+  curveOf: (layer: Layer, keys: KeyAddr[]) => invoke<EaseCurve | null>("curve_of", { layer, keys }),
+  curvePresets: () => invoke<EasePreset[]>("curve_presets"),
+  curveSamples: (curve: EaseCurve, n: number) => invoke<number[]>("curve_samples", { curve, n }),
+  parseCurve: (text: string) => invoke<EaseCurve | null>("parse_curve", { text }),
+  fonts: () => invoke<[string, string[]][]>("fonts"),
 
   /** キャッシュにあればそのフレームを返す（無ければ null。できたら onFrameReady が呼ばれる）。 */
   async frame(comp: string, frame: number, downsample: number): Promise<Frame | null> {

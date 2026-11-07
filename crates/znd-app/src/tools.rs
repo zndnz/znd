@@ -296,7 +296,7 @@ impl App {
                         self.viewer_drag = Some(ViewerDrag::Rotate { last: a });
                         if d != 0.0 {
                             let (id, value) = (l.id.clone(), l.transform.rotation.eval(t) + d);
-                            self.edit_layer("回転", true, &id, |l| apply_edit(l, "transform.rotation", t, &PropEdit::Set(vec![value])));
+                            self.edit_layer("回転", true, &id, |l| apply_edit(l, "transform.rotation", t, &PropEdit::Set { value: vec![value] }));
                         }
                     }
                 }

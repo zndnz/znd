@@ -240,3 +240,69 @@ export const BLEND_MODES: [string, string][] = [
   ["silhouette_luma", "シルエットルミナンス"],
   ["alpha_add", "アルファ追加"],
 ];
+
+// ---------- プロパティ・キーフレーム・イージング ----------
+
+export type KeyKind = "linear" | "easy_ease" | "ease_in" | "ease_out" | "auto_bezier" | "hold";
+
+export const KEY_KINDS: [KeyKind, string][] = [
+  ["linear", "リニア"],
+  ["easy_ease", "イージーイーズ"],
+  ["ease_in", "イーズイン"],
+  ["ease_out", "イーズアウト"],
+  ["auto_bezier", "自動ベジェ"],
+  ["hold", "停止"],
+];
+
+export type EaseDir = "in" | "out" | "in_out";
+
+export type EaseCurve =
+  | { type: "bezier"; x1: number; y1: number; x2: number; y2: number }
+  | { type: "elastic"; dir: EaseDir; amplitude: number; frequency: number; decay: number }
+  | { type: "bounce"; dir: EaseDir; bounces: number; restitution: number }
+  | { type: "steps"; count: number };
+
+export interface EasePreset {
+  group: string;
+  name: string;
+  curve: EaseCurve;
+  samples: number[];
+}
+
+export interface KeyInfo {
+  time: Time;
+  kind: KeyKind;
+  curve: EaseCurve | null;
+}
+
+/** Rust の `znd_core::visit` のパスで指すプロパティ 1 つ（エフェクト・マスク・テキスト・シェイプなども含む）。 */
+export interface PropInfo {
+  path: string;
+  label: string;
+  vals: number[];
+  is_path: boolean;
+  animated: boolean;
+  expr: string | null;
+  keys: KeyInfo[];
+}
+
+export type PropEdit =
+  | { op: "set"; value: number[] }
+  | { op: "toggle_animation" }
+  | { op: "add_key" }
+  | { op: "remove_key" }
+  | { op: "kind"; kind: KeyKind }
+  | { op: "expr"; source: string | null }
+  | { op: "move_key"; from: Time; to: Time };
+
+/** キーフレーム 1 つ（プロパティのパス + 時刻）。 */
+export interface KeyAddr {
+  path: string;
+  time: Time;
+}
+
+export type KeysOp =
+  | { op: "curve"; curve: EaseCurve | null }
+  | { op: "kind"; kind: KeyKind }
+  | { op: "shift"; dt: Time }
+  | { op: "delete" };

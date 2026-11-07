@@ -8639,6 +8639,7 @@ dependencies = [
  "znd-media",
  "znd-preview",
  "znd-render",
+ "znd-text",
 ]
 
 [[package]]

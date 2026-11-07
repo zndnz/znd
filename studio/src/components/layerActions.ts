@@ -25,7 +25,7 @@ export function layerActions(id: string) {
         if (!l || l.locked) return false;
         deleteLayer(c, id);
       });
-      set({ selected: null, selectedKey: null });
+      set({ selected: null, selectedKeys: null });
     },
   };
 }

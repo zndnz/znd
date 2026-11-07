@@ -15,6 +15,7 @@ znd-core.workspace = true
 znd-render.workspace = true
 znd-media.workspace = true
 znd-preview.workspace = true
+znd-text.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.12", features = [] }

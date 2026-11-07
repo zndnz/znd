@@ -319,3 +319,22 @@ pub(crate) fn paint_sized(p: &Painter, rect: Rect, icon: Icon, color: Color32, s
 pub(crate) fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
     paint_sized(p, rect, icon, color, 17.0);
 }
+
+/// キーフレームの補間の形を表すアイコン。
+pub(crate) trait KeyKindIcon {
+    fn icon(self) -> Icon;
+}
+
+impl KeyKindIcon for znd_core::props::KeyKind {
+    fn icon(self) -> Icon {
+        use znd_core::props::KeyKind;
+        match self {
+            KeyKind::Linear => Icon::CurveLinear,
+            KeyKind::EasyEase => Icon::CurveEase,
+            KeyKind::EaseIn => Icon::CurveEaseIn,
+            KeyKind::EaseOut => Icon::CurveEaseOut,
+            KeyKind::AutoBezier => Icon::CurveAuto,
+            KeyKind::Hold => Icon::CurveHold,
+        }
+    }
+}
