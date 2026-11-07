@@ -37,6 +37,13 @@ export const api = {
   makeEffect: (kind: string, comp: string, layer: string) => invoke<EffectInstance>("make_effect", { kind, comp, layer }),
   cached: (total: number, downsample: number) => invoke<number[]>("cached", { total, downsample }),
 
+  // ---- 再生（音は Rust が鳴らす） ----
+  /** 再生を始める。`start`〜`end` のフレームを繰り返す。 */
+  play: (comp: string, frame: number, start: number, end: number) => invoke<void>("play", { comp, frame, start, end }),
+  stop: () => invoke<void>("stop"),
+  /** いま鳴っている位置のフレーム（音が無ければ null）。`frame` は経過時間から求めたフレーム。 */
+  playClock: (comp: string, frame: number) => invoke<number | null>("play_clock", { comp, frame }),
+
   // ---- 純粋な計算（レイヤーを渡し、書き換えたものを受け取る） ----
   layerProps: (layer: Layer, time: Time) => invoke<PropInfo[]>("layer_props", { layer, time }),
   propEdit: (layer: Layer, path: string, time: Time, op: PropEdit) => invoke<Layer>("prop_edit", { layer, path, time, op }),

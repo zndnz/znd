@@ -19,5 +19,4 @@ serde.workspace = true
 serde_json.workspace = true
 eframe = "0.29"
 rfd = "0.15"
-cpal = "0.15"
 encoding_rs = "0.8"

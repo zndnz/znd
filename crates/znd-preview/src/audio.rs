@@ -10,6 +10,38 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use znd_core::{CompId, Composition, EffectInstance, LayerKind, Project};
+
+/// コンポの音に関わる設定だけから作る署名。これが変わったときだけミックスし直せばよい。
+pub fn signature(project: &Project, comp: &CompId) -> u64 {
+    let Some(comp) = project.comp(comp) else { return 0 };
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut feed = |s: &str| s.bytes().for_each(|b| h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    feed(&comp.id.0);
+    fn walk(p: &Project, c: &Composition, feed: &mut dyn FnMut(&str), depth: usize) {
+        for l in &c.layers {
+            let nested = match &l.kind {
+                LayerKind::Precomp { comp } if depth < 16 => p.comp(comp),
+                _ => None,
+            };
+            // 音声エフェクト（プラグイン）のパラメータが変わったときもミックスし直す
+            let audio_fx: Vec<&EffectInstance> =
+                l.effects.iter().filter(|e| znd_core::effect::audio_processor(&e.kind).is_some()).collect();
+            if znd_audio::layer_footage(p, l).is_some() || nested.is_some() || !audio_fx.is_empty() {
+                feed(
+                    &serde_json::to_string(&(&l.kind, l.in_point, l.out_point, l.start_time, l.speed, &l.audio, &l.time_remap, l.solo))
+                        .unwrap_or_default(),
+                );
+                feed(&serde_json::to_string(&audio_fx).unwrap_or_default());
+            }
+            if let Some(n) = nested {
+                walk(p, n, feed, depth + 1);
+            }
+        }
+    }
+    walk(project, comp, &mut feed, 0);
+    h
+}
 
 #[derive(Default)]
 struct Shared {
@@ -58,8 +90,9 @@ pub fn heard_position(c: &ClockSample, now: Instant, offset: Duration, start: i6
     pos.max(start.min(c.pos))
 }
 
+/// 出力デバイスへの再生。デバイスのストリーム（スレッドをまたげない）は専用のスレッドが持ち続けるので、
+/// `Player` 自体はどのスレッドからでも使える。
 pub struct Player {
-    _stream: cpal::Stream,
     shared: Arc<Shared>,
     /// 再生を始めた位置。
     start: AtomicI64,
@@ -68,75 +101,102 @@ pub struct Player {
 impl Player {
     /// 既定の出力デバイスを開く。デバイスが無い・形式が合わないときは `None`（無音で動く）。
     pub fn new() -> Option<Player> {
-        let device = cpal::default_host().default_output_device()?;
-        let config = device.default_output_config().ok()?;
-        if config.sample_format() != cpal::SampleFormat::F32 {
-            return None;
-        }
-        let channels = config.channels() as usize;
-        // デバイスが 48kHz でないときは、読み進める速さを変えて合わせる（直線補間）
-        let step = 48_000.0 / config.sample_rate().0 as f64;
         let shared: Arc<Shared> = Arc::default();
         shared.stop_at.store(-1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
         let s = shared.clone();
-        let mut frac = 0.0f64;
-        let stream = device
-            .build_output_stream(
-                &config.into(),
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    data.fill(0.0);
-                    if !s.playing.load(Ordering::Relaxed) {
-                        return;
+        std::thread::Builder::new()
+            .name("znd-audio".into())
+            .spawn(move || match open_stream(s) {
+                Some(stream) => {
+                    let _ = tx.send(true);
+                    // ストリームはこのスレッドが持っている間だけ鳴る
+                    let _stream = stream;
+                    loop {
+                        std::thread::park();
                     }
-                    let ts = info.timestamp();
-                    let latency = ts.playback.duration_since(&ts.callback).unwrap_or_default();
-                    // 画面のスレッドを待たせない（取れなければこの回の記録は飛ばす）
-                    if let Ok(mut c) = s.clock.try_lock() {
-                        *c = Some(ClockSample { pos: s.pos.load(Ordering::Relaxed), at: Instant::now(), latency });
+                }
+                None => {
+                    let _ = tx.send(false);
+                }
+            })
+            .ok()?;
+        rx.recv().ok().filter(|ok| *ok)?;
+        Some(Player { shared, start: AtomicI64::new(0) })
+    }
+}
+
+/// 既定の出力デバイスのストリームを開いて鳴らし始める。
+fn open_stream(shared: Arc<Shared>) -> Option<cpal::Stream> {
+    let device = cpal::default_host().default_output_device()?;
+    let config = device.default_output_config().ok()?;
+    if config.sample_format() != cpal::SampleFormat::F32 {
+        return None;
+    }
+    let channels = config.channels() as usize;
+    // デバイスが 48kHz でないときは、読み進める速さを変えて合わせる（直線補間）
+    let step = 48_000.0 / config.sample_rate().0 as f64;
+    let s = shared;
+    let mut frac = 0.0f64;
+    let stream = device
+        .build_output_stream(
+            &config.into(),
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                data.fill(0.0);
+                if !s.playing.load(Ordering::Relaxed) {
+                    return;
+                }
+                let ts = info.timestamp();
+                let latency = ts.playback.duration_since(&ts.callback).unwrap_or_default();
+                // 画面のスレッドを待たせない（取れなければこの回の記録は飛ばす）
+                if let Ok(mut c) = s.clock.try_lock() {
+                    *c = Some(ClockSample { pos: s.pos.load(Ordering::Relaxed), at: Instant::now(), latency });
+                }
+                let buf = s.buffer.lock().map(|b| b.clone()).unwrap_or_default();
+                let frames = (buf.len() / 2) as i64;
+                let mut pos = s.pos.load(Ordering::Relaxed);
+                let stop = s.stop_at.load(Ordering::Relaxed);
+                let (ls, le) = (s.loop_start.load(Ordering::Relaxed), s.loop_end.load(Ordering::Relaxed));
+                for out in data.chunks_mut(channels) {
+                    if le > ls && pos >= le {
+                        pos = ls;
                     }
-                    let buf = s.buffer.lock().map(|b| b.clone()).unwrap_or_default();
-                    let frames = (buf.len() / 2) as i64;
-                    let mut pos = s.pos.load(Ordering::Relaxed);
-                    let stop = s.stop_at.load(Ordering::Relaxed);
-                    let (ls, le) = (s.loop_start.load(Ordering::Relaxed), s.loop_end.load(Ordering::Relaxed));
-                    for out in data.chunks_mut(channels) {
-                        if le > ls && pos >= le {
-                            pos = ls;
-                        }
-                        if pos >= frames || (stop >= 0 && pos >= stop) {
-                            s.playing.store(false, Ordering::Relaxed);
-                            s.stop_at.store(-1, Ordering::Relaxed);
-                            break;
-                        }
-                        if pos >= 0 {
-                            let i = pos as usize;
-                            let next = ((pos + 1).min(frames - 1)) as usize;
-                            let f = frac as f32;
-                            let l = buf[i * 2] + (buf[next * 2] - buf[i * 2]) * f;
-                            let r = buf[i * 2 + 1] + (buf[next * 2 + 1] - buf[i * 2 + 1]) * f;
-                            match out.len() {
-                                1 => out[0] = (l + r) * 0.5,
-                                _ => {
-                                    out[0] = l;
-                                    out[1] = r;
-                                }
+                    if pos >= frames || (stop >= 0 && pos >= stop) {
+                        s.playing.store(false, Ordering::Relaxed);
+                        s.stop_at.store(-1, Ordering::Relaxed);
+                        break;
+                    }
+                    if pos >= 0 {
+                        let i = pos as usize;
+                        let next = ((pos + 1).min(frames - 1)) as usize;
+                        let f = frac as f32;
+                        let l = buf[i * 2] + (buf[next * 2] - buf[i * 2]) * f;
+                        let r = buf[i * 2 + 1] + (buf[next * 2 + 1] - buf[i * 2 + 1]) * f;
+                        match out.len() {
+                            1 => out[0] = (l + r) * 0.5,
+                            _ => {
+                                out[0] = l;
+                                out[1] = r;
                             }
                         }
-                        frac += step;
-                        let whole = frac.floor();
-                        pos += whole as i64;
-                        frac -= whole;
                     }
-                    s.pos.store(pos, Ordering::Relaxed);
-                },
-                |e| eprintln!("音声出力エラー: {e}"),
-                None,
-            )
-            .ok()?;
-        stream.play().ok()?;
-        Some(Player { _stream: stream, shared, start: AtomicI64::new(0) })
-    }
+                    frac += step;
+                    let whole = frac.floor();
+                    pos += whole as i64;
+                    frac -= whole;
+                }
+                s.pos.store(pos, Ordering::Relaxed);
+            },
+            |e| eprintln!("音声出力エラー: {e}"),
+            None,
+        )
+        .ok()?;
+    stream.play().ok()?;
+    Some(stream)
+}
 
+impl Player {
+    /// 再生用の音声（48kHz ステレオを交互に並べたもの）を差し替える。再生中でもよい。
     pub fn set_buffer(&self, buffer: Arc<Vec<f32>>) {
         if let Ok(mut b) = self.shared.buffer.lock() {
             *b = buffer;
@@ -207,6 +267,12 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
+    fn player_is_send_sync() {
+        fn f<T: Send + Sync>() {}
+        f::<Player>();
+    }
 
     fn at(c: &ClockSample, ms: u64) -> Instant {
         c.at + Duration::from_millis(ms)

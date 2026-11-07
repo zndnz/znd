@@ -12,6 +12,7 @@ mod effects;
 mod layers;
 mod menu;
 mod props;
+mod sound;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ use znd_core::demo::demo_project;
 use znd_core::*;
 use znd_media::{import_file, ImportOptions};
 use znd_preview::PreviewEngine;
+use sound::Sound;
 
 /// 取り消し履歴の上限。
 const UNDO_LIMIT: usize = 200;
@@ -36,6 +38,9 @@ struct Studio {
     /// 直前の編集の名前（ドラッグ中の連続した編集を 1 つの取り消し単位にまとめる）。
     last_label: Option<String>,
     engine: Option<PreviewEngine>,
+    sound: Arc<Sound>,
+    /// 音を最後にミックスし直すか確かめた（リビジョン, コンポ）。
+    sound_checked: (u64, String),
     app: Option<AppHandle>,
 }
 
@@ -60,8 +65,20 @@ impl Studio {
             redo: Vec::new(),
             last_label: None,
             engine: None,
+            sound: Sound::new(),
+            sound_checked: (0, String::new()),
             app: None,
         }
+    }
+
+    /// 音を、いまの状態に合わせて（必要なら）ミックスし直す。
+    fn sync_sound(&mut self, comp: &str) {
+        if self.sound_checked.0 == self.revision && self.sound_checked.1 == comp {
+            return;
+        }
+        let Some(engine) = &self.engine else { return };
+        self.sound.sync(&self.project, &CompId::new(comp), &engine.clips);
+        self.sound_checked = (self.revision, comp.to_string());
     }
 
     /// プレビューのエンジンを（素材の置き場所が変わったときは作り直して）用意する。
@@ -71,6 +88,10 @@ impl Studio {
             let _ = app.emit("frame-ready", ());
         });
         self.engine = Some(engine);
+        // 素材を読み直すので、音もミックスし直す
+        self.sound.stop();
+        self.sound.invalidate();
+        self.sound_checked = (0, String::new());
     }
 
     fn replace(&mut self, project: Project, path: Option<PathBuf>) {
@@ -231,7 +252,9 @@ fn import(state: State<'_, Shared>, comp: String, frame: i64, sequence: bool) ->
 /// 表示したいフレームを伝え、キャッシュにあればその画像を返す（無ければ空。できたら "frame-ready" を送る）。
 #[tauri::command]
 fn frame(state: State<'_, Shared>, comp: String, frame: i64, downsample: u32) -> Response {
-    let s = lock(&state);
+    let mut s = lock(&state);
+    // 表示しているコンポの音を先にミックスしておく（再生を押してすぐ鳴るように）
+    s.sync_sound(&comp);
     let Some(engine) = &s.engine else { return Response::new(Vec::new()) };
     engine.request(&s.project, s.revision, &CompId::new(comp), frame, downsample.max(1));
     match engine.get(s.revision, frame, downsample.max(1)) {
@@ -244,6 +267,36 @@ fn frame(state: State<'_, Shared>, comp: String, frame: i64, downsample: u32) ->
         }
         None => Response::new(Vec::new()),
     }
+}
+
+fn frame_rate(s: &Studio, comp: &str) -> Option<FrameRate> {
+    s.project.comp(&CompId::new(comp)).map(|c| c.frame_rate)
+}
+
+/// 再生を始める（音があれば鳴らす）。`start`〜`end` のフレームを繰り返す。
+#[tauri::command]
+fn play(state: State<'_, Shared>, comp: String, frame: i64, start: i64, end: i64) {
+    let mut s = lock(&state);
+    s.sync_sound(&comp);
+    if let Some(fr) = frame_rate(&s, &comp) {
+        s.sound.play(fr, frame, (start, end));
+    }
+}
+
+#[tauri::command]
+fn stop(state: State<'_, Shared>) {
+    lock(&state).sound.stop();
+}
+
+/// 再生中、いま鳴っている位置のフレーム（音が無ければ null。画面は経過時間で進める）。
+/// `frame` は画面が経過時間から求めたフレーム。
+#[tauri::command]
+fn play_clock(state: State<'_, Shared>, comp: String, frame: i64) -> Option<i64> {
+    let mut s = lock(&state);
+    // 再生中の編集にも追いつく
+    s.sync_sound(&comp);
+    let fr = frame_rate(&s, &comp)?;
+    s.sound.clock(fr, frame)
 }
 
 /// RAM プレビュー済みのフレーム番号。
@@ -362,6 +415,9 @@ fn main() {
             save,
             import,
             frame,
+            play,
+            stop,
+            play_clock,
             cached,
             make_layer,
             eval_layer,

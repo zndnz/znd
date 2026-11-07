@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # RAM プレビュー（バックグラウンドでのレンダリングとキャッシュ）と GPU の初期化。
+# 音声の再生（出力デバイスへの書き込みと、音に合わせた再生位置）もここに置く。
 # egui のアプリ（znd-app）と Tauri のアプリ（znd-studio）の両方が使う。
 
 [dependencies]
@@ -15,3 +16,5 @@ znd-gpu.workspace = true
 znd-audio.workspace = true
 znd-script.workspace = true
 rayon.workspace = true
+serde_json.workspace = true
+cpal = "0.15"

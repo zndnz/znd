@@ -1,6 +1,5 @@
 //! znd アプリ。ビューア・タイムライン・プロパティ編集・音声同期・書き出し・提出前チェック。
 
-mod audio;
 mod beatfit_ui;
 mod easing;
 mod font_preview;
@@ -21,7 +20,7 @@ mod workspace;
 
 use eframe::egui;
 use znd_preview as preview;
-use znd_preview::PreviewEngine;
+use znd_preview::{audio, PreviewEngine};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -706,33 +705,7 @@ impl App {
 
     /// 音に関わる設定だけから作る署名。これが変わったときだけミックスし直す。
     fn audio_signature(&self) -> u64 {
-        let Some(comp) = self.shared.comp(&self.comp_id) else { return 0 };
-        let mut h = 0xcbf2_9ce4_8422_2325u64;
-        let mut feed = |s: &str| s.bytes().for_each(|b| h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
-        feed(&comp.id.0);
-        fn walk(p: &Project, c: &Composition, feed: &mut dyn FnMut(&str), depth: usize) {
-            for l in &c.layers {
-                let nested = match &l.kind {
-                    LayerKind::Precomp { comp } if depth < 16 => p.comp(comp),
-                    _ => None,
-                };
-                // 音声エフェクト（プラグイン）のパラメータが変わったときもミックスし直す
-                let audio_fx: Vec<&EffectInstance> =
-                    l.effects.iter().filter(|e| znd_core::effect::audio_processor(&e.kind).is_some()).collect();
-                if znd_audio::layer_footage(p, l).is_some() || nested.is_some() || !audio_fx.is_empty() {
-                    feed(
-                        &serde_json::to_string(&(&l.kind, l.in_point, l.out_point, l.start_time, l.speed, &l.audio, &l.time_remap, l.solo))
-                            .unwrap_or_default(),
-                    );
-                    feed(&serde_json::to_string(&audio_fx).unwrap_or_default());
-                }
-                if let Some(n) = nested {
-                    walk(p, n, feed, depth + 1);
-                }
-            }
-        }
-        walk(&self.shared, comp, &mut feed, 0);
-        h
+        audio::signature(&self.shared, &self.comp_id)
     }
 
     fn tick_audio(&mut self, ctx: &egui::Context) {

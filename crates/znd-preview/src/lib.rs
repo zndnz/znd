@@ -5,6 +5,8 @@
 //! 影響の無いフレームは作り直さない。環境変数 `ZND_DISK_CACHE` にフォルダを指定すると、
 //! 同じキーでディスクにも保存し、次回起動時に再利用する。
 
+pub mod audio;
+
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

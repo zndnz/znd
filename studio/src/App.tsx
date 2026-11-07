@@ -100,28 +100,55 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-/** 再生中は、経過時間からフレームを決める（ワークエリアがあればその中を繰り返す）。 */
+/**
+ * 再生中のフレームを決める。音があれば Rust が鳴らしている位置に合わせ（映像が音に合わせて進む）、
+ * 無ければ経過時間で進める。ワークエリアがあればその中を繰り返す。
+ */
 function usePlayback() {
   const playing = useUi((s) => s.playing);
   useEffect(() => {
     if (!playing) return;
     const comp = currentComp();
     if (!comp) return;
+    const compId = comp.id;
     const rate = fps(comp.frame_rate);
-    const t0 = performance.now();
-    const f0 = get().frame;
+    const total = totalFrames();
+    const [a, b] = get().workArea ?? [0, total];
+    // ワークエリアの外にいたら先頭から
+    if (get().frame < a || get().frame >= b) set({ frame: a });
+    let t0 = performance.now();
+    let f0 = get().frame;
     let raf = 0;
+    let asking = false;
+    let stopped = false;
+    void api.play(compId, f0, a, b);
     const tick = (now: number) => {
-      const total = totalFrames();
-      const [a, b] = get().workArea ?? [0, total];
       const len = Math.max(1, b - a);
       let f = f0 + Math.floor(((now - t0) / 1000) * rate);
       if (f >= b) f = a + ((f - a) % len);
       if (get().frame !== f) set({ frame: f });
+      // 音の位置を尋ね、返ってきたらそこを起点にする（前の問い合わせが返るまでは待たない）
+      if (!asking) {
+        asking = true;
+        void api
+          .playClock(compId, f)
+          .then((af) => {
+            if (stopped || af === null) return;
+            t0 = performance.now();
+            f0 = Math.max(a, Math.min(b - 1, af));
+            if (get().frame !== f0) set({ frame: f0 });
+          })
+          .catch(() => {})
+          .finally(() => (asking = false));
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+      void api.stop();
+    };
   }, [playing]);
 }
 
