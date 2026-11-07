@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
-use znd_core::demo::demo_project;
 use znd_core::*;
 use znd_media::{import_file, ImportOptions};
 use znd_preview::PreviewEngine;
@@ -190,10 +189,17 @@ fn redo(state: State<'_, Shared>) -> Snapshot {
     s.snapshot()
 }
 
+/// 空のプロジェクト（空のコンポを 1 つだけ持つ）。
+fn empty_project() -> Project {
+    let mut p = Project::new("無題");
+    p.compositions.push(Composition::new("comp1", "コンポ 1", 1920, 1080, FrameRate::FPS_30, Time::from_seconds(10.0)));
+    p
+}
+
 #[tauri::command]
-fn new_demo(state: State<'_, Shared>) -> Snapshot {
+fn new_project(state: State<'_, Shared>) -> Snapshot {
     let mut s = lock(&state);
-    s.replace(demo_project(), None);
+    s.replace(empty_project(), None);
     s.snapshot()
 }
 
@@ -389,9 +395,9 @@ fn main() {
         Some((p, Ok(project))) => Studio::new(project, Some(p.clone())),
         Some((p, Err(e))) => {
             eprintln!("{} を開けません: {e}", p.display());
-            Studio::new(demo_project(), None)
+            Studio::new(empty_project(), None)
         }
-        None => Studio::new(demo_project(), None),
+        None => Studio::new(empty_project(), None),
     };
     tauri::Builder::default()
         .manage(Mutex::new(studio))
@@ -410,7 +416,7 @@ fn main() {
             commit,
             undo,
             redo,
-            new_demo,
+            new_project,
             open,
             save,
             import,

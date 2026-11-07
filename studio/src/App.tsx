@@ -18,8 +18,8 @@ function onMenu(id: string) {
   const s = get();
   if (id.startsWith("layer:")) return void createLayer(id.slice(6));
   switch (id) {
-    case "new_demo":
-      return void run(api.newDemo, "デモプロジェクトを開きました");
+    case "new":
+      return void run(api.newProject, "新しいプロジェクトを作りました");
     case "open":
       return void run(() => api.open(), "開きました");
     case "save":

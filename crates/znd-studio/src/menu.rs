@@ -14,7 +14,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     };
     let app_menu = SubmenuBuilder::new(app, "znd").about(None).separator().hide().hide_others().separator().quit().build()?;
     let file = SubmenuBuilder::new(app, "ファイル")
-        .item(&item("new_demo", "新規（デモプロジェクト）", Some("CmdOrCtrl+N"))?)
+        .item(&item("new", "新規プロジェクト", Some("CmdOrCtrl+N"))?)
         .item(&item("open", "開く…", Some("CmdOrCtrl+O"))?)
         .separator()
         .item(&item("save", "保存", Some("CmdOrCtrl+S"))?)
