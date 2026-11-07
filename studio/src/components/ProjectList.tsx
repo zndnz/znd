@@ -3,7 +3,8 @@
 import { api } from "../api";
 import { type FootageItem, FLICKS, seconds } from "../model";
 import { freshId } from "../ops";
-import { edit, get, run, set, useUi } from "../store";
+import { edit, editComp, get, run, set, useUi } from "../store";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuShortcut, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -40,6 +41,7 @@ export function ProjectList() {
   const project = useUi((s) => s.project);
   const compId = useUi((s) => s.compId);
   const selFootage = useUi((s) => s.selectedFootage);
+  const [search, setSearch] = useState("");
   if (!project) return <aside className="sidebar" />;
 
   const used = (fid: string) => project.compositions.some((c) => c.layers.some((l) => (l.kind as { footage?: string }).footage === fid));
@@ -57,22 +59,56 @@ export function ProjectList() {
     openComp(next);
   };
 
-  const item = (key: string, selected: boolean, icon: string, name: string, meta: string, title: string, onClick: () => void, onDelete: () => void) => (
+  /** 現在のコンポにレイヤーとして追加する（素材、またはほかのコンポ）。 */
+  const addToComp = async (kind: string) => {
+    const s = get();
+    try {
+      const layer = await api.makeLayer(kind, s.compId, s.frame);
+      editComp("レイヤー追加", (c) => void c.layers.unshift(layer));
+      set({ selected: layer.id, selectedFootage: null });
+    } catch (e) {
+      set({ status: String(e) });
+    }
+  };
+  const q = search.trim().toLowerCase();
+  const match = (name: string) => !q || name.toLowerCase().includes(q);
+  const unconfirmed = (f: FootageItem) => {
+    const r = f.rights as Record<string, string> | undefined;
+    return !r || ["copyright", "neighboring", "portrait", "trademark"].some((k) => (r[k] ?? "unconfirmed") === "unconfirmed");
+  };
+
+  const item = (
+    key: string,
+    selected: boolean,
+    icon: string,
+    name: string,
+    meta: string,
+    title: string,
+    onClick: () => void,
+    onDelete: () => void,
+    onAdd: (() => void) | null,
+    warn = false,
+  ) => (
     <ContextMenu key={key}>
       <ContextMenuTrigger
         render={
           <div
             className={cn("flex h-9 items-center gap-2.5 rounded-3xl px-3 text-sm", selected ? "bg-primary text-primary-foreground" : "hover:bg-muted")}
-            title={title}
+            title={warn ? `${title}\n権利が未確認です（インスペクタで入力できます）` : title}
             onClick={onClick}
+            onDoubleClick={() => onAdd?.()}
           />
         }
       >
         <Icon name={icon} className={selected ? "opacity-80" : "text-muted-foreground"} />
         <span className="flex-1 truncate">{name}</span>
+        {warn && <span className={cn("text-xs", selected ? "opacity-80" : "text-amber-400")} title="権利が未確認">⚠</span>}
         <span className={cn("text-xs tabular-nums", selected ? "opacity-70" : "text-muted-foreground")}>{meta}</span>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        <ContextMenuItem disabled={!onAdd} onClick={() => onAdd?.()}>
+          現在のコンポにレイヤーとして追加
+        </ContextMenuItem>
         <ContextMenuItem variant="destructive" onClick={onDelete}>
           削除（使われていないものだけ）
         </ContextMenuItem>
@@ -106,9 +142,21 @@ export function ProjectList() {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      <div className="px-3 pb-1">
+        <input
+          className="h-8 w-full rounded-3xl bg-input/50 px-3 text-sm outline-none placeholder:text-muted-foreground/60"
+          placeholder="検索"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Escape") setSearch("");
+          }}
+        />
+      </div>
       <div className="flex flex-col gap-0.5 overflow-y-auto px-2 pb-4">
         <div className="px-3 pt-3 pb-1.5 text-xs text-muted-foreground">コンポジション</div>
-        {project.compositions.map((c) =>
+        {project.compositions.filter((c) => match(c.name)).map((c) =>
           item(
             c.id,
             c.id === compId && !selFootage,
@@ -118,10 +166,11 @@ export function ProjectList() {
             `${c.width}×${c.height}・${(c.frame_rate.num / c.frame_rate.den).toFixed(2)} fps・${seconds(c.duration).toFixed(2)} 秒`,
             () => (c.id === compId ? set({ selected: null, selectedFootage: null }) : openComp(c.id)),
             () => removeComp(c.id),
+            c.id === compId ? null : () => void addToComp(`precomp:${c.id}`),
           ),
         )}
         {project.footage.length > 0 && <div className="px-3 pt-4 pb-1.5 text-xs text-muted-foreground">素材</div>}
-        {project.footage.map((f) => {
+        {project.footage.filter((f) => match(f.name)).map((f) => {
           const length = f.duration ?? f.audio?.duration;
           return item(
             f.id,
@@ -132,6 +181,8 @@ export function ProjectList() {
             f.path,
             () => set({ selectedFootage: f.id, selected: null }),
             () => removeFootage(f.id),
+            () => void addToComp(`footage:${f.id}`),
+            unconfirmed(f),
           );
         })}
       </div>

@@ -41,6 +41,14 @@ pub fn make(project: &Project, comp_id: &CompId, kind: &str, frame: i64) -> Resu
             place_at(&mut cam, comp, frame, project);
             return Ok(cam);
         }
+        other if other.starts_with("precomp:") => {
+            let id = CompId::new(&other["precomp:".len()..]);
+            let nested = project.comp(&id).ok_or("コンポがありません")?;
+            if &id == comp_id {
+                return Err("コンポを自分自身の中には置けません".into());
+            }
+            (nested.name.as_str(), LayerKind::Precomp { comp: id })
+        }
         other => match other.strip_prefix("footage:").and_then(|id| project.footage_item(&FootageId::new(id))) {
             // 素材のレイヤー（音だけの素材は音声のレイヤー）
             Some(item) => {
