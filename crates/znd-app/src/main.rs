@@ -126,7 +126,7 @@ fn install_japanese_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// エフェクトを GPU で処理するか（ウィンドウメニューで切り替える）。
+/// エフェクトを GPU で処理するか（表示メニューで切り替える）。
 static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
 
 fn gpu_backend() -> Option<&'static znd_gpu::GpuBackend> {
@@ -341,7 +341,6 @@ pub struct App {
     /// 各パネルで開いているタブ。
     pub(crate) right_tab: usize,
     pub(crate) project_search: String,
-    pub(crate) fx_search: String,
     /// ビューアに出すチャンネル（0 = RGB、1〜3 = R・G・B、4 = 輝度）。
     pub(crate) channel: u8,
     pub(crate) show_guides: bool,
@@ -456,7 +455,6 @@ impl App {
             key_target: None,
             right_tab: 0,
             project_search: String::new(),
-            fx_search: String::new(),
             channel: 0,
             show_guides: false,
             show_grid: false,

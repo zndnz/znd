@@ -18,14 +18,14 @@ use znd_core::*;
 use znd_core::keys;
 
 /// 左ペイン（レイヤーの列）の既定の幅。
-pub(crate) const LEFT_DEFAULT: f32 = 380.0;
+pub(crate) const LEFT_DEFAULT: f32 = 430.0;
 const ROW: f32 = theme::ROW_H;
-const HEAD_H: f32 = 26.0;
-const COLS_H: f32 = 18.0;
-const FOOT_H: f32 = 15.0;
-const AUDIO_ROW: f32 = 40.0;
+const HEAD_H: f32 = 40.0;
+const COLS_H: f32 = 24.0;
+const FOOT_H: f32 = 22.0;
+const AUDIO_ROW: f32 = 48.0;
 /// ルーラー上端の、ワークエリアのバーの高さ。
-const WORK_H: f32 = 7.0;
+const WORK_H: f32 = 8.0;
 
 /// 最大拡大時の 1 フレームの幅（px）。30fps・48kHz で 1 サンプルが 1px を超える。
 const MAX_PX_PER_FRAME: f64 = 2400.0;
@@ -136,15 +136,15 @@ struct Geo {
     show_mode: bool,
 }
 
-const AV_W: f32 = 16.0;
-const SW_W: f32 = 16.0;
-const MODE_W: f32 = 66.0;
-const MATTE_W: f32 = 66.0;
-const PARENT_W: f32 = 78.0;
+const AV_W: f32 = 20.0;
+const SW_W: f32 = 20.0;
+const MODE_W: f32 = 80.0;
+const MATTE_W: f32 = 80.0;
+const PARENT_W: f32 = 92.0;
 /// 展開の三角・プロパティのインデントが始まる位置。
-const TREE_X: f32 = 58.0;
+const TREE_X: f32 = 74.0;
 /// 表示・ソロ・ロックの列の始まり（左端はラベルの色の帯）。
-const AV_X: f32 = 6.0;
+const AV_X: f32 = 8.0;
 /// ラベルの色の帯の幅。
 const STRIPE_W: f32 = 3.0;
 
@@ -396,16 +396,7 @@ impl App {
         let fr = comp.frame_rate;
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
-        let mut tab = 0;
-        let rest = widgets::tab_strip(ui, &[&comp.name], &mut tab);
-        ui.painter().text(
-            rest.right_center() - vec2(8.0, 0.0),
-            Align2::RIGHT_CENTER,
-            format!("{} レイヤー　{}×{}　{:.2} fps", comp.layers.len(), comp.width, comp.height, fr.fps()),
-            FontId::proportional(10.0),
-            theme::TEXT_DIM,
-        );
-
+        // コンポの名前と大きさは、左上の現在時刻にポインタを載せると出る（タブの段は置かない）
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
         let mut area = full;
@@ -414,13 +405,13 @@ impl App {
         let foot = take_bottom(&mut area, FOOT_H);
         let audio = self.has_audio().then(|| take_top(&mut area, AUDIO_ROW));
 
-        self.tl_left = self.tl_left.clamp(300.0, (full.width() - 240.0).max(300.0));
+        self.tl_left = self.tl_left.clamp(340.0, (full.width() - 240.0).max(340.0));
         let geo = Geo {
             x0: full.left(),
             split: full.left() + self.tl_left,
             // モード・マット・親は右のプロパティと右クリックでも変えられるので、詳しい列を選んだときだけ出す
-            show_parent: self.tl_detail && self.tl_left >= 440.0,
-            show_matte: self.tl_detail && self.tl_left >= 370.0,
+            show_parent: self.tl_detail && self.tl_left >= 520.0,
+            show_matte: self.tl_detail && self.tl_left >= 430.0,
             show_mode: self.tl_detail,
         };
         // 先頭フレームのキーフレームが欠けないよう、左に少し余白を取る
@@ -717,33 +708,45 @@ impl App {
     /// 左上: 現在時刻、レイヤーの検索、表示の切り替え。
     fn tl_header(&mut self, ui: &mut egui::Ui, comp: &Composition, rect: Rect, total: i64) {
         let fr = comp.frame_rate;
-        let mut ui = child(ui, rect.shrink2(vec2(6.0, 2.0)), Layout::left_to_right(Align::Center));
-        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+        let mut ui = child(ui, rect.shrink2(vec2(10.0, 4.0)), Layout::left_to_right(Align::Center));
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         let mut f = self.frame;
         let changed = ui
             .scope(|ui| {
                 ui.visuals_mut().override_text_color = Some(theme::VALUE);
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                ui.style_mut().override_font_id = Some(FontId::monospace(15.0));
+                ui.style_mut().override_font_id = Some(FontId::monospace(17.0));
                 ui.add(
                     egui::DragValue::new(&mut f)
                         .range(0..=total - 1)
                         .custom_formatter(move |v, _| timecode(fr, v as i64))
                         .custom_parser(|s| s.trim().parse::<f64>().ok()),
                 )
-                .on_hover_text(format!("現在の時刻（{} フレーム目・{:.2} fps）。ドラッグで移動、クリックしてフレーム番号を入力", self.frame, fr.fps()))
+                .on_hover_text(format!(
+                    "{}（{} レイヤー・{}×{}・{:.2} fps）\n現在の時刻: {} / {} フレーム目。ドラッグで移動、クリックしてフレーム番号を入力",
+                    comp.name,
+                    comp.layers.len(),
+                    comp.width,
+                    comp.height,
+                    fr.fps(),
+                    self.frame,
+                    total
+                ))
                 .changed()
             })
             .inner;
         if changed {
             self.set_frame(f, false);
         }
-        ui.add_space(4.0);
-        // 右に並ぶアイコン（8 個 × 24px）の残りを検索欄に使う
-        let search_w = (ui.available_width() - 8.0 * 24.0 - 24.0).clamp(36.0, 140.0);
+        // 右に並ぶアイコン（4 個 × 32px）の残りを検索欄に使う
+        let search_w = (ui.available_width() - 4.0 * 32.0 - 34.0).clamp(40.0, 180.0);
         widgets::search_box(&mut ui, &mut self.tl_search, "レイヤーを検索", search_w);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            self.tl_view_button(ui, comp);
+            if widgets::icon_toggle(ui, Icon::Graph, self.show.graph, "グラフエディター").clicked() {
+                self.show.graph = !self.show.graph;
+            }
             if widgets::icon_toggle(
                 ui,
                 Icon::Magnet,
@@ -754,33 +757,35 @@ impl App {
             {
                 self.snap = !self.snap;
             }
-            if widgets::icon_toggle(ui, Icon::Graph, self.show.graph, "グラフエディター").clicked() {
-                self.show.graph = !self.show.graph;
-            }
-            if widgets::icon_toggle(
-                ui,
-                Icon::MotionBlur,
-                comp.motion_blur.enabled,
-                "モーションブラーを有効にする（スイッチを入れたレイヤーに掛かります）",
-            )
-            .clicked()
-            {
-                let on = !comp.motion_blur.enabled;
-                self.edit_comp("モーションブラー", false, |c| c.motion_blur.enabled = on);
-            }
-            if widgets::icon_toggle(ui, Icon::Diamond, self.only_animated, "キーフレームかエクスプレッションのあるプロパティだけを表示")
-                .clicked()
-            {
-                self.only_animated = !self.only_animated;
-            }
-            if widgets::icon_toggle(ui, Icon::Columns, self.tl_detail, "描画モード・トラックマット・親の列を出す").clicked() {
-                self.tl_detail = !self.tl_detail;
-            }
-            if widgets::icon_toggle(ui, Icon::Shy, self.hide_shy, "シャイのレイヤーを隠す").clicked() {
-                self.hide_shy = !self.hide_shy;
-            }
             if widgets::icon_button(ui, Icon::Marker, "現在の時刻にマーカーを追加 (M)").clicked() {
                 self.add_marker("");
+            }
+        });
+    }
+
+    /// タイムラインの表示の切り替えをまとめたボタン（動きのあるプロパティだけ・詳しい列・シャイ・モーションブラー）。
+    /// どれかが既定から変わっているときは選択色で塗る。
+    fn tl_view_button(&mut self, ui: &mut egui::Ui, comp: &Composition) {
+        let changed = self.only_animated || self.tl_detail || self.hide_shy;
+        let resp = widgets::icon_toggle(ui, Icon::Columns, changed, "タイムラインの表示…");
+        let id = ui.make_persistent_id("tl_view_popup");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(id));
+        }
+        egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_min_width(280.0);
+            ui.checkbox(&mut self.only_animated, "動きのあるプロパティだけを表示")
+                .on_hover_text("キーフレームかエクスプレッションのあるプロパティだけを出します");
+            ui.checkbox(&mut self.tl_detail, "描画モード・トラックマット・親の列を出す");
+            ui.checkbox(&mut self.hide_shy, "シャイのレイヤーを隠す");
+            ui.separator();
+            let mut on = comp.motion_blur.enabled;
+            if ui
+                .checkbox(&mut on, "モーションブラー")
+                .on_hover_text("コンポのモーションブラーを有効にする（スイッチを入れたレイヤーに掛かります）")
+                .changed()
+            {
+                self.edit_comp("モーションブラー", false, |c| c.motion_blur.enabled = on);
             }
         });
     }
@@ -790,15 +795,15 @@ impl App {
         let p = ui.painter_at(rect);
         let dim = theme::TEXT_DIM;
         for (i, icon) in [Icon::Eye, Icon::Solo, Icon::Lock].into_iter().enumerate() {
-            icons::paint_sized(&p, geo.cell(geo.x0 + AV_X + i as f32 * AV_W, AV_W, rect), icon, dim, 12.0);
+            icons::paint_sized(&p, geo.cell(geo.x0 + AV_X + i as f32 * AV_W, AV_W, rect), icon, dim, 14.0);
         }
-        let font = FontId::proportional(10.0);
+        let font = FontId::proportional(11.5);
         let text = |x: f32, s: &str| {
             p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, s, font.clone(), dim);
         };
         text(geo.x0 + TREE_X + 14.0, "レイヤー");
         for (i, icon) in [Icon::Shy, Icon::Fx, Icon::MotionBlur, Icon::Model].into_iter().enumerate() {
-            icons::paint_sized(&p, geo.cell(geo.switches() + i as f32 * SW_W, SW_W, rect), icon, dim, 12.0);
+            icons::paint_sized(&p, geo.cell(geo.switches() + i as f32 * SW_W, SW_W, rect), icon, dim, 14.0);
         }
         if geo.show_mode {
             text(geo.mode() + 5.0, "モード");
@@ -850,7 +855,7 @@ impl App {
             p.vline(x, (rect.bottom() - len)..=rect.bottom(), Stroke::new(1.0_f32, color));
             if f % major == 0 {
                 let label = if f % fps == 0 { format!("{:02}:{:02}", f / fps / 60, f / fps % 60) } else { format!("{:02}f", f % fps) };
-                p.text(pos2(x + 3.0, strip.bottom() + 1.0), Align2::LEFT_TOP, label, FontId::monospace(10.0), theme::TEXT_DIM);
+                p.text(pos2(x + 3.0, strip.bottom() + 1.0), Align2::LEFT_TOP, label, FontId::monospace(11.0), theme::TEXT_DIM);
             }
             f += minor;
         }
@@ -993,7 +998,7 @@ impl App {
             let mut ui = child(ui, left.shrink2(vec2(6.0, 2.0)), Layout::left_to_right(Align::Center));
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
             let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-            icons::paint_sized(ui.painter(), r, Icon::Audio, theme::OK, 13.0);
+            icons::paint_sized(ui.painter(), r, Icon::Audio, theme::OK, 15.0);
             ui.label("オーディオ");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.selectable_value(&mut self.show_spectrogram, true, "スペクトログラム");
@@ -1086,11 +1091,11 @@ impl App {
         {
             let mut ui = child(ui, left.shrink2(vec2(6.0, 0.0)), Layout::left_to_right(Align::Center));
             ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
-            ui.spacing_mut().interact_size.y = 13.0;
-            ui.spacing_mut().slider_width = 110.0;
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.spacing_mut().slider_width = 120.0;
             let small = |ui: &mut egui::Ui, icon: Icon, tip: &str| {
-                let (r, resp) = ui.allocate_exact_size(vec2(14.0, 13.0), Sense::click());
-                icons::paint_sized(ui.painter(), r, icon, if resp.hovered() { Color32::WHITE } else { theme::TEXT_DIM }, 11.0);
+                let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                icons::paint_sized(ui.painter(), r, icon, if resp.hovered() { Color32::WHITE } else { theme::TEXT_DIM }, 13.0);
                 resp.on_hover_text(tip).clicked()
             };
             if small(&mut ui, Icon::Minus, "時間方向に縮小（⌘ または Alt + ホイール）") {
@@ -1110,7 +1115,7 @@ impl App {
                 self.tl_scroll = 0.0;
             }
             let step = if view.subdiv() > 1 { format!("　1/{} フレーム刻み", view.subdiv()) } else { String::new() };
-            ui.label(egui::RichText::new(format!("×{:.1}{step}", self.tl_zoom)).size(10.0).color(theme::TEXT_DIM))
+            ui.label(egui::RichText::new(format!("×{:.1}{step}", self.tl_zoom)).size(11.5).color(theme::TEXT_DIM))
                 .on_hover_text("拡大するほど、レイヤーやキーフレームをフレームより細かい刻みで動かせます");
         }
 
@@ -1386,7 +1391,7 @@ impl App {
         let k = rows.iter().position(|r| r.contains(&index)).unwrap_or(0);
         let last = rows.len() - 1;
         ui.set_min_width(170.0);
-        ui.label(egui::RichText::new(&layer.name).size(10.0).color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(&layer.name).size(11.5).color(theme::TEXT_DIM));
         ui.separator();
         if ui.add(egui::Button::new("複製").shortcut_text(self.shortcut_text(Action::Duplicate))).clicked() {
             ui.close_menu();
@@ -1523,7 +1528,7 @@ impl App {
         });
 
         let open = self.tl_is_open(&id.0, false);
-        let twirl = geo.cell(geo.x0 + TREE_X, 12.0, rect);
+        let twirl = geo.cell(geo.x0 + TREE_X, 14.0, rect);
         if widgets::icon_cell(
             ui,
             twirl,
@@ -1540,18 +1545,18 @@ impl App {
         let dim = if layer.visible { 1.0 } else { 0.5 };
         icons::paint_sized(
             &p,
-            geo.cell(geo.x0 + TREE_X + 13.0, 14.0, rect),
+            geo.cell(geo.x0 + TREE_X + 16.0, 16.0, rect),
             kind_icon(&layer.kind),
             color.gamma_multiply(1.25 * dim),
-            12.0,
+            14.0,
         );
-        let name_clip = Rect::from_min_max(pos2(geo.x0 + TREE_X + 30.0, rect.top()), pos2(geo.switches() - 4.0, rect.bottom()));
+        let name_clip = Rect::from_min_max(pos2(geo.x0 + TREE_X + 38.0, rect.top()), pos2(geo.switches() - 4.0, rect.bottom()));
         self.anchors.insert(format!("row:name:{}", id.0), name_clip);
         p.with_clip_rect(name_clip).text(
             pos2(name_clip.left(), rect.center().y),
             Align2::LEFT_CENTER,
             &layer.name,
-            FontId::proportional(11.5),
+            FontId::proportional(13.0),
             if selected { Color32::WHITE } else { theme::TEXT.gamma_multiply(dim) },
         );
 
@@ -1671,7 +1676,7 @@ impl App {
         self.anchors.insert(format!("row:{}", id.0), time);
         let p = ui.painter_at(time);
         // レイヤーは角の丸いクリップとして描き、中に種類のアイコンと名前を書く
-        let bar = Rect::from_min_max(pos2(x0, rect.top() + 2.0), pos2(x1, rect.bottom() - 2.0));
+        let bar = Rect::from_min_max(pos2(x0, rect.top() + 3.0), pos2(x1, rect.bottom() - 3.0));
         let fill = if layer.visible { color } else { color.gamma_multiply(0.4) };
         let body = fill.gamma_multiply(if selected { 0.95 } else { 0.62 });
         p.rect_filled(bar, 4.0, body);
@@ -1687,8 +1692,8 @@ impl App {
         if bar.width() > 34.0 {
             let inner = Rect::from_min_max(pos2(bar.left().max(time.left()) + 7.0, bar.top()), pos2(bar.right() - 7.0, bar.bottom()));
             let tp = p.with_clip_rect(inner.intersect(time));
-            icons::paint_sized(&tp, Rect::from_min_size(pos2(inner.left(), bar.center().y - 6.0), vec2(12.0, 12.0)), kind_icon(&layer.kind), Color32::from_white_alpha(200), 11.0);
-            tp.text(pos2(inner.left() + 15.0, bar.center().y), Align2::LEFT_CENTER, &layer.name, FontId::proportional(10.5), Color32::from_white_alpha(if selected { 245 } else { 205 }));
+            icons::paint_sized(&tp, Rect::from_min_size(pos2(inner.left(), bar.center().y - 7.0), vec2(14.0, 14.0)), kind_icon(&layer.kind), Color32::from_white_alpha(200), 12.0);
+            tp.text(pos2(inner.left() + 18.0, bar.center().y), Align2::LEFT_CENTER, &layer.name, FontId::proportional(12.0), Color32::from_white_alpha(if selected { 245 } else { 205 }));
         }
         if selected {
             p.rect_stroke(bar, 4.0, Stroke::new(1.2_f32, Color32::WHITE));
@@ -1837,12 +1842,12 @@ impl App {
         let rid = ui.id().with(("group", key));
         self.row_background(ui, rect, geo, false);
         let left = Rect::from_min_max(rect.min, pos2(geo.split, rect.bottom()));
-        let x = geo.x0 + TREE_X + depth as f32 * 12.0;
+        let x = geo.x0 + TREE_X + depth as f32 * 16.0;
         if ui.interact(left, rid, Sense::click()).clicked() {
             self.tl_toggle(key);
         }
         let p = ui.painter_at(left);
-        icons::paint_sized(&p, geo.cell(x, 12.0, rect), if open { Icon::TwirlOpen } else { Icon::TwirlClosed }, theme::TEXT_DIM, 12.0);
+        icons::paint_sized(&p, geo.cell(x, 14.0, rect), if open { Icon::TwirlOpen } else { Icon::TwirlClosed }, theme::TEXT_DIM, 13.0);
         let mut color = theme::TEXT;
         if let Some(i) = fx {
             let on = layer.effects.get(i).is_some_and(|f| f.enabled);
@@ -1867,7 +1872,7 @@ impl App {
                 });
             }
         }
-        p.text(pos2(x + 15.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.0), color);
+        p.text(pos2(x + 18.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.5), color);
 
         // 畳んでいるグループは、配下のキーフレームの時刻を点で示す（掴むと配下のキーがまとめて動く）
         let fr = comp.frame_rate;
@@ -1944,8 +1949,8 @@ impl App {
                 }
             }
         }
-        let x = geo.x0 + TREE_X + depth as f32 * 12.0;
-        let watch = geo.cell(x - 2.0, 16.0, rect);
+        let x = geo.x0 + TREE_X + depth as f32 * 16.0;
+        let watch = geo.cell(x - 2.0, 18.0, rect);
         let resp = ui.interact(watch, rid.with("watch"), Sense::click()).on_hover_text("アニメーション: オンにすると今の値でキーフレームを打ち、オフにすると今の値で固定します");
         icons::paint_sized(
             ui.painter(),
@@ -1958,26 +1963,26 @@ impl App {
             } else {
                 dim
             },
-            13.0,
+            15.0,
         );
         if resp.clicked() {
             edit = Some((now, PropEdit::ToggleAnimation));
         }
         // 値（右寄せ）。残りの幅に名前を書く
-        let values = Rect::from_min_max(pos2(x + 60.0, rect.top() + 1.0), pos2(geo.split - 6.0, rect.bottom() - 1.0));
+        let values = Rect::from_min_max(pos2(x + 70.0, rect.top() + 2.0), pos2(geo.split - 8.0, rect.bottom() - 2.0));
         let mut vui = child(ui, values, Layout::right_to_left(Align::Center));
-        vui.spacing_mut().interact_size.y = 16.0;
+        vui.spacing_mut().interact_size.y = 20.0;
         if let Some(e) = value_widgets(&mut vui, row, true) {
             edit = Some((now, e));
         }
         let label_end = vui.min_rect().left() - 6.0;
-        let label_clip = Rect::from_min_max(pos2(x + 16.0, rect.top()), pos2(label_end.max(x + 16.0), rect.bottom()));
+        let label_clip = Rect::from_min_max(pos2(x + 20.0, rect.top()), pos2(label_end.max(x + 20.0), rect.bottom()));
         let has_expr = row.expr.is_some();
         ui.painter().with_clip_rect(label_clip).text(
             pos2(label_clip.left(), rect.center().y),
             Align2::LEFT_CENTER,
             if has_expr { format!("{label}  =") } else { label.clone() },
-            FontId::proportional(11.0),
+            FontId::proportional(12.5),
             theme::TEXT,
         );
 

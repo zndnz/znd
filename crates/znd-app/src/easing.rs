@@ -429,7 +429,7 @@ impl App {
         }
         if ui.button("イージングのパネルを開く").clicked() {
             ui.close_menu();
-            self.right_tab = 2;
+            self.right_tab = 1;
         }
         ui.separator();
         let favs = self.prefs.ease_favorites.clone();

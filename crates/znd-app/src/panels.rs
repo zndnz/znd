@@ -442,7 +442,7 @@ impl App {
 
     pub(crate) fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
-            ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+            ui.spacing_mut().button_padding = egui::vec2(9.0, 5.0);
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.menu_button("ファイル", |ui| {
                 if ui.button("新規（デモプロジェクト）").clicked() {
@@ -593,9 +593,12 @@ impl App {
             ui.menu_button("レイヤー", |ui| self.layer_menu(ui));
             ui.menu_button("エフェクト", |ui| self.effect_menu(ui));
             ui.menu_button("アニメーション", |ui| self.animation_menu(ctx, ui));
-            ui.menu_button("プラグイン", |ui| self.plugins_menu(ui));
-            ui.menu_button("表示", |ui| self.view_menu(ui));
-            ui.menu_button("ウィンドウ", |ui| {
+            // 表示の設定・ウィンドウ・プラグインを 1 つのメニューにまとめる
+            ui.menu_button("表示", |ui| {
+                self.view_menu(ui);
+                ui.separator();
+                ui.menu_button("プラグイン", |ui| self.plugins_menu(ui));
+                ui.separator();
                 ui.checkbox(&mut self.show.export, "書き出し");
                 ui.checkbox(&mut self.show.check, "提出前チェック");
                 ui.checkbox(&mut self.show.history, "履歴");
@@ -2064,57 +2067,39 @@ impl App {
     pub(crate) fn effects_body(&mut self, ui: &mut egui::Ui, comp: &Composition, layer: &Layer, rows: &[Row], t: Time) {
         let id = layer.id.clone();
         ui.horizontal_wrapped(|ui| {
-            ui.menu_button("追加", |ui| {
-                // 組み込みと、読み込み済みのプラグイン（znd / OpenFX）のエフェクト
-                let effects = all_effects();
-                let mut categories: Vec<&str> = Vec::new();
-                for d in &effects {
-                    if !categories.contains(&d.category) {
-                        categories.push(d.category);
-                    }
-                }
-                for cat in categories {
-                    ui.menu_button(cat, |ui| {
-                        for def in effects.iter().filter(|d| d.category == cat) {
-                            if ui.button(def.label).clicked() {
-                                ui.close_menu();
-                                let (w, h) = self.shared.source_size(&layer.kind).unwrap_or((comp.width as f64, comp.height as f64));
-                                if let Some(fx) = EffectInstance::new(def.kind, w, h) {
-                                    self.edit_layer("エフェクト追加", false, &id, |l| l.effects.push(fx));
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-            if !layer.effects.is_empty()
-                && ui
-                    .button("プリセット保存…")
+            // 組み込みと、読み込み済みのプラグイン（znd / OpenFX）のエフェクト。検索してから選べる
+            ui.menu_button("＋ エフェクトを追加", |ui| self.effect_menu(ui));
+            ui.menu_button("プリセット", |ui| {
+                if ui
+                    .add_enabled(!layer.effects.is_empty(), egui::Button::new("保存…"))
                     .on_hover_text("このレイヤーのエフェクト（キーフレーム・エクスプレッション込み）をファイルに保存します")
                     .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new().set_file_name("preset.zndfx.json").save_file() {
-                    let preset = effect::EffectPreset { name: layer.name.clone(), effects: layer.effects.clone() };
-                    self.status = match serde_json::to_string_pretty(&preset)
-                        .map_err(|e| e.to_string())
-                        .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
-                    {
-                        Ok(()) => format!("プリセットを {} に保存しました", path.display()),
-                        Err(e) => format!("保存できません: {e}"),
-                    };
-                }
-            }
-            if ui.button("プリセット読み込み…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("エフェクトプリセット", &["json"]).pick_file() {
-                    match std::fs::read_to_string(&path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|s| serde_json::from_str::<effect::EffectPreset>(&s).map_err(|e| e.to_string()))
-                    {
-                        Ok(preset) => self.edit_layer("プリセット適用", false, &id, |l| l.effects.extend(preset.effects)),
-                        Err(e) => self.status = format!("プリセットを読み込めません: {e}"),
+                {
+                    ui.close_menu();
+                    if let Some(path) = rfd::FileDialog::new().set_file_name("preset.zndfx.json").save_file() {
+                        let preset = effect::EffectPreset { name: layer.name.clone(), effects: layer.effects.clone() };
+                        self.status = match serde_json::to_string_pretty(&preset)
+                            .map_err(|e| e.to_string())
+                            .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+                        {
+                            Ok(()) => format!("プリセットを {} に保存しました", path.display()),
+                            Err(e) => format!("保存できません: {e}"),
+                        };
                     }
                 }
-            }
+                if ui.button("読み込んで追加…").clicked() {
+                    ui.close_menu();
+                    if let Some(path) = rfd::FileDialog::new().add_filter("エフェクトプリセット", &["json"]).pick_file() {
+                        match std::fs::read_to_string(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|s| serde_json::from_str::<effect::EffectPreset>(&s).map_err(|e| e.to_string()))
+                        {
+                            Ok(preset) => self.edit_layer("プリセット適用", false, &id, |l| l.effects.extend(preset.effects)),
+                            Err(e) => self.status = format!("プリセットを読み込めません: {e}"),
+                        }
+                    }
+                }
+            });
         });
         for (i, fx) in layer.effects.iter().enumerate() {
             let Some(def) = effect_def(&fx.kind) else {

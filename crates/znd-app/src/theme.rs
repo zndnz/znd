@@ -1,4 +1,4 @@
-//! 配色と寸法。ニュートラルなダーク UI（境界線主体・角丸ほぼなし・高密度）。
+//! 配色と寸法。ニュートラルなダーク UI。境界線は最小限にし、文字と余白を大きめに取ってゆったり見せる。
 
 use eframe::egui::{self, Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
 
@@ -35,10 +35,10 @@ pub const OK: Color32 = Color32::from_rgb(0x62, 0xb0, 0x7c);
 pub const CACHE: Color32 = Color32::from_rgb(0x3f, 0x9a, 0x5c);
 pub const BEAT: Color32 = Color32::from_rgb(0xc8, 0xb0, 0x70);
 
-pub const TAB_H: f32 = 22.0;
-pub const ROW_H: f32 = 20.0;
+pub const TAB_H: f32 = 32.0;
+pub const ROW_H: f32 = 26.0;
 /// 縦スクロールバーが占める幅（`apply` の設定と揃える）。
-pub const SCROLL_W: f32 = 9.0;
+pub const SCROLL_W: f32 = 10.0;
 
 /// レイヤーのカラーラベル。識別のためだけの色なので彩度は低い。
 pub const LABELS: [(&str, Color32); 12] = [
@@ -72,33 +72,33 @@ pub fn panel_frame() -> egui::Frame {
 pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
-        (TextStyle::Small, FontId::new(10.0, FontFamily::Proportional)),
-        (TextStyle::Body, FontId::new(11.5, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(11.5, FontFamily::Proportional)),
-        (TextStyle::Heading, FontId::new(13.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(11.0, FontFamily::Monospace)),
+        (TextStyle::Small, FontId::new(11.5, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Heading, FontId::new(15.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
     ]
     .into();
 
     let s = &mut style.spacing;
-    s.item_spacing = egui::vec2(4.0, 2.0);
-    s.button_padding = egui::vec2(5.0, 1.0);
-    s.interact_size = egui::vec2(20.0, 20.0);
-    s.indent = 12.0;
-    s.icon_width = 12.0;
-    s.icon_width_inner = 6.0;
-    s.icon_spacing = 4.0;
-    s.combo_width = 60.0;
-    s.text_edit_width = 120.0;
-    s.slider_width = 80.0;
-    s.menu_margin = egui::Margin::same(3.0);
-    s.window_margin = egui::Margin::same(6.0);
+    s.item_spacing = egui::vec2(8.0, 6.0);
+    s.button_padding = egui::vec2(10.0, 4.0);
+    s.interact_size = egui::vec2(26.0, 26.0);
+    s.indent = 16.0;
+    s.icon_width = 15.0;
+    s.icon_width_inner = 8.0;
+    s.icon_spacing = 6.0;
+    s.combo_width = 80.0;
+    s.text_edit_width = 160.0;
+    s.slider_width = 110.0;
+    s.menu_margin = egui::Margin::same(6.0);
+    s.window_margin = egui::Margin::same(12.0);
     s.scroll = egui::style::ScrollStyle {
         floating: false,
         bar_width: SCROLL_W - 1.0,
         bar_inner_margin: 1.0,
         bar_outer_margin: 0.0,
-        handle_min_length: 16.0,
+        handle_min_length: 24.0,
         foreground_color: false,
         ..egui::style::ScrollStyle::solid()
     };
@@ -108,8 +108,8 @@ pub fn apply(ctx: &egui::Context) {
     v.panel_fill = BG1;
     v.window_fill = BG2;
     v.window_stroke = Stroke::new(1.0_f32, LINE_HI);
-    v.window_rounding = Rounding::same(2.0);
-    v.menu_rounding = Rounding::same(2.0);
+    v.window_rounding = Rounding::same(6.0);
+    v.menu_rounding = Rounding::same(6.0);
     v.window_shadow = egui::Shadow { offset: egui::vec2(0.0, 4.0), blur: 12.0, spread: 0.0, color: Color32::from_black_alpha(90) };
     v.popup_shadow = egui::Shadow { offset: egui::vec2(0.0, 3.0), blur: 8.0, spread: 0.0, color: Color32::from_black_alpha(80) };
     v.extreme_bg_color = INPUT;
@@ -124,7 +124,7 @@ pub fn apply(ctx: &egui::Context) {
     v.indent_has_left_vline = false;
     v.clip_rect_margin = 0.0;
 
-    let r = Rounding::same(2.0);
+    let r = Rounding::same(4.0);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = BG1;
     w.noninteractive.weak_bg_fill = BG1;
