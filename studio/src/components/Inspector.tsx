@@ -204,13 +204,18 @@ function KindSection({ layer }: { layer: Layer }) {
 
 // ---------- エフェクト ----------
 
-let catalogCache: Promise<EffectInfo[]> | null = null;
-const catalog = () => (catalogCache ??= api.effectCatalog());
+// プラグインを読み込むとエフェクトが増えるので、プラグインの世代ごとに取り直す
+let catalogCache: { gen: number; list: Promise<EffectInfo[]> } | null = null;
+const catalog = (gen: number) => {
+  if (catalogCache?.gen !== gen) catalogCache = { gen, list: api.effectCatalog() };
+  return catalogCache.list;
+};
 
 function EffectsSection({ comp, layer, props }: { comp: Composition; layer: Layer; props: PropInfo[] }) {
   const [infos, setInfos] = useState<EffectInfo[]>([]);
   const [picking, setPicking] = useState(false);
-  useEffect(() => void catalog().then(setInfos), []);
+  const gen = useUi((s) => s.pluginGen);
+  useEffect(() => void catalog(gen).then(setInfos), [gen]);
   const effects = layer.effects ?? [];
   const add = async (kind: string) => {
     try {

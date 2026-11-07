@@ -6,7 +6,7 @@
 
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
-import { type Composition, frameCount, frameToTime, type KeyAddr, type Layer, type Project, type PropEdit, type Snapshot, type Time, timeToFrame } from "./model";
+import { type Composition, frameCount, frameToTime, type KeyAddr, type Layer, type PluginState, type Project, type PropEdit, type Snapshot, type Time, timeToFrame } from "./model";
 import { findComp } from "./ops";
 
 export type Tool = "select" | "hand";
@@ -44,6 +44,16 @@ export interface UiState {
   workArea: [number, number] | null;
   snapping: boolean;
   status: string;
+  /** 開いているウィンドウ（書き出し・プラグインの管理など。同時に 1 つ）。 */
+  dialog: string | null;
+  /** 読み込み済みのプラグイン。 */
+  plugins: PluginState | null;
+  /** プラグインの定義が変わるたびに増える（エフェクトの一覧などを取り直す）。 */
+  pluginGen: number;
+  /** 開いているプラグインのパネル。 */
+  openPanels: string[];
+  /** プラグインからのお知らせ。 */
+  alert: string | null;
 }
 
 let state: UiState = {
@@ -67,6 +77,11 @@ let state: UiState = {
   workArea: null,
   snapping: true,
   status: "",
+  dialog: null,
+  plugins: null,
+  pluginGen: 0,
+  openPanels: [],
+  alert: null,
 };
 
 const listeners = new Set<() => void>();

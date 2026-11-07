@@ -11,6 +11,8 @@
 mod effects;
 mod layers;
 mod menu;
+mod plugins;
+mod prefs;
 mod props;
 mod sound;
 
@@ -27,7 +29,7 @@ use sound::Sound;
 /// 取り消し履歴の上限。
 const UNDO_LIMIT: usize = 200;
 
-struct Studio {
+pub(crate) struct Studio {
     project: Arc<Project>,
     revision: u64,
     path: Option<PathBuf>,
@@ -41,11 +43,15 @@ struct Studio {
     /// 音を最後にミックスし直すか確かめた（リビジョン, コンポ）。
     sound_checked: (u64, String),
     app: Option<AppHandle>,
+    /// 編集する人の名前（コンポのロックに使う）。
+    user: String,
+    prefs: prefs::Prefs,
+    plugins: plugins::Host,
 }
 
-type Shared = Mutex<Studio>;
+pub(crate) type Shared = Mutex<Studio>;
 
-fn lock<'a>(s: &'a State<'_, Shared>) -> std::sync::MutexGuard<'a, Studio> {
+pub(crate) fn lock<'a>(s: &'a State<'_, Shared>) -> std::sync::MutexGuard<'a, Studio> {
     s.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -67,6 +73,26 @@ impl Studio {
             sound: Sound::new(),
             sound_checked: (0, String::new()),
             app: None,
+            user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "自分".into()),
+            prefs: prefs::Prefs::load(),
+            plugins: plugins::Host::default(),
+        }
+    }
+
+    /// プロジェクトは変えずに、プレビューを作り直させる（プラグインの読み込み・出力フィルターの切り替えなど）。
+    fn refresh(&mut self) {
+        self.revision += 1;
+    }
+
+    /// メニューを作り直す（プラグインのコマンドなどが変わったとき）。
+    fn rebuild_menu(&self) {
+        if let Some(app) = &self.app {
+            match menu::build(app) {
+                Ok(m) => {
+                    let _ = app.set_menu(m);
+                }
+                Err(e) => eprintln!("メニューを作れません: {e}"),
+            }
         }
     }
 
@@ -135,7 +161,7 @@ impl Studio {
 
 /// 画面に渡す状態。
 #[derive(Serialize)]
-struct Snapshot {
+pub(crate) struct Snapshot {
     project: Arc<Project>,
     revision: u64,
     path: Option<String>,
@@ -388,10 +414,22 @@ fn fonts() -> Vec<(String, Vec<String>)> {
     znd_text::font_families_with_aliases()
 }
 
+/// フォルダを OS のファイルマネージャーで開く。
+pub(crate) fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener).arg(dir).spawn().map(|_| ())
+}
+
 fn main() {
     // 使い方: znd-studio [プロジェクト.znd.json]
     let arg = std::env::args().nth(1).map(PathBuf::from);
-    let studio = match arg.as_ref().map(|p| (p, io::load(p))) {
+    let mut studio = match arg.as_ref().map(|p| (p, io::load(p))) {
         Some((p, Ok(project))) => Studio::new(project, Some(p.clone())),
         Some((p, Err(e))) => {
             eprintln!("{} を開けません: {e}", p.display());
@@ -399,6 +437,9 @@ fn main() {
         }
         None => Studio::new(empty_project(), None),
     };
+    // プラグインのエフェクトを、プロジェクトを描く前に使えるようにしておく
+    let allow_native = studio.prefs.allow_native_plugins();
+    plugins::startup(&mut studio.plugins, allow_native);
     tauri::Builder::default()
         .manage(Mutex::new(studio))
         .setup(|app| {
@@ -436,7 +477,22 @@ fn main() {
             curve_presets,
             curve_samples,
             parse_curve,
-            fonts
+            fonts,
+            plugins::plugin_state,
+            plugins::plugin_command,
+            plugins::plugin_panel,
+            plugins::plugin_panel_event,
+            plugins::plugin_load,
+            plugins::plugin_rescan,
+            plugins::plugin_allow,
+            plugins::plugin_revoke,
+            plugins::plugin_set_native,
+            plugins::plugin_set_disabled,
+            plugins::plugin_release,
+            plugins::plugin_crash_answer,
+            plugins::plugin_set_filter,
+            plugins::plugin_open_dir,
+            plugins::plugin_clear_logs
         ])
         .run(tauri::generate_context!())
         .expect("znd studio を起動できません");

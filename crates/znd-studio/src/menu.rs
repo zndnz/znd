@@ -1,8 +1,68 @@
 //! macOS のメニューバー。項目を選ぶと、その ID を "menu" イベントで画面に送る（何をするかは画面が決める）。
 //! 切り取り・コピー・貼り付けは OS 標準の項目にする（これが無いと入力欄で ⌘C / ⌘V が効かない）。
 
-use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, Submenu, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
+use znd_render::plugins::{self, hooks};
+
+/// プラグインの "Cmd+Shift+K" のような表記を、メニューのショートカットの表記にする。
+fn accelerator(s: &str) -> String {
+    s.split('+')
+        .map(|p| match p.trim().to_ascii_lowercase().as_str() {
+            "cmd" | "command" | "mod" => "CmdOrCtrl".to_string(),
+            "ctrl" | "control" => "Ctrl".to_string(),
+            "alt" | "option" | "opt" => "Alt".to_string(),
+            "shift" => "Shift".to_string(),
+            _ => p.trim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// 「プラグイン」メニュー。コマンド（パッケージごと）・パネル・出力フィルター・管理。
+fn plugin_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Submenu<R>> {
+    let mut b = SubmenuBuilder::new(app, "プラグイン");
+    let commands: Vec<_> = plugins::commands().into_iter().filter(|c| c.menu.is_empty() || c.menu.iter().any(|m| m == "plugins")).collect();
+    let mut last_plugin: Option<String> = None;
+    for c in &commands {
+        if last_plugin.as_deref() != Some(c.plugin_name.as_str()) {
+            if last_plugin.is_some() {
+                b = b.separator();
+            }
+            b = b.item(&MenuItemBuilder::new(&c.plugin_name).enabled(false).build(app)?);
+            last_plugin = Some(c.plugin_name.clone());
+        }
+        let id = format!("plugin_cmd:{}", c.key);
+        // ショートカットの表記がメニューで使えないものなら、ショートカット無しで出す
+        let item = match c.shortcut.as_deref() {
+            Some(sc) => MenuItemBuilder::with_id(&id, &c.label).accelerator(accelerator(sc)).build(app).or_else(|_| MenuItemBuilder::with_id(&id, &c.label).build(app))?,
+            None => MenuItemBuilder::with_id(&id, &c.label).build(app)?,
+        };
+        b = b.item(&item);
+    }
+    if commands.is_empty() {
+        b = b.item(&MenuItemBuilder::new("コマンドを持つプラグインはありません").enabled(false).build(app)?);
+    }
+    let panels = plugins::panels();
+    if !panels.is_empty() {
+        b = b.separator().item(&MenuItemBuilder::new("パネル").enabled(false).build(app)?);
+        for p in panels {
+            b = b.item(&MenuItemBuilder::with_id(format!("plugin_panel:{}", p.key), &p.title).build(app)?);
+        }
+    }
+    let filters = hooks::output_filters();
+    if !filters.is_empty() {
+        b = b.separator().item(&MenuItemBuilder::new("出力フィルター（コンポの最終画像に掛ける）").enabled(false).build(app)?);
+        for f in filters {
+            let item = CheckMenuItemBuilder::with_id(format!("plugin_filter:{}", f.key), format!("{}（{}）", f.label, f.stage.label())).checked(f.enabled).build(app)?;
+            b = b.item(&item);
+        }
+    }
+    b.separator()
+        .item(&MenuItemBuilder::with_id("plugins_manage", "プラグインの管理と安全性…").build(app)?)
+        .item(&MenuItemBuilder::with_id("plugins_log", "プラグインのログ…").build(app)?)
+        .build()
+}
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let item = |id: &str, text: &str, key: Option<&str>| {
@@ -58,7 +118,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&item("zoom_fit", "ビューアを全体表示", Some("Shift+/"))?)
         .item(&item("timeline_fit", "タイムラインを全体表示", None)?)
         .build()?;
-    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &layer, &view]).build()
+    let plugin = plugin_menu(app)?;
+    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &layer, &view, &plugin]).build()
 }
 
 pub fn forward<R: Runtime>(app: &AppHandle<R>, id: &str) {

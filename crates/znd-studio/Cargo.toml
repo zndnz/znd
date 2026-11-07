@@ -17,7 +17,9 @@ znd-media.workspace = true
 znd-preview.workspace = true
 znd-audio.workspace = true
 znd-text.workspace = true
+znd-script.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.12", features = [] }
 rfd = "0.15"
+encoding_rs = "0.8"

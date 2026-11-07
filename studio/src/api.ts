@@ -2,7 +2,25 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { EaseCurve, EasePreset, EffectInfo, EffectInstance, KeyAddr, KeysOp, Layer, Project, PropEdit, PropInfo, Snapshot, Time, Vec2 } from "./model";
+import type {
+  EaseCurve,
+  EasePreset,
+  EffectInfo,
+  EffectInstance,
+  KeyAddr,
+  KeysOp,
+  Layer,
+  PanelItem,
+  PluginCtx,
+  PluginOutcome,
+  PluginState,
+  Project,
+  PropEdit,
+  PropInfo,
+  Snapshot,
+  Time,
+  Vec2,
+} from "./model";
 
 export interface Frame {
   width: number;
@@ -53,6 +71,24 @@ export const api = {
   curveSamples: (curve: EaseCurve, n: number) => invoke<number[]>("curve_samples", { curve, n }),
   parseCurve: (text: string) => invoke<EaseCurve | null>("parse_curve", { text }),
   fonts: () => invoke<[string, string[]][]>("fonts"),
+
+  // ---- プラグイン ----
+  pluginState: () => invoke<PluginState>("plugin_state"),
+  pluginCommand: (key: string, ctx: PluginCtx) => invoke<PluginOutcome>("plugin_command", { key, ctx }),
+  pluginPanel: (key: string, ctx: PluginCtx) => invoke<{ items: PanelItem[]; error: string | null }>("plugin_panel", { key, ctx }),
+  pluginPanelEvent: (key: string, id: string, value: unknown, ctx: PluginCtx) =>
+    invoke<PluginOutcome>("plugin_panel_event", { key, id, value: value ?? null, ctx }),
+  pluginLoad: (folder: boolean) => invoke<{ snapshot: Snapshot; status: string } | null>("plugin_load", { folder }),
+  pluginRescan: () => invoke<{ snapshot: Snapshot; status: string }>("plugin_rescan"),
+  pluginAllow: (path: string) => invoke<{ snapshot: Snapshot; status: string }>("plugin_allow", { path }),
+  pluginRevoke: (path: string) => invoke<string>("plugin_revoke", { path }),
+  pluginSetNative: (on: boolean) => invoke<string>("plugin_set_native", { on }),
+  pluginSetDisabled: (kind: string, off: boolean) => invoke<Snapshot>("plugin_set_disabled", { kind, off }),
+  pluginRelease: (kind: string) => invoke<Snapshot>("plugin_release", { kind }),
+  pluginCrashAnswer: (disable: boolean) => invoke<Snapshot>("plugin_crash_answer", { disable }),
+  pluginSetFilter: (key: string, on: boolean) => invoke<Snapshot>("plugin_set_filter", { key, on }),
+  pluginOpenDir: () => invoke<void>("plugin_open_dir"),
+  pluginClearLogs: () => invoke<void>("plugin_clear_logs"),
 
   /** キャッシュにあればそのフレームを返す（無ければ null。できたら onFrameReady が呼ばれる）。 */
   async frame(comp: string, frame: number, downsample: number): Promise<Frame | null> {

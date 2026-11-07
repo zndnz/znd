@@ -8631,6 +8631,7 @@ dependencies = [
 name = "znd-studio"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "rfd",
  "serde",
  "serde_json",
@@ -8641,6 +8642,7 @@ dependencies = [
  "znd-media",
  "znd-preview",
  "znd-render",
+ "znd-script",
  "znd-text",
 ]
 

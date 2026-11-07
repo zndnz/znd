@@ -306,3 +306,110 @@ export type KeysOp =
   | { op: "kind"; kind: KeyKind }
   | { op: "shift"; dt: Time }
   | { op: "delete" };
+
+// ---------- プラグイン ----------
+
+export interface PluginReport {
+  level: string;
+  risk: "safe" | "low" | "medium" | "high" | "critical";
+  blocks: boolean;
+  summary: string;
+  findings: { category: string; score: number; title: string; evidence: string[] }[];
+  endpoints: string[];
+  hash: string;
+  files_scanned: number;
+}
+
+export interface PluginCommand {
+  key: string;
+  plugin: string;
+  label: string;
+  description: string;
+  menu: string[];
+  shortcut: string | null;
+}
+
+export interface PluginPanelInfo {
+  key: string;
+  plugin: string;
+  title: string;
+  width: number;
+}
+
+export interface PluginState {
+  commands: PluginCommand[];
+  panels: PluginPanelInfo[];
+  filters: { key: string; label: string; stage: string; enabled: boolean }[];
+  packages: {
+    id: string;
+    name: string;
+    version: string;
+    vendor: string;
+    license: string;
+    description: string;
+    permissions: string[];
+    dir: string;
+    commands: number;
+    panels: number;
+    filters: number;
+    expressions: number;
+    exporters: number;
+    effects: number;
+    failed: string | null;
+    warnings: string[];
+    report: PluginReport;
+  }[];
+  effects: {
+    kind: string;
+    label: string;
+    category: string;
+    api: string;
+    vendor: string;
+    version: string;
+    license: string;
+    path: string;
+    params: number;
+    report: PluginReport | null;
+  }[];
+  blocked: { path: string; name: string; report: PluginReport }[];
+  disabled: string[];
+  faults: { kind: string; why: string; quarantined: boolean; disabled: boolean }[];
+  missing: [string, string][];
+  errors: [string, string][];
+  logs: string[];
+  ofx_messages: string[];
+  native_allowed: boolean;
+  plugin_dir: string | null;
+  crash: [string, string] | null;
+  disclaimer: string;
+}
+
+/** スクリプトに渡す画面の状態。 */
+export interface PluginCtx {
+  comp: string;
+  layer: string | null;
+  frame: number;
+}
+
+/** プラグインの実行結果。`actions` は画面が行う操作。 */
+export interface PluginOutcome {
+  snapshot: Snapshot | null;
+  actions: Record<string, unknown>[];
+  status: string | null;
+  changed: boolean;
+}
+
+/** パネルの部品（スクリプトの `panel(state)` が返すもの）。 */
+export interface PanelItem {
+  type: string;
+  id?: string;
+  label?: string;
+  text?: string;
+  value?: unknown;
+  min?: number;
+  max?: number;
+  step?: number;
+  speed?: number;
+  options?: string[];
+  items?: PanelItem[];
+}

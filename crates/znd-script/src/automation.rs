@@ -325,15 +325,31 @@ pub fn run_plugin(
         _ => Vec::new(),
     };
     // 書き換えが無ければ、検査も取り消し単位の追加もしない
-    let before: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let after: serde_json::Value = serde_json::from_str(&out).map_err(|e| format!("スクリプト実行後のプロジェクトが不正です: {e}"))?;
-    if before == after {
+    // JavaScript は 1.0 を 1 と書き、f32 の値も f64 として持ち回るので、JSON の文字のままでは書き換えていなくても
+    // 違って見える。スクリプトの結果をプロジェクトとして読み直し、どちらも同じ変換で JSON の値にしてから比べる
+    let updated: Project = serde_json::from_str(&out).map_err(|e| format!("スクリプト実行後のプロジェクトが不正です: {e}"))?;
+    if serde_json::to_value(&updated).ok() == serde_json::to_value(project).ok() {
         return Ok(PluginRun { project: None, logs, ret, actions });
     }
-    let updated: Project = serde_json::from_value(after).map_err(|e| format!("スクリプト実行後のプロジェクトが不正です: {e}"))?;
     let issues = updated.validate();
     if !issues.is_empty() {
         return Err(format!("スクリプト実行後のプロジェクトに問題があるため、変更を取り消しました:\n  {}", issues.join("\n  ")));
     }
     Ok(PluginRun { project: Some(updated), logs, ret, actions })
+}
+
+#[cfg(test)]
+mod plugin_run_tests {
+    use super::*;
+
+    /// 読むだけのスクリプトは、プロジェクトを書き換えたことにならない（1.0 が 1 と書き直されても）。
+    #[test]
+    fn reading_the_project_is_not_an_edit() {
+        let p = znd_core::demo::demo_project();
+        let run = run_plugin(&p, "function f() { return project.compositions.length; }", Some(("f", &[])), &serde_json::Value::Null).unwrap();
+        assert!(run.project.is_none());
+        assert_eq!(run.ret, serde_json::json!(p.compositions.len()));
+        let run = run_plugin(&p, "project.compositions[0].name = 'x';", None, &serde_json::Value::Null).unwrap();
+        assert_eq!(run.project.unwrap().compositions[0].name, "x");
+    }
 }

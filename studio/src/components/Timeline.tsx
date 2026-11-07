@@ -18,6 +18,7 @@ import { Slider } from "@/components/ui/slider";
 import { IconButton, NumberField } from "./controls";
 import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
+import { PluginLayerMenu } from "./Plugins";
 
 const PAD = 18;
 const ROW = 36;
@@ -399,6 +400,7 @@ function LayerMenu({ layer }: { layer: Layer }) {
       >
         再生ヘッドの位置から始める
       </ContextMenuItem>
+      <PluginLayerMenu layer={layer.id} />
       <ContextMenuSeparator />
       <ContextMenuItem variant="destructive" onClick={a.remove}>
         削除<ContextMenuShortcut>⌫</ContextMenuShortcut>

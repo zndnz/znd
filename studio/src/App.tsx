@@ -12,11 +12,13 @@ import { createLayer, Viewer } from "./components/Viewer";
 import { fps } from "./model";
 import { adopt, currentComp, get, keysOp, run, set, setFrame, totalFrames, useUi } from "./store";
 import { applyRememberedEase } from "./components/Easing";
+import { onPluginKey, onPluginMenu, PluginLog, PluginManager, PluginNotices, PluginPanels, PluginToolbar, refreshPlugins } from "./components/Plugins";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 function onMenu(id: string) {
   const s = get();
   if (id.startsWith("layer:")) return void createLayer(id.slice(6));
+  if (onPluginMenu(id)) return;
   switch (id) {
     case "new":
       return void run(api.newProject, "新しいプロジェクトを作りました");
@@ -61,7 +63,9 @@ const isTyping = () => {
 };
 
 function onKey(e: KeyboardEvent) {
-  if (isTyping() || e.metaKey || e.ctrlKey) return;
+  if (isTyping()) return;
+  if (onPluginKey(e)) return;
+  if (e.metaKey || e.ctrlKey) return;
   const s = get();
   const step = e.shiftKey ? 10 : 1;
   switch (e.key) {
@@ -163,6 +167,7 @@ export function App() {
 
   useEffect(() => {
     void api.snapshot().then(adopt);
+    void refreshPlugins(true);
     const un = api.onMenu(onMenu);
     window.addEventListener("keydown", onKey);
     return () => {
@@ -184,6 +189,7 @@ export function App() {
         <header className="titlebar" data-tauri-drag-region>
           <span className="titlebar-left" data-tauri-drag-region>
             <IconButton icon="sidebarL" title="プロジェクト (⌘1)" on={showProject} onClick={() => set({ showProject: !showProject })} />
+            <PluginToolbar />
           </span>
           <span className="title" data-tauri-drag-region>
             {title}
@@ -200,6 +206,10 @@ export function App() {
           <Timeline />
         </main>
         {showInspector && <Inspector />}
+        <PluginPanels />
+        <PluginManager />
+        <PluginLog />
+        <PluginNotices />
       </div>
     </TooltipProvider>
   );
