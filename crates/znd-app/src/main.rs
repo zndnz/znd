@@ -328,6 +328,18 @@ pub struct App {
     last_capture: Instant,
 }
 
+/// `origin` から `advanced` フレーム進んだ位置。[a, b) を繰り返す（音声プレーヤーの折り返しと同じ）。
+/// 範囲より前から始めたら b まで進んでから折り返し、範囲の後ろから始めたらすぐ a へ戻る。
+fn loop_frame(origin: i64, advanced: i64, a: i64, b: i64) -> i64 {
+    let len = (b - a).max(1);
+    let f = if origin >= b { a } else { origin } + advanced;
+    if f >= b {
+        a + (f - b).rem_euclid(len)
+    } else {
+        f
+    }
+}
+
 fn new_engine(ctx: &egui::Context, path: Option<&Path>) -> PreviewEngine {
     let ctx = ctx.clone();
     PreviewEngine::new(&base_dir(path), move || ctx.request_repaint())
@@ -784,7 +796,10 @@ impl App {
             }
         }
         self.frame = frame;
-        self.stop();
+        // 再生中なら止めずに、移動した位置から再生し直す
+        if self.playing.is_some() {
+            self.play_from_here();
+        }
     }
 
     pub(crate) fn toggle_play(&mut self) {
@@ -798,6 +813,11 @@ impl App {
                 self.frame = a;
             }
         }
+        self.play_from_here();
+    }
+
+    /// いまのフレームから再生を始める（再生中なら、その位置から再生し直す）。
+    fn play_from_here(&mut self) {
         self.playing = Some((Instant::now(), self.frame));
         let fr = self.frame_rate();
         if let Some(p) = &self.player {
@@ -819,7 +839,7 @@ impl App {
                 None => {
                     let advanced = (started.elapsed().as_secs_f64() * fr.fps()).floor() as i64;
                     let (a, b) = self.work_area.unwrap_or((0, self.total_frames()));
-                    a + (origin - a + advanced).rem_euclid((b - a).max(1))
+                    loop_frame(origin, advanced, a, b)
                 }
             };
             self.frame = frame.clamp(0, self.total_frames() - 1);
@@ -1322,4 +1342,22 @@ pub(crate) fn place_at(layer: &mut Layer, t: Time, comp_duration: Time, project:
     layer.in_point = t;
     layer.start_time = t;
     layer.out_point = len.map(|d| (t + d).min(comp_duration)).unwrap_or(comp_duration);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loop_frame;
+
+    #[test]
+    fn loop_frame_wraps_like_audio() {
+        // 範囲の中から: 折り返す
+        assert_eq!(loop_frame(15, 3, 10, 20), 18);
+        assert_eq!(loop_frame(15, 7, 10, 20), 12);
+        // 範囲の前から: b まで進んでから折り返す
+        assert_eq!(loop_frame(2, 5, 10, 20), 7);
+        assert_eq!(loop_frame(2, 20, 10, 20), 12);
+        // 範囲の後ろから: すぐ a へ戻る
+        assert_eq!(loop_frame(25, 0, 10, 20), 10);
+        assert_eq!(loop_frame(25, 13, 10, 20), 13);
+    }
 }
