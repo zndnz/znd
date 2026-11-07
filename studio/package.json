@@ -10,8 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types src/**/*.test.ts",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config ../crates/znd-studio/tauri.conf.json",
-    "tauri:build": "tauri build --config ../crates/znd-studio/tauri.conf.json"
+    "tauri:dev": "cd ../crates/znd-studio && tauri dev",
+    "tauri:build": "cd ../crates/znd-studio && tauri build"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
