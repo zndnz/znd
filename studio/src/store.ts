@@ -4,7 +4,7 @@
 // Rust へ `commit` する。Rust が受け付けなかったら（循環する親子など）最後に受け付けられた状態へ戻す。
 // ドラッグ中の連続した編集は `coalesce` で 1 回の取り消しにまとめ、送信が詰まったら途中の状態は飛ばす。
 
-import { useSyncExternalStore } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import { api } from "./api";
 import {
   type CheckResult,
@@ -160,14 +160,38 @@ export function set(patch: Partial<UiState> | ((s: UiState) => Partial<UiState>)
   for (const l of listeners) l();
 }
 
+/** 中身が同じ配列・オブジェクトか（要素・値を === で比べる）。 */
+function shallowEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every((k) => Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+}
+
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => void listeners.delete(l);
+};
+
+/**
+ * 画面の状態の一部を読む。`select` が呼ぶたびに新しい配列やオブジェクトを返しても（`filter` や `?? []` など）、
+ * 中身が同じなら前の値を返す。そうしないと React が「値が毎回変わる」とみなして描き直し続け、画面が止まる。
+ */
 export function useUi<T>(select: (s: UiState) => T): T {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => select(state),
-  );
+  // 選ぶ関数は描くたびに作り直される（props を使うこともある）ので、それも変わったら選び直す
+  const cache = useRef<{ state: UiState; select: (s: UiState) => T; value: T } | null>(null);
+  const read = () => {
+    const c = cache.current;
+    if (c && c.state === state && c.select === select) return c.value;
+    const v = select(state);
+    const value = c && shallowEqual(c.value, v) ? c.value : v;
+    cache.current = { state, select, value };
+    return value;
+  };
+  return useSyncExternalStore(subscribe, read);
 }
 
 // ---------- 選択中のもの ----------

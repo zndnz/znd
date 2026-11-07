@@ -12,6 +12,7 @@ import {
   ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuGroup,
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuShortcut,
@@ -467,7 +468,9 @@ function LayerMenu({ layer }: { layer: Layer }) {
   const hold = (layer.hold_frames as number | undefined) ?? 1;
   return (
     <ContextMenuContent className="w-64">
-      <ContextMenuLabel className="truncate text-xs text-muted-foreground">{layer.name}</ContextMenuLabel>
+      <ContextMenuGroup>
+        <ContextMenuLabel className="truncate text-xs text-muted-foreground">{layer.name}</ContextMenuLabel>
+      </ContextMenuGroup>
       <ContextMenuItem onClick={a.duplicate}>
         複製<ContextMenuShortcut>{shortcut("duplicate")}</ContextMenuShortcut>
       </ContextMenuItem>
@@ -522,7 +525,9 @@ export function KeyMenu() {
   const n = sel?.keys.length ?? 0;
   return (
     <ContextMenuContent className="w-64">
-      <ContextMenuLabel className="text-xs text-muted-foreground">選択中のキーフレーム: {n} 個</ContextMenuLabel>
+      <ContextMenuGroup>
+        <ContextMenuLabel className="text-xs text-muted-foreground">選択中のキーフレーム: {n} 個</ContextMenuLabel>
+      </ContextMenuGroup>
       <ContextMenuSub>
         <ContextMenuSubTrigger disabled={n === 0}>キーフレーム補間</ContextMenuSubTrigger>
         <ContextMenuSubContent>

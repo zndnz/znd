@@ -730,7 +730,9 @@ export function PluginLog() {
   const open = useUi((s) => s.dialog === "pluginLog");
   const logs = useUi((s) => s.plugins?.logs ?? []);
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView(), [logs.length, open]);
+  useEffect(() => {
+    end.current?.scrollIntoView();
+  }, [logs.length, open]);
   return (
     <Dialog open={open} onOpenChange={(o) => !o && set({ dialog: null })}>
       <DialogContent className="flex max-h-[80vh] flex-col sm:max-w-2xl">

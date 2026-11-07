@@ -98,7 +98,9 @@ export function Viewer() {
   const reviews = useUi((s) => (s.project?.reviews as ReviewComment[] | undefined) ?? []);
   const [penTick, setPenTick] = useState(0);
   // レイヤーを選び直したら、編集中のマスクの頂点を外す
-  useEffect(() => set({ activeMask: 0, activeVertex: null }), [selected]);
+  useEffect(() => {
+    set({ activeMask: 0, activeVertex: null });
+  }, [selected]);
 
   useEffect(() => {
     const el = wrap.current;
@@ -544,7 +546,9 @@ function ViewMenu({ zoom, downsample }: { zoom: number; downsample: number }) {
             エフェクトを GPU で処理（{gpu}）
           </DropdownMenuCheckboxItem>
         ) : (
-          <DropdownMenuLabel className="text-xs">GPU は使えません（エフェクトは CPU で処理）</DropdownMenuLabel>
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="text-xs">GPU は使えません（エフェクトは CPU で処理）</DropdownMenuLabel>
+          </DropdownMenuGroup>
         )}
         <DropdownMenuItem onClick={() => void reply(() => api.saveFrameImage(get().frame, get().downsample))}>
           フレームを画像として保存…

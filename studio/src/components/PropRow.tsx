@@ -153,7 +153,9 @@ function ExprButton({ layer, prop }: { layer: Layer; prop: PropInfo }) {
   const [text, setText] = useState(prop.expr ?? "");
   const errors = useUi((s) => s.exprErrors.filter((e) => e.layer === layer.name && e.path === prop.path));
   const comp = useUi(currentComp);
-  useEffect(() => setText(prop.expr ?? ""), [prop.expr, open]);
+  useEffect(() => {
+    setText(prop.expr ?? "");
+  }, [prop.expr, open]);
   const insert = (code: string) => setText((t) => t + code);
   return (
     <Popover open={open} onOpenChange={setOpen}>
