@@ -160,6 +160,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&item("keys:linear", "リニア", None)?)
         .item(&item("keys:hold", "停止", None)?)
         .item(&item("reverse_keys", "キーフレームの時間反転", None)?)
+        .item(&item("graph", "グラフエディター", None)?)
+        .item(&item("only_animated", "動きのあるプロパティだけを表示", None)?)
         .separator()
         .item(&item("marker", "現在の時刻にマーカーを追加", None)?)
         .item(&item("work_clear", "ワークエリアを解除", None)?)
@@ -173,6 +175,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .item(&item("zoom_fit", "ビューアを全体表示", Some("Shift+/"))?)
         .item(&item("timeline_fit", "タイムラインを全体表示", None)?)
+        .item(&item("screening", "上映プレビュー", None)?)
+        .item(&item("hide_shy", "シャイのレイヤーを隠す", None)?)
+        .separator()
+        .item(&item("script", "スクリプト…", None)?)
         .build()?;
     let plugin = plugin_menu(app)?;
     let help = SubmenuBuilder::new(app, "ヘルプ")

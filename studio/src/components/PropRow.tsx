@@ -4,12 +4,22 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Layer, PropInfo } from "../model";
-import { nowTime, propOp, useUi } from "../store";
+import { currentComp, nowTime, propOp, useUi } from "../store";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { NumberField } from "./controls";
+import { openGraph } from "./Graph";
 import { Icon } from "./icons";
 
 /** レイヤーの全プロパティ（いま画面に出ているレイヤーと再生ヘッドの時刻で）。 */
@@ -110,16 +120,41 @@ export function PropRow({ layer, prop, label }: { layer: Layer; prop: PropInfo; 
           ))
         )}
       </span>
+      {prop.animated && !prop.is_path && (
+        <Button variant="ghost" size="icon-xs" aria-label="グラフエディターで開く" title="グラフエディターで開く" className="shrink-0 text-muted-foreground/60" onClick={() => openGraph(prop.path)}>
+          <Icon name="graph" size={12} />
+        </Button>
+      )}
       <ExprButton layer={layer} prop={prop} />
     </div>
   );
 }
 
 /** エクスプレッションの編集（あるときは「=」を明るくする）。 */
+const EXPR_PRESETS: [string, string][] = [
+  ["揺らす wiggle", "wiggle(3, 20)"],
+  ["繰り返す loopOut", 'loopOut("cycle")'],
+  ["行き来する loopOut pingpong", 'loopOut("pingpong")'],
+  ["時間で回す", "time * 90"],
+  ["最寄りのマーカーで跳ねる", "var m = thisComp.marker;\nvar d = m.numKeys > 0 ? Math.abs(time - m.nearestKey(time).time) : 1;\nvalue * (1 + 0.3 * Math.exp(-d * 12))"],
+  ["コマ落とし posterizeTime", "posterizeTime(12);\nvalue"],
+];
+
+const REFS: [string, string][] = [
+  ["位置", "transform.position"],
+  ["スケール", "transform.scale"],
+  ["回転", "transform.rotation"],
+  ["不透明度", "transform.opacity"],
+];
+
+/** エクスプレッションの編集（あるときは「=」を明るく、エラーがあれば赤くする）。参照の挿入と定型も選べる。 */
 function ExprButton({ layer, prop }: { layer: Layer; prop: PropInfo }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(prop.expr ?? "");
+  const errors = useUi((s) => s.exprErrors.filter((e) => e.layer === layer.name && e.path === prop.path));
+  const comp = useUi(currentComp);
   useEffect(() => setText(prop.expr ?? ""), [prop.expr, open]);
+  const insert = (code: string) => setText((t) => t + code);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -128,22 +163,61 @@ function ExprButton({ layer, prop }: { layer: Layer; prop: PropInfo }) {
             variant="ghost"
             size="icon-xs"
             aria-label="エクスプレッション"
-            className={cn("shrink-0 font-mono text-xs", prop.expr ? "text-foreground" : "text-muted-foreground/40")}
+            className={cn("shrink-0 font-mono text-xs", errors.length ? "text-destructive" : prop.expr ? "text-foreground" : "text-muted-foreground/40")}
           />
         }
       >
         =
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
+      <PopoverContent align="end" className="w-96">
         <div className="text-sm font-medium">エクスプレッション: {prop.label}</div>
         <Textarea
           className="min-h-24 font-mono text-xs"
           value={text}
-          placeholder="例: wiggle(2, 30)"
+          placeholder='例: wiggle(3, 20)　／　loopOut()　／　thisComp.layer("名前").transform.position'
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.stopPropagation()}
         />
-        <div className="flex justify-end gap-2">
+        {errors.map((e, i) => (
+          <p key={i} className="text-xs text-destructive">
+            {e.line ? `${e.line} 行目: ` : ""}
+            {e.message}
+          </p>
+        ))}
+        <div className="flex items-center gap-1">
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="h-7 px-2 text-xs" />}>参照を挿入</DropdownMenuTrigger>
+            <DropdownMenuContent className="max-h-80 w-64 overflow-y-auto">
+              {comp?.layers.map((o) => (
+                <DropdownMenuSub key={o.id}>
+                  <DropdownMenuSubTrigger>{o.name}</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    {REFS.map(([label, code]) => (
+                      <DropdownMenuItem key={code} onClick={() => insert(`thisComp.layer("${o.name}").${code}`)}>
+                        {label}
+                      </DropdownMenuItem>
+                    ))}
+                    {(o.effects ?? []).map((fx) => (
+                      <DropdownMenuItem key={fx.name} onClick={() => insert(`thisComp.layer("${o.name}").effect("${fx.name}")`)}>
+                        {fx.name}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant="ghost" size="sm" className="h-7 px-2 text-xs" />}>定型</DropdownMenuTrigger>
+            <DropdownMenuContent className="w-64">
+              {EXPR_PRESETS.map(([label, code]) => (
+                <DropdownMenuItem key={label} onClick={() => setText(code)}>
+                  {label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <span className="flex-1" />
           {prop.expr && (
             <Button
               variant="ghost"

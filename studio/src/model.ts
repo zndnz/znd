@@ -308,7 +308,8 @@ export type KeysOp =
   | { op: "curve"; curve: EaseCurve | null }
   | { op: "kind"; kind: KeyKind }
   | { op: "shift"; dt: Time }
-  | { op: "delete" };
+  | { op: "delete" }
+  | { op: "ease"; ease_in: [number, number] | null; ease_out: [number, number] | null };
 
 // ---------- プラグイン ----------
 

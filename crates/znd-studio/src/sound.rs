@@ -23,6 +23,8 @@ struct State {
     mixing: bool,
     /// 再生中なら、繰り返す範囲（48kHz のサンプル）。
     playing: Option<(i64, i64)>,
+    /// ミックス済みの音（48kHz ステレオ）。波形とスペクトログラムに使う。
+    buffer: Option<Arc<Vec<f32>>>,
 }
 
 struct Job {
@@ -60,9 +62,7 @@ impl Sound {
 
     /// `comp` の音を、必要ならバックグラウンドでミックスし直す。
     pub fn sync(self: &Arc<Self>, project: &Arc<Project>, comp: &CompId, clips: &Arc<FfmpegClips>) {
-        if self.player.is_none() {
-            return;
-        }
+        // 出力デバイスが無くても、波形を出すためにミックスはする
         // 0 は「まだ何も無い」に使うので避ける
         let sig = audio::signature(project, comp).max(1);
         let mut st = self.state();
@@ -97,8 +97,10 @@ impl Sound {
                 Ok(buf) if st.wanted == job.sig => {
                     st.audible = buf.iter().any(|v| *v != 0.0);
                     st.ready = job.sig;
+                    let buf = Arc::new(buf);
+                    st.buffer = Some(buf.clone());
                     if let Some(p) = &self.player {
-                        p.set_buffer(Arc::new(buf));
+                        p.set_buffer(buf);
                     }
                 }
                 Ok(_) => {}
@@ -127,6 +129,15 @@ impl Sound {
         if let Some(p) = &self.player {
             p.stop();
         }
+    }
+
+    /// ミックス済みの音と、その署名（いまの状態に追いついていなければ `None`）。
+    pub fn buffer(&self) -> Option<(u64, Arc<Vec<f32>>)> {
+        let st = self.state();
+        if st.ready != st.wanted || st.ready == 0 {
+            return None;
+        }
+        st.buffer.clone().map(|b| (st.ready, b))
     }
 
     /// 映像と音のずれの補正（ミリ秒。正の値で映像を遅らせる）。

@@ -95,6 +95,11 @@ export interface UiState {
   /** 版と比べた画像を出しているときの説明。 */
   diffLabel: string | null;
   diffGen: number;
+  /** グラフエディターで開いているプロパティ。 */
+  graphPath: string | null;
+  graphOpen: boolean;
+  /** エクスプレッションのエラー（編集のたびに調べ直す）。 */
+  exprErrors: { layer: string; path: string; line: number | null; message: string }[];
 }
 
 let state: UiState = {
@@ -138,6 +143,9 @@ let state: UiState = {
   queue: [],
   diffLabel: null,
   diffGen: 0,
+  exprErrors: [],
+  graphPath: null,
+  graphOpen: false,
 };
 
 const listeners = new Set<() => void>();

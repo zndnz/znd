@@ -81,6 +81,10 @@ export const api = {
   curveSamples: (curve: EaseCurve, n: number) => invoke<number[]>("curve_samples", { curve, n }),
   parseCurve: (text: string) => invoke<EaseCurve | null>("parse_curve", { text }),
   fonts: () => invoke<[string, string[]][]>("fonts"),
+  graph: (layer: Layer, path: string, t0: number, t1: number, cols: number, speed: boolean, fps: number) =>
+    invoke<{ series: number[][]; keys: [Time, number[]][]; dims: number } | null>("graph", { layer, path, t0, t1, cols, speed, fps }),
+  runScript: (source: string) => invoke<[string[], Snapshot]>("run_script", { source }),
+  loadScript: () => invoke<string | null>("load_script"),
 
   // ---- レイヤー・キー・マーカー・音声の操作（Rust の ops.rs） ----
   op: (ctx: { comp: string; frame: number }, op: Record<string, unknown> & { op: string }) => invoke<OpResult>("op", { ctx, op }),
@@ -94,6 +98,17 @@ export const api = {
   prefGet: (key: string) => invoke<unknown>("pref_get", { key }),
   prefSet: (key: string, value: unknown) => invoke<void>("pref_set", { key, value }),
 
+  // ---- インスペクタの細部 ----
+  inspectorCatalog: () => invoke<{ shape_items: [string, string][]; animator_props: [string, string][] }>("inspector_catalog"),
+  animators: (layer: Layer) => invoke<{ name: string; props: string[]; unit: string | null }[]>("animators", { layer }),
+  contentOp: (layer: Layer, op: Record<string, unknown> & { op: string }) => invoke<Layer>("content_op", { layer, op }),
+  effectPresetSave: (name: string, effects: EffectInstance[]) => invoke<string | null>("effect_preset_save", { name, effects }),
+  effectPresetLoad: () => invoke<EffectInstance[] | null>("effect_preset_load"),
+  makeProxy: (footage: string) => invoke<[string, Snapshot]>("make_proxy", { footage }),
+  fontAvailable: (family: string) => invoke<boolean>("font_available", { family }),
+  exprErrors: (comp: string, frame: number) => invoke<{ layer: string; path: string; line: number | null; message: string }[]>("expr_errors", { comp, frame }),
+  pickFile: () => invoke<string | null>("pick_file"),
+
   // ---- ビューア ----
   viewerOverlay: (at: ViewerAt) => invoke<Overlay>("viewer_overlay", { at }),
   viewerDown: (at: ViewerAt, tool: string, point: Vec2) => invoke<ViewerOutcome>("viewer_down", { at, tool, point }),
@@ -103,6 +118,16 @@ export const api = {
   penFinish: (at: ViewerAt, closed: boolean, cancel: boolean) => invoke<ViewerOutcome>("pen_finish", { at, closed, cancel }),
   penActive: () => invoke<boolean>("pen_active"),
   maskRemoveVertex: (at: ViewerAt, vertex: number) => invoke<ViewerOutcome>("mask_remove_vertex", { at, vertex }),
+  audioWave: (comp: string, start: number, end: number, cols: number) => invoke<[number, number][]>("audio_wave", { comp, start, end, cols }),
+  audioPeak: (comp: string, frame: number) => invoke<[number, number] | null>("audio_peak", { comp, frame }),
+  async spectrogram(comp: string) {
+    const buf = await invoke<ArrayBuffer>("spectrogram", { comp });
+    if (buf.byteLength < 8) return null;
+    const v = new DataView(buf, 0, 8);
+    const width = v.getUint32(0, true);
+    const height = v.getUint32(4, true);
+    return { width, height, rgba: new Uint8ClampedArray(buf, 8, width * height * 4) };
+  },
   setGpu: (on: boolean) => invoke<Snapshot>("set_gpu", { on }),
   renderError: () => invoke<string | null>("render_error"),
   async screening(frame: number, downsample: number) {

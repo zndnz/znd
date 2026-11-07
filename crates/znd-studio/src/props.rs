@@ -64,6 +64,8 @@ pub enum KeysOp {
     /// 時間方向に動かす。
     Shift { dt: Time },
     Delete,
+    /// ハンドルの速度と影響度（%）を数値で付ける（入る側・出る側、どちらか一方でもよい）。
+    Ease { ease_in: Option<(f64, f64)>, ease_out: Option<(f64, f64)> },
 }
 
 /// 操作後のレイヤーと、操作後の選択。
@@ -88,8 +90,48 @@ pub fn keys_op(mut layer: Layer, sel: Vec<KeyAddr>, op: &KeysOp) -> KeysResult {
             keys::delete(&mut layer, &sel);
             Vec::new()
         }
+        KeysOp::Ease { ease_in, ease_out } => {
+            let ease = |e: (f64, f64)| Ease { speed: e.0, influence: (e.1 / 100.0).clamp(0.001, 1.0) };
+            let style = keys::KeyStyle {
+                interp_in: ease_in.map(|_| Interp::Bezier),
+                interp_out: ease_out.map(|_| Interp::Bezier),
+                bezier_mode: Some(BezierMode::Manual),
+                ease_in: ease_in.map(ease),
+                ease_out: ease_out.map(ease),
+            };
+            keys::set_style(&mut layer, &sel, &style);
+            sel
+        }
     };
     KeysResult { layer, keys }
+}
+
+/// グラフエディターに描くもの。
+#[derive(Serialize)]
+pub struct Graph {
+    /// 成分ごとではなく、時刻ごとの値（`cols` 個）。
+    series: Vec<Vec<f64>>,
+    /// キーの時刻と値。
+    keys: Vec<(Time, Vec<f64>)>,
+    dims: usize,
+}
+
+/// プロパティ `path` の、`t0`〜`t1` 秒の値（`speed` なら 1 秒あたりの変化）を `cols` 点で求める。
+pub fn graph(layer: &Layer, path: &str, t0: f64, t1: f64, cols: usize, speed: bool, fps: f64) -> Option<Graph> {
+    let prop = visit::find_prop(layer, path)?;
+    let cols = cols.clamp(2, 4096);
+    let h = 0.5 / fps.max(1.0);
+    let sample = |t: f64| -> Vec<f64> {
+        if speed {
+            let (a, b) = (prop.eval(Time::from_seconds(t - h)).unwrap_or_default(), prop.eval(Time::from_seconds(t + h)).unwrap_or_default());
+            a.iter().zip(&b).map(|(x, y)| (y - x) / (2.0 * h)).collect()
+        } else {
+            prop.eval(Time::from_seconds(t)).unwrap_or_default()
+        }
+    };
+    let series = (0..cols).map(|c| sample(t0 + (t1 - t0) * c as f64 / (cols - 1) as f64)).collect();
+    let keys = prop.key_times().into_iter().map(|t| (t, prop.eval(t).unwrap_or_default())).collect();
+    Some(Graph { series, keys, dims: prop.dims().max(1) })
 }
 
 /// 選んだキーの最初の区間のカーブ（スポイト）。
@@ -179,6 +221,20 @@ mod tests {
         assert_eq!(r.keys, vec![KeyAddr::new("transform.opacity", dt)]);
         let row = list(&r.layer, Time::ZERO).into_iter().find(|p| p.path == "transform.opacity").unwrap();
         assert_eq!(row.keys[0].time, dt);
+    }
+
+    #[test]
+    fn graphs_sample_values_and_speed() {
+        let l = edit(layer_with_blur(), "transform.rotation", Time::ZERO, &PropEdit::ToggleAnimation);
+        let l = edit(l, "transform.rotation", Time::from_seconds(1.0), &PropEdit::Set { value: vec![90.0] });
+        let l = keys_op(l, vec![KeyAddr::new("transform.rotation", Time::ZERO)], &KeysOp::Kind { kind: KeyKind::Linear }).layer;
+        let g = graph(&l, "transform.rotation", 0.0, 1.0, 3, false, 30.0).unwrap();
+        assert_eq!(g.dims, 1);
+        assert_eq!(g.keys.len(), 2);
+        assert!((g.series[1][0] - 45.0).abs() < 1.0, "{:?}", g.series);
+        let v = graph(&l, "transform.rotation", 0.25, 0.75, 2, true, 30.0).unwrap();
+        assert!((v.series[0][0] - 90.0).abs() < 1.0, "{:?}", v.series);
+        assert!(graph(&l, "nothing", 0.0, 1.0, 3, false, 30.0).is_none());
     }
 
     #[test]

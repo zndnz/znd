@@ -1,7 +1,8 @@
 // タイムライン。左の列は置かず、レイヤーは名前の入った角丸のバーとして時間の上に並べる。
 // バーの ▸ で開くと、その下にプロパティの行（キーフレームの ◆）が出る。
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { api } from "../api";
 import { type Composition, fps, frameToTime, type Layer, type PropInfo, seconds, timecode, timeToFrame } from "../model";
 import { shiftLayer } from "../ops";
 import { currentComp, editComp, editLayer, get, isKeySelected, keysOp, selectKey, set, setFrame, totalFrames, useUi } from "../store";
@@ -139,6 +140,7 @@ export function Timeline() {
               <RowTrack key={row[0].id} comp={comp} members={row} view={view} />
             ))}
           {comp.layers.length === 0 && <div className="tl-empty">下のパレットからレイヤーを作るか、素材を読み込んでください</div>}
+          <AudioLane comp={comp} view={view} />
           <div className="tl-spacer" />
         </div>
         <span className="playhead" style={{ left: px }} />
@@ -174,6 +176,7 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
         {timecode(fr, frame)}
       </span>
       <span className="grow" />
+      <LevelMeter comp={comp} />
       <TimelineFilters />
       <IconButton icon="marker" title={`マーカーを打つ (${shortcut("marker")})`} onClick={() => addMarker()} />
       <IconButton icon="magnet" title="スナップ（再生ヘッド・レイヤーの端・キーフレームに吸着）" on={snapping} onClick={() => set((s) => ({ snapping: !s.snapping }))} />
@@ -694,5 +697,107 @@ function TimelineFilters() {
       <IconButton icon="shy" title="シャイのレイヤーを隠す" on={hideShy} onClick={() => set((s) => ({ hideShy: !s.hideShy }))} />
       <IconButton icon="diamond" title="動きのあるプロパティだけを表示" on={onlyAnimated} onClick={() => set((s) => ({ onlyAnimated: !s.onlyAnimated }))} />
     </>
+  );
+}
+
+/** コンポの音の波形かスペクトログラム（音があるときだけ出す）。 */
+function AudioLane({ comp, view }: { comp: Composition; view: View }) {
+  const revision = useUi((s) => s.snap?.revision ?? 0);
+  const [spectro, setSpectro] = useState(false);
+  const [wave, setWave] = useState<[number, number][]>([]);
+  const [tick, setTick] = useState(0);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const H = 48;
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      void api.audioWave(comp.id, view.start, view.start + view.span, Math.max(1, Math.floor(view.width))).then((w) => {
+        if (!alive) return;
+        setWave(w);
+        // ミックスが終わるまで、少し待って尋ね直す
+        if (w.length === 0) setTimeout(() => alive && setTick((t) => t + 1), 800);
+      });
+    load();
+    return () => {
+      alive = false;
+    };
+  }, [comp.id, view.start, view.span, view.width, revision, tick]);
+  useEffect(() => {
+    if (!spectro) return;
+    let alive = true;
+    void api.spectrogram(comp.id).then((img) => {
+      const c = canvas.current;
+      if (!alive || !img || !c) return;
+      // 表示範囲の部分だけを切り出して描く
+      const total = Math.max(1, timeToFrame(comp.frame_rate, comp.duration));
+      const off = document.createElement("canvas");
+      off.width = img.width;
+      off.height = img.height;
+      off.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(img.rgba), img.width, img.height), 0, 0);
+      c.width = Math.max(1, Math.floor(view.width));
+      c.height = H;
+      const ctx = c.getContext("2d");
+      ctx?.drawImage(off, (view.start / total) * img.width, 0, (view.span / total) * img.width, img.height, 0, 0, c.width, H);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [spectro, comp.id, view.start, view.span, view.width, revision, wave.length > 0]);
+  if (wave.length === 0 || wave.every(([a, b]) => a === 0 && b === 0)) return null;
+  const mid = H / 2;
+  return (
+    <div className="track">
+      <div className="track-row relative" style={{ height: H + 8 }}>
+        <span className="absolute top-1 left-1 z-10 flex gap-1 text-[10px]">
+          <button type="button" className={`rounded-full px-2 ${!spectro ? "bg-muted text-foreground" : "text-muted-foreground"}`} onClick={() => setSpectro(false)}>
+            波形
+          </button>
+          <button type="button" className={`rounded-full px-2 ${spectro ? "bg-muted text-foreground" : "text-muted-foreground"}`} onClick={() => setSpectro(true)}>
+            スペクトログラム
+          </button>
+        </span>
+        {spectro ? (
+          <canvas ref={canvas} className="absolute top-1" style={{ left: view.left, width: view.width, height: H }} />
+        ) : (
+          <svg className="absolute top-1" style={{ left: view.left }} width={view.width} height={H}>
+            {wave.map(([lo, hi], x) => (
+              <line key={x} x1={x + 0.5} x2={x + 0.5} y1={mid - hi * (mid - 2)} y2={mid - lo * (mid - 2) + 1} stroke="var(--audio)" />
+            ))}
+          </svg>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** いまのフレームの音の大きさ（左右、-48dB〜0dB）。 */
+function LevelMeter({ comp }: { comp: Composition }) {
+  const frame = useUi((s) => s.frame);
+  const [peak, setPeak] = useState<[number, number] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void api.audioPeak(comp.id, frame).then((p) => alive && setPeak(p));
+    return () => {
+      alive = false;
+    };
+  }, [comp.id, frame]);
+  if (!peak) return null;
+  const db = (v: number) => (v > 0 ? 20 * Math.log10(v) : -Infinity);
+  const bar = (v: number) => {
+    const d = db(v);
+    const level = Math.max(0, Math.min(1, (d + 48) / 48));
+    const color = d > -1 ? "bg-red-500" : d > -6 ? "bg-amber-400" : "bg-emerald-500";
+    return (
+      <span className="block h-1 w-16 overflow-hidden rounded-full bg-muted">
+        <span className={`block h-full ${color}`} style={{ width: `${level * 100}%` }} />
+      </span>
+    );
+  };
+  const fmt = (v: number) => (Number.isFinite(db(v)) ? db(v).toFixed(1) : "-∞");
+  return (
+    <span className="flex flex-col gap-0.5" title={`L ${fmt(peak[0])} dB　R ${fmt(peak[1])} dB`}>
+      {bar(peak[0])}
+      {bar(peak[1])}
+    </span>
   );
 }

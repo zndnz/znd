@@ -30,6 +30,7 @@ import { layerActions } from "./layerActions";
 import { PropRow, useLayerProps } from "./PropRow";
 import { AlignRow, CompExtras } from "./Tools";
 import { runOp } from "../actions";
+import { AnimatorList, EffectPresets, FootageDetails, LayerFlags, LayerTiming, ProjectSettings, ShapeItems, TextFormat } from "./LayerDetails";
 
 /** 選択欄の「なし」。 */
 const NONE = "__none";
@@ -109,9 +110,22 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
           <AlignRow layer={layer} />
           <p className="text-xs text-muted-foreground/70">◆ でキーフレームを打ちます（右クリックでアニメーションを止める）。= でエクスプレッション。</p>
         </Section>
-        {timing.length > 0 && <Section title="時間・音声">{rows(timing)}</Section>}
-        {content.length > 0 && <Section title="コンテンツ">{rows(content)}</Section>}
-        {animators.length > 0 && <Section title="テキストアニメーター">{rows(animators)}</Section>}
+        <Section title="時間・音声" defaultOpen={timing.length > 0}>
+          <LayerTiming comp={comp} layer={layer} />
+          {rows(timing)}
+        </Section>
+        {layer.kind.type === "shape" && (
+          <Section title="コンテンツ">
+            <ShapeItems layer={layer} />
+            {rows(content)}
+          </Section>
+        )}
+        {layer.kind.type === "text" && (
+          <Section title="テキストアニメーター" defaultOpen={animators.length > 0}>
+            <AnimatorList layer={layer} />
+            {rows(animators)}
+          </Section>
+        )}
         <MaskSection layer={layer} props={masks} />
 
         <Section title="合成">
@@ -144,6 +158,7 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
               }
             />
           </Row>
+          <LayerFlags layer={layer} />
         </Section>
 
         <EffectsSection comp={comp} layer={layer} props={props} />
@@ -250,6 +265,7 @@ function KindSection({ layer }: { layer: Layer }) {
             }
           />
         </Row>
+        <TextFormat layer={layer} />
       </Section>
     );
   }
@@ -299,6 +315,8 @@ function EffectsSection({ comp, layer, props }: { comp: Composition; layer: Laye
     <Section
       title="エフェクト"
       actions={
+        <span className="flex items-center">
+        <EffectPresets layer={layer} />
         <Popover open={picking} onOpenChange={setPicking}>
           <PopoverTrigger render={<Button variant="ghost" size="icon-sm" aria-label="エフェクトを追加" className="text-muted-foreground" />}>
             <Icon name="plus" />
@@ -318,6 +336,7 @@ function EffectsSection({ comp, layer, props }: { comp: Composition; layer: Laye
             </Command>
           </PopoverContent>
         </Popover>
+        </span>
       }
     >
       {effects.length === 0 && <p className="text-xs text-muted-foreground/70">＋ からエフェクトを追加できます。</p>}
@@ -384,7 +403,22 @@ function EffectCard(props: { layer: Layer; fx: EffectInstance; index: number; in
               />
             );
           } else if (v.t === "text") {
-            control = <TextField value={v.v} onChange={(s) => edit(p.label, (f) => void ((f.params[p.name] as { v: string }).v = s))} />;
+            control = (
+              <>
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={v.v}>
+                  {v.v || "（未選択）"}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    void api.pickFile().then((path) => path && edit(p.label, (f) => void ((f.params[p.name] as { v: string }).v = path)))
+                  }
+                >
+                  選択…
+                </Button>
+              </>
+            );
           } else if (v.t === "layer") {
             const comp = currentComp()!;
             control = (
@@ -421,6 +455,7 @@ function FootageInspector({ id }: { id: string }) {
         {f.width > 0 && <Row label="大きさ">{`${f.width} × ${f.height}`}</Row>}
         {f.frame_rate && <Row label="フレームレート">{(f.frame_rate.num / f.frame_rate.den).toFixed(2)} fps</Row>}
         {length !== undefined && <Row label="長さ">{seconds(length).toFixed(2)} 秒</Row>}
+        <FootageDetails item={f} />
         <Button
           variant="secondary"
           onClick={async () => {
@@ -486,11 +521,15 @@ function CompInspector({ comp }: { comp: Composition }) {
         <Row label="シャッター角度">
           <NumberField value={mb.shutter_angle} min={0} max={720} unit="°" onChange={(v, d) => editComp("シャッター角度", (c) => void (c.motion_blur = { ...mb, shutter_angle: v }), d)} />
         </Row>
+        <Row label="シャッター位相">
+          <NumberField value={mb.shutter_phase} min={-360} max={360} unit="°" onChange={(v, d) => editComp("シャッター位相", (c) => void (c.motion_blur = { ...mb, shutter_phase: v }), d)} />
+        </Row>
         <Row label="サンプル数">
           <NumberField value={mb.samples} digits={0} min={2} max={64} onChange={(v, d) => editComp("サンプル数", (c) => void (c.motion_blur = { ...mb, samples: Math.round(v) }), d)} />
         </Row>
       </Section>
       <CompExtras comp={comp} />
+      <ProjectSettings />
       <Section title="ファイル" defaultOpen={false}>
         <Button variant="secondary" onClick={() => void run(() => api.save(false), "保存しました")}>
           保存

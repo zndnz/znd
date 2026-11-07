@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod effects;
+mod inspect;
 mod jobs;
 mod layers;
 mod menu;
@@ -67,6 +68,8 @@ pub(crate) struct Studio {
     diff: Option<(usize, usize, Vec<u8>)>,
     /// 保存済みのファイルより新しい自動保存（前回、保存せずに終了したかもしれない）。
     recovery: Option<PathBuf>,
+    /// スペクトログラムの画像（音の署名, 幅, 高さ, RGBA8）。
+    spectrogram: Option<(u64, usize, usize, Arc<Vec<u8>>)>,
 }
 
 pub(crate) type Shared = Mutex<Studio>;
@@ -104,6 +107,7 @@ impl Studio {
             check: None,
             diff: None,
             recovery: None,
+            spectrogram: None,
         }
     }
 
@@ -164,6 +168,8 @@ impl Studio {
         let engine = PreviewEngine::new(&base_dir(self.path.as_deref()), move || {
             let _ = app.emit("frame-ready", ());
         });
+        // 前に作ったプロキシがあれば使う
+        engine.footage.attach_existing_proxies(&self.project);
         self.engine = Some(engine);
         // 素材を読み直すので、音もミックスし直す
         self.sound.stop();
@@ -427,6 +433,107 @@ fn screening(state: State<'_, Shared>, frame: i64, downsample: u32) -> Response 
     Response::new(out)
 }
 
+/// 音の波形。フレーム `start`〜`end`（小数可）を `cols` 列に分けた、各列の（最小, 最大）。まだミックス中なら空。
+#[tauri::command]
+fn audio_wave(state: State<'_, Shared>, comp: String, start: f64, end: f64, cols: usize) -> Vec<[f32; 2]> {
+    let mut s = lock(&state);
+    s.sync_sound(&comp);
+    let (Some(fr), Some((_, buf))) = (frame_rate(&s, &comp), s.sound.buffer()) else { return Vec::new() };
+    drop(s);
+    let frames = buf.len() / 2;
+    let per_frame = znd_audio::SAMPLE_RATE as f64 / fr.fps();
+    let (s0, s1) = (start * per_frame, end * per_frame);
+    let cols = cols.clamp(1, 8192);
+    let per_col = (s1 - s0) / cols as f64;
+    let value = |i: usize| (buf[i * 2] + buf[i * 2 + 1]) * 0.5;
+    (0..cols)
+        .map(|c| {
+            let a = (s0 + c as f64 * per_col).max(0.0) as usize;
+            let b = ((s0 + (c + 1) as f64 * per_col) as usize).max(a + 1).min(frames);
+            // 長い区間は間引いて調べる（描画コストを一定に保つ）
+            let stride = (b.saturating_sub(a) / 64).max(1);
+            let (mut lo, mut hi) = (0.0f32, 0.0f32);
+            let mut i = a;
+            while i < b {
+                let v = value(i);
+                lo = lo.min(v);
+                hi = hi.max(v);
+                i += stride;
+            }
+            [lo, hi]
+        })
+        .collect()
+}
+
+/// いまのフレームの音の大きさ（左右のピーク、0..1）。音が無ければ `None`。
+#[tauri::command]
+fn audio_peak(state: State<'_, Shared>, comp: String, frame: i64) -> Option<[f32; 2]> {
+    let mut s = lock(&state);
+    s.sync_sound(&comp);
+    let fr = frame_rate(&s, &comp)?;
+    let (_, buf) = s.sound.buffer()?;
+    let per = (znd_audio::SAMPLE_RATE as f64 / fr.fps()).ceil() as usize;
+    let start = znd_audio::time_to_sample(fr.frame_to_time(frame)).max(0) as usize;
+    let mut peak = [0.0f32; 2];
+    for f in buf.chunks_exact(2).skip(start).take(per) {
+        peak = [peak[0].max(f[0].abs()), peak[1].max(f[1].abs())];
+    }
+    Some(peak)
+}
+
+/// コンポの音のスペクトログラム（8 バイトの見出し＋ RGBA8。横がコンポの全体、縦が 40Hz〜16kHz の対数）。
+#[tauri::command]
+fn spectrogram(state: State<'_, Shared>, comp: String) -> Response {
+    let mut s = lock(&state);
+    s.sync_sound(&comp);
+    let Some((sig, buf)) = s.sound.buffer() else { return Response::new(Vec::new()) };
+    let image = match &s.spectrogram {
+        Some((cached, w, h, rgba)) if *cached == sig => (*w, *h, rgba.clone()),
+        _ => {
+            drop(s);
+            let (w, h, rgba) = spectrogram_image(&buf);
+            let rgba = Arc::new(rgba);
+            let mut s = lock(&state);
+            s.spectrogram = Some((sig, w, h, rgba.clone()));
+            (w, h, rgba)
+        }
+    };
+    let mut out = Vec::with_capacity(8 + image.2.len());
+    out.extend((image.0 as u32).to_le_bytes());
+    out.extend((image.1 as u32).to_le_bytes());
+    out.extend(image.2.iter());
+    Response::new(out)
+}
+
+fn spectrogram_image(stereo: &[f32]) -> (usize, usize, Vec<u8>) {
+    const N: usize = 2048;
+    const HEIGHT: usize = 96;
+    const MAX_COLS: usize = 2048;
+    let mono: Vec<f32> = stereo.chunks_exact(2).map(|f| (f[0] + f[1]) * 0.5).collect();
+    // 列数が増えすぎないよう、長い音声ほど粗く刻む
+    let hop = (mono.len() / MAX_COLS).max(N / 2);
+    let sp = znd_audio::analysis::spectrogram(&mono, N, hop);
+    let w = sp.columns.len().max(1);
+    let mut img = vec![0u8; w * HEIGHT * 4];
+    let (f_lo, f_hi) = (40.0f64, 16_000.0f64);
+    for (x, col) in sp.columns.iter().enumerate() {
+        for y in 0..HEIGHT {
+            let u = 1.0 - y as f64 / (HEIGHT - 1) as f64;
+            let freq = f_lo * (f_hi / f_lo).powf(u);
+            let bin = ((freq / (znd_audio::SAMPLE_RATE as f64 / N as f64)) as usize).min(col.len().saturating_sub(1));
+            // -80dB..0dB を 0..1 に
+            let v = ((col.get(bin).copied().unwrap_or(-120.0) + 80.0) / 80.0).clamp(0.0, 1.0);
+            let k = 0.2 + 0.8 * v;
+            let i = (y * w + x) * 4;
+            img[i] = (v * 255.0 * k) as u8;
+            img[i + 1] = (v * v * 255.0 * k) as u8;
+            img[i + 2] = ((255.0 - v * 127.0) * k) as u8;
+            img[i + 3] = 255;
+        }
+    }
+    (w, HEIGHT, img)
+}
+
 /// エフェクトを GPU で処理するか。
 #[tauri::command]
 fn set_gpu(state: State<'_, Shared>, on: bool) -> Snapshot {
@@ -502,6 +609,31 @@ fn keys_op(layer: Layer, keys: Vec<znd_core::keys::KeyAddr>, op: props::KeysOp) 
 #[tauri::command]
 fn curve_of(layer: Layer, keys: Vec<znd_core::keys::KeyAddr>) -> Option<EaseCurve> {
     props::curve_of(&layer, &keys)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn graph(layer: Layer, path: String, t0: f64, t1: f64, cols: usize, speed: bool, fps: f64) -> Option<props::Graph> {
+    props::graph(&layer, &path, t0, t1, cols, speed, fps)
+}
+
+/// JavaScript でプロジェクト全体を書き換える（スクリプトのウィンドウ）。ログを返す。
+#[tauri::command]
+fn run_script(state: State<'_, Shared>, source: String) -> Result<(Vec<String>, Snapshot), String> {
+    let mut s = lock(&state);
+    let mut copy = (*s.project).clone();
+    let logs = znd_script::run_script(&mut copy, &source)?;
+    if serde_json::to_value(&copy).ok() != serde_json::to_value(&*s.project).ok() {
+        s.apply(copy, "スクリプト", false);
+    }
+    Ok((logs, s.snapshot()))
+}
+
+/// スクリプトのファイルを選んで読む。
+#[tauri::command]
+fn load_script() -> Result<Option<String>, String> {
+    let Some(path) = rfd::FileDialog::new().add_filter("JavaScript", &["js"]).pick_file() else { return Ok(None) };
+    std::fs::read(&path).map(|b| Some(plugins::decode_text(&b))).map_err(|e| format!("読めません: {e}"))
 }
 
 #[tauri::command]
@@ -665,6 +797,9 @@ fn main() {
             keys_op,
             curve_of,
             curve_presets,
+            graph,
+            run_script,
+            load_script,
             curve_samples,
             parse_curve,
             fonts,
@@ -675,7 +810,19 @@ fn main() {
             keymap_load,
             keymap_save,
             ops::op,
+            inspect::inspector_catalog,
+            inspect::animators,
+            inspect::content_op,
+            inspect::effect_preset_save,
+            inspect::effect_preset_load,
+            inspect::make_proxy,
+            inspect::font_available,
+            inspect::expr_errors,
+            inspect::pick_file,
             screening,
+            audio_wave,
+            audio_peak,
+            spectrogram,
             set_gpu,
             render_error,
             viewer::viewer_overlay,

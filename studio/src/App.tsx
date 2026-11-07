@@ -27,6 +27,7 @@ import {
 import { addMarker, copyKeys, pasteKeys, runAction, runOp, selectAllKeys } from "./actions";
 import { actionFor, loadKeymap } from "./keymap";
 import { BeatfitDialog, ShortcutsDialog } from "./components/Tools";
+import { GraphWindow, ScriptDialog } from "./components/Graph";
 import { onPluginKey, onPluginMenu, PluginLog, PluginManager, PluginNotices, PluginPanels, PluginToolbar, refreshPlugins } from "./components/Plugins";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -118,8 +119,17 @@ function onMenu(id: string) {
       return runAction("reverse_keys");
     case "work_clear":
       return set({ workArea: null });
+    case "graph":
+      return set((st) => ({ graphOpen: !st.graphOpen }));
+    case "hide_shy":
+      return set((st) => ({ hideShy: !st.hideShy }));
+    case "only_animated":
+      return set((st) => ({ onlyAnimated: !st.onlyAnimated }));
+    case "screening":
+      return set((st) => ({ screening: !st.screening }));
     case "shortcuts":
     case "beatfit":
+    case "script":
       return set({ dialog: id });
     case "toggle_project":
       return set({ showProject: !s.showProject });
@@ -231,6 +241,18 @@ function usePlayback() {
   }, [playing]);
 }
 
+/** エクスプレッションのエラーを、編集があったときだけ調べ直す（少し待ってから）。 */
+function useExprErrors() {
+  const revision = useUi((s) => s.snap?.revision ?? 0);
+  const compId = useUi((s) => s.compId);
+  useEffect(() => {
+    const id = setTimeout(() => {
+      void api.exprErrors(compId, get().frame).then((exprErrors) => set({ exprErrors })).catch(() => {});
+    }, 300);
+    return () => clearTimeout(id);
+  }, [revision, compId]);
+}
+
 export function App() {
   const ready = useUi((s) => !!s.project);
   const showProject = useUi((s) => s.showProject);
@@ -240,6 +262,7 @@ export function App() {
   const status = useUi((s) => s.status);
   usePlayback();
   useTasks();
+  useExprErrors();
 
   useEffect(() => {
     void api.snapshot().then(adopt);
@@ -301,6 +324,8 @@ export function App() {
         <RecoveryDialog />
         <BeatfitDialog />
         <ShortcutsDialog />
+        <GraphWindow />
+        <ScriptDialog />
       </div>
     </TooltipProvider>
   );
