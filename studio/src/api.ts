@@ -15,6 +15,9 @@ import type {
   EffectInstance,
   KeyAddr,
   OpResult,
+  Overlay,
+  ViewerAt,
+  ViewerOutcome,
   KeysOp,
   Layer,
   PanelItem,
@@ -49,7 +52,7 @@ export interface Evaluated {
 
 export const api = {
   snapshot: () => invoke<Snapshot>("snapshot"),
-  commit: (project: Project, label: string, coalesce: boolean) => invoke<Snapshot>("commit", { project, label, coalesce }),
+  commit: (project: Project, label: string, coalesce: boolean, gesture: number) => invoke<Snapshot>("commit", { project, label, coalesce, gesture }),
   undo: () => invoke<Snapshot>("undo"),
   redo: () => invoke<Snapshot>("redo"),
   newProject: () => invoke<Snapshot>("new_project"),
@@ -90,6 +93,28 @@ export const api = {
   keymapSave: (value: unknown) => invoke<string>("keymap_save", { value }),
   prefGet: (key: string) => invoke<unknown>("pref_get", { key }),
   prefSet: (key: string, value: unknown) => invoke<void>("pref_set", { key, value }),
+
+  // ---- ビューア ----
+  viewerOverlay: (at: ViewerAt) => invoke<Overlay>("viewer_overlay", { at }),
+  viewerDown: (at: ViewerAt, tool: string, point: Vec2) => invoke<ViewerOutcome>("viewer_down", { at, tool, point }),
+  viewerMove: (at: ViewerAt, drag: unknown, point: Vec2, alt: boolean, gesture: number) => invoke<ViewerOutcome>("viewer_move", { at, drag, point, alt, gesture }),
+  viewerUp: (at: ViewerAt, tool: string, drag: unknown, point: Vec2, shift: boolean) => invoke<ViewerOutcome>("viewer_up", { at, tool, drag, point, shift }),
+  viewerClick: (at: ViewerAt, point: Vec2, alt: boolean, double: boolean) => invoke<ViewerOutcome>("viewer_click", { at, point, alt, double }),
+  penFinish: (at: ViewerAt, closed: boolean, cancel: boolean) => invoke<ViewerOutcome>("pen_finish", { at, closed, cancel }),
+  penActive: () => invoke<boolean>("pen_active"),
+  maskRemoveVertex: (at: ViewerAt, vertex: number) => invoke<ViewerOutcome>("mask_remove_vertex", { at, vertex }),
+  setGpu: (on: boolean) => invoke<Snapshot>("set_gpu", { on }),
+  renderError: () => invoke<string | null>("render_error"),
+  async screening(frame: number, downsample: number) {
+    const buf = await invoke<ArrayBuffer>("screening", { frame, downsample });
+    if (buf.byteLength < 20) return null;
+    const v = new DataView(buf, 0, 20);
+    const width = v.getUint32(0, true);
+    const height = v.getUint32(4, true);
+    const stats = [v.getFloat32(8, true), v.getFloat32(12, true), v.getFloat32(16, true)];
+    const rgba = buf.byteLength >= 20 + width * height * 4 ? new Uint8ClampedArray(buf, 20, width * height * 4) : null;
+    return { width, height, stats, rgba };
+  },
 
   // ---- ファイル・履歴・版・レビュー ----
   importLyrics: (comp: string) => invoke<Reply | null>("import_lyrics", { comp }),

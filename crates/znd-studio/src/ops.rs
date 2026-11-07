@@ -62,6 +62,8 @@ pub enum Op {
     Pulse { layer: String, source: usize, range: Option<(i64, i64)>, path: String, delta: f64, frames: u32 },
     /// 120 BPM のクリック音と光る画面の、同期テスト用のコンポを作る。
     SyncTest,
+    /// レイヤーの中央に矩形（`ellipse` なら楕円）のマスクを足す。
+    AddMask { layer: String, ellipse: bool },
 }
 
 #[derive(Deserialize)]
@@ -494,6 +496,26 @@ fn layer_op(s: &mut Studio, ctx: &OpCtx, op: Op) -> OpResult {
                     return Err("このプロパティにはキーフレームを打てません".into());
                 }
                 Ok(format!("{} 個のビートにキーフレームを打ちました", times.len()))
+            })
+        }
+        Op::AddMask { layer, ellipse } => {
+            let Ok(l) = layer_of(&layer) else { fail!("レイヤーがありません".into()) };
+            let size = s.project.source_size(&l.kind);
+            let (w, h) = size.unwrap_or((comp.width as f64, comp.height as f64));
+            // 寸法を持たないレイヤー（シェイプ・テキスト）は原点が中心
+            let (ox, oy) = if size.is_none() { (-w / 2.0, -h / 2.0) } else { (0.0, 0.0) };
+            let path = if ellipse {
+                znd_core::shape::BezPath::ellipse([ox + w / 2.0, oy + h / 2.0], [w * 0.3, h * 0.3])
+            } else {
+                znd_core::shape::BezPath::rect(ox + w * 0.25, oy + h * 0.25, w * 0.5, h * 0.5)
+            };
+            s.edit_comp(&comp_id, "マスクを追加", |c| {
+                let l = c.layer_mut(&LayerId::new(layer)).ok_or("レイヤーがありません")?;
+                if l.locked {
+                    return Err("ロックされています".into());
+                }
+                l.masks.push(znd_core::shape::Mask::new(path));
+                Ok(format!("マスク {} を追加しました", l.masks.len()))
             })
         }
         Op::SyncTest => {

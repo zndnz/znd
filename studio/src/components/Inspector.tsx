@@ -29,6 +29,7 @@ import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
 import { PropRow, useLayerProps } from "./PropRow";
 import { AlignRow, CompExtras } from "./Tools";
+import { runOp } from "../actions";
 
 /** 選択欄の「なし」。 */
 const NONE = "__none";
@@ -111,7 +112,7 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
         {timing.length > 0 && <Section title="時間・音声">{rows(timing)}</Section>}
         {content.length > 0 && <Section title="コンテンツ">{rows(content)}</Section>}
         {animators.length > 0 && <Section title="テキストアニメーター">{rows(animators)}</Section>}
-        {masks.length > 0 && <Section title="マスク">{rows(masks)}</Section>}
+        <MaskSection layer={layer} props={masks} />
 
         <Section title="合成">
           <Row label="描画モード">
@@ -148,6 +149,65 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
         <EffectsSection comp={comp} layer={layer} props={props} />
       </fieldset>
     </>
+  );
+}
+
+const MASK_MODES: [string, string][] = [
+  ["none", "なし"],
+  ["add", "加算"],
+  ["subtract", "減算"],
+  ["intersect", "交差"],
+  ["lighten", "比較（明）"],
+  ["darken", "比較（暗）"],
+  ["difference", "差"],
+];
+
+interface MaskJson {
+  name?: string;
+  mode?: string;
+  inverted?: boolean;
+}
+
+/** マスク: 追加（ビューアのペン・矩形・楕円ツールでも描ける）・モード・反転・削除と、各マスクの値。 */
+function MaskSection({ layer, props }: { layer: Layer; props: PropInfo[] }) {
+  const list = (layer.masks as MaskJson[] | undefined) ?? [];
+  const active = useUi((s) => s.activeMask);
+  const edit = (label: string, f: (m: MaskJson[]) => void) => editLayer(label, layer.id, (l) => void f(l.masks as MaskJson[]));
+  return (
+    <Section
+      title="マスク"
+      defaultOpen={list.length > 0}
+      actions={
+        <span className="flex gap-0.5">
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void runOp({ op: "add_mask", layer: layer.id, ellipse: false })}>
+            ＋矩形
+          </Button>
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void runOp({ op: "add_mask", layer: layer.id, ellipse: true })}>
+            ＋楕円
+          </Button>
+        </span>
+      }
+    >
+      {list.length === 0 && <p className="text-xs text-muted-foreground/70">ビューアのペン（G）・矩形（R）・楕円（O）ツールで描くこともできます。</p>}
+      {list.map((m, i) => (
+        <div key={i} className={`flex flex-col gap-1.5 rounded-3xl p-2 ${i === active ? "bg-muted/70" : "bg-muted/40"}`} onPointerDown={() => set({ activeMask: i })}>
+          <div className="flex items-center gap-1.5 pl-1">
+            <span className="w-16 shrink-0 text-sm font-medium">{m.name || `マスク ${i + 1}`}</span>
+            <Choice className="flex-1" value={m.mode ?? "add"} options={MASK_MODES} onChange={(v) => edit("マスクモード", (ms) => void (ms[i].mode = v))} />
+            <label className="flex items-center gap-1 text-xs">
+              <Checkbox checked={!!m.inverted} onCheckedChange={(on) => edit("マスク反転", (ms) => void (ms[i].inverted = on))} />
+              反転
+            </label>
+            <IconButton icon="close" title="このマスクを削除" size="icon-xs" onClick={() => edit("マスク削除", (ms) => void ms.splice(i, 1))} />
+          </div>
+          {props
+            .filter((p) => p.path.startsWith(`mask.${i}.`))
+            .map((p) => (
+              <PropRow key={p.path} layer={layer} prop={p} />
+            ))}
+        </div>
+      ))}
+    </Section>
   );
 }
 

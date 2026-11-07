@@ -144,6 +144,7 @@ export interface Snapshot {
   undo: string | null;
   redo: string | null;
   gpu: string | null;
+  gpu_on: boolean;
   /** 復元できる自動保存。 */
   recovery: string | null;
 }
@@ -484,4 +485,42 @@ export interface OpResult {
   /** コピーしたキーフレーム（クリップボードに入れる）。 */
   clip?: string | null;
   comp?: string | null;
+}
+
+// ---------- ビューアの直接操作 ----------
+
+export interface ViewerAt {
+  comp: string;
+  frame: number;
+  layer: string | null;
+  mask: number;
+  /** 画面上で掴める距離（コンポ座標）。 */
+  grab: number;
+}
+
+export interface OverlayVertex {
+  p: Vec2;
+  tan_in: Vec2 | null;
+  tan_out: Vec2 | null;
+}
+
+/** 選んでいるレイヤーの補助線（コンポ座標）。 */
+export interface Overlay {
+  frame: [Vec2, Vec2, Vec2, Vec2] | null;
+  anchor: Vec2 | null;
+  rotation: number;
+  motion: Vec2[];
+  motion_keys: { p: Vec2; handles: [Vec2, Vec2] | null }[];
+  motion_now: number | null;
+  masks: { line: Vec2[]; vertices: OverlayVertex[] }[];
+  pen: OverlayVertex[];
+}
+
+export interface ViewerOutcome {
+  snapshot: Snapshot | null;
+  drag: unknown | null;
+  select?: string | null;
+  mask: number | null;
+  vertex?: number | null;
+  status: string | null;
 }

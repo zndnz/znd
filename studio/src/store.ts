@@ -47,6 +47,17 @@ export interface UiState {
   downsample: number;
   /** ビューアの拡大率（0 = 全体表示）。 */
   viewZoom: number;
+  /** ビューアに出すチャンネル（0 = RGB、1〜3 = R・G・B、4 = 輝度）。 */
+  channel: number;
+  showGrid: boolean;
+  showGuides: boolean;
+  /** 上映プレビュー（白飛び・黒つぶれ・バンディングの恐れを重ねる）。 */
+  screening: boolean;
+  /** 編集中のマスクと、選んでいる頂点。 */
+  activeMask: number;
+  activeVertex: number | null;
+  /** ドラッグ 1 回ごとに増える番号（同じ番号の間の編集を 1 回の取り消しにまとめる）。 */
+  gesture: number;
   viewPan: [number, number];
   showProject: boolean;
   showInspector: boolean;
@@ -98,6 +109,13 @@ let state: UiState = {
   tool: "select",
   downsample: 2,
   viewZoom: 0,
+  channel: 0,
+  showGrid: false,
+  showGuides: false,
+  screening: false,
+  activeMask: 0,
+  activeVertex: null,
+  gesture: 0,
   viewPan: [0, 0],
   showProject: true,
   showInspector: true,
@@ -177,6 +195,7 @@ interface Pending {
   project: Project;
   label: string;
   coalesce: boolean;
+  gesture: number;
 }
 const queue: Pending[] = [];
 let sending = false;
@@ -187,7 +206,7 @@ async function flush() {
   while (queue.length) {
     const job = queue.shift()!;
     try {
-      const snap = await api.commit(job.project, job.label, job.coalesce);
+      const snap = await api.commit(job.project, job.label, job.coalesce, job.gesture);
       // 画面にはもっと新しい編集が出ているかもしれないので、プロジェクトは送信待ちが無いときだけ差し替える
       set(queue.length ? { snap } : { snap, project: state.project });
     } catch (e) {
@@ -205,8 +224,9 @@ export function edit(label: string, f: (p: Project) => void | boolean, coalesce 
   if (f(next) === false) return;
   set({ project: next });
   const last = queue[queue.length - 1];
-  if (coalesce && last && last.coalesce && last.label === label) last.project = next;
-  else queue.push({ project: next, label, coalesce });
+  const gesture = state.gesture;
+  if (coalesce && last && last.coalesce && last.label === label && last.gesture === gesture) last.project = next;
+  else queue.push({ project: next, label, coalesce, gesture });
   void flush();
 }
 
@@ -332,3 +352,6 @@ export function selectKey(layer: string, key: KeyAddr, add: boolean) {
 
 export const isKeySelected = (s: UiState, layer: string, key: KeyAddr) =>
   s.selectedKeys?.layer === layer && s.selectedKeys.keys.some((k) => k.path === key.path && k.time === key.time);
+
+// ポインタを離すたびに操作の番号を進める（ドラッグごとに取り消しの単位を分ける）
+if (typeof window !== "undefined") window.addEventListener("pointerup", () => set((s) => ({ gesture: s.gesture + 1 })), true);

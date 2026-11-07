@@ -124,6 +124,17 @@ fieldset.plain {
 .viewer.tool-hand {
   cursor: grab;
 }
+.viewer.tool-zoom {
+  cursor: zoom-in;
+}
+.viewer.tool-pen,
+.viewer.tool-rect,
+.viewer.tool-ellipse {
+  cursor: crosshair;
+}
+.viewer.tool-rotate {
+  cursor: alias;
+}
 .stage {
   position: absolute;
   box-shadow: 0 0 0 0.5px oklch(1 0 0 / 10%);
@@ -158,6 +169,11 @@ fieldset.plain {
 .float.top-left {
   top: 16px;
   left: 16px;
+}
+.float.bottom-left {
+  bottom: 20px;
+  left: 16px;
+  padding: 4px 12px;
 }
 .float.bottom-center {
   bottom: 20px;

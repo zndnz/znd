@@ -8,7 +8,7 @@ import { IconButton } from "./components/controls";
 import { layerActions } from "./components/layerActions";
 import { newComposition, ProjectList } from "./components/ProjectList";
 import { Timeline } from "./components/Timeline";
-import { createLayer, Viewer } from "./components/Viewer";
+import { createLayer, penKey, Viewer } from "./components/Viewer";
 import { fps } from "./model";
 import { adopt, currentComp, get, keysOp, reply, run, set, totalFrames, useUi } from "./store";
 import type { KeyKind } from "./model";
@@ -147,6 +147,11 @@ const isTyping = () => {
 /** キー操作。割り当て（keymap.ts）から操作を探して実行する。⌘ のつくものの多くはメニューが先に受ける。 */
 function onKey(e: KeyboardEvent) {
   const typing = isTyping();
+  if (!typing && get().tool === "pen" && (e.key === "Enter" || e.key === "Escape")) {
+    // 描きかけのペンがあれば確定・取り消し（無ければ通常の Esc）
+    void penKey(e.key).then((done) => !done && e.key === "Escape" && set({ selected: null, selectedFootage: null, selectedKeys: null }));
+    return;
+  }
   if (!typing && onPluginKey(e)) return;
   if (!typing && e.key === "Escape") return set({ selected: null, selectedFootage: null, selectedKeys: null });
   const action = actionFor(e);

@@ -18,6 +18,7 @@ mod prefs;
 mod props;
 mod rescue;
 mod sound;
+mod viewer;
 mod work;
 
 use serde::Serialize;
@@ -40,8 +41,11 @@ pub(crate) struct Studio {
     dirty: bool,
     undo: Vec<(String, Arc<Project>)>,
     redo: Vec<(String, Arc<Project>)>,
-    /// 直前の編集の名前（ドラッグ中の連続した編集を 1 つの取り消し単位にまとめる）。
+    /// 直前の編集の名前と操作の番号（ドラッグ中の連続した編集を 1 つの取り消し単位にまとめる）。
     last_label: Option<String>,
+    last_gesture: Option<u64>,
+    /// ビューアで描きかけのペンのパス（レイヤー, レイヤー座標のパス）。
+    pen: Option<(LayerId, znd_core::edit::PenPath)>,
     engine: Option<PreviewEngine>,
     sound: Arc<Sound>,
     /// 音を最後にミックスし直すか確かめた（リビジョン, コンポ）。
@@ -85,6 +89,8 @@ impl Studio {
             undo: Vec::new(),
             redo: Vec::new(),
             last_label: None,
+            last_gesture: None,
+            pen: None,
             engine: None,
             sound: Sound::new(),
             sound_checked: (0, String::new()),
@@ -182,7 +188,13 @@ impl Studio {
 
     /// 新しい状態を採用する。`coalesce` なら、同じ名前の直前の編集とまとめて 1 回の取り消しにする。
     fn apply(&mut self, project: Project, label: &str, coalesce: bool) {
-        let merge = coalesce && self.last_label.as_deref() == Some(label) && !self.undo.is_empty();
+        self.apply_in(project, label, coalesce, None);
+    }
+
+    /// `apply` と同じ。`gesture`（画面のドラッグ 1 回ごとの番号）が違えば、同じ名前でもまとめない。
+    fn apply_in(&mut self, project: Project, label: &str, coalesce: bool, gesture: Option<u64>) {
+        let merge = coalesce && self.last_label.as_deref() == Some(label) && self.last_gesture == gesture && !self.undo.is_empty();
+        self.last_gesture = gesture;
         if !merge {
             self.undo.push((label.to_string(), self.project.clone()));
             if self.undo.len() > UNDO_LIMIT {
@@ -210,6 +222,7 @@ impl Studio {
             undo: self.undo.last().map(|u| u.0.clone()),
             redo: self.redo.last().map(|u| u.0.clone()),
             gpu: znd_preview::gpu_name().map(str::to_string),
+            gpu_on: znd_preview::GPU_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
             recovery: self.recovery.as_ref().map(|p| p.display().to_string()),
         }
     }
@@ -226,6 +239,8 @@ pub(crate) struct Snapshot {
     undo: Option<String>,
     redo: Option<String>,
     gpu: Option<String>,
+    /// エフェクトを GPU で処理しているか。
+    gpu_on: bool,
     /// 復元できる自動保存。
     recovery: Option<String>,
 }
@@ -237,7 +252,7 @@ fn snapshot(state: State<'_, Shared>) -> Snapshot {
 
 /// 画面で編集したプロジェクトを採用する。壊れた参照（循環する親子・プリコンポなど）があれば採用しない。
 #[tauri::command]
-fn commit(state: State<'_, Shared>, project: Project, label: String, coalesce: bool) -> Result<Snapshot, String> {
+fn commit(state: State<'_, Shared>, project: Project, label: String, coalesce: bool, gesture: Option<u64>) -> Result<Snapshot, String> {
     let mut project = project;
     let problems = project.validate();
     if !problems.is_empty() {
@@ -256,7 +271,7 @@ fn commit(state: State<'_, Shared>, project: Project, label: String, coalesce: b
     for c in &mut project.compositions {
         edit::normalize_tracks(c);
     }
-    s.apply(project, &label, coalesce);
+    s.apply_in(project, &label, coalesce, gesture);
     Ok(s.snapshot())
 }
 
@@ -391,6 +406,40 @@ fn play_clock(state: State<'_, Shared>, comp: String, frame: i64) -> Option<i64>
     s.sync_sound(&comp);
     let fr = frame_rate(&s, &comp)?;
     s.sound.clock(fr, frame)
+}
+
+/// 上映プレビュー: 白飛び（赤）・黒つぶれ（青）・バンディングの恐れ（緑）を重ねる画像（8 バイトの見出し＋ RGBA8）と、
+/// その割合（見出しのあとに f32 を 3 つ: 白飛び・黒つぶれ・バンディング）。まだレンダリングしていなければ空。
+#[tauri::command]
+fn screening(state: State<'_, Shared>, frame: i64, downsample: u32) -> Response {
+    let s = lock(&state);
+    let Some(p) = s.engine.as_ref().and_then(|e| e.get(s.revision, frame, downsample.max(1))) else { return Response::new(Vec::new()) };
+    let r = &p.screening;
+    let mut out = Vec::with_capacity(20 + r.overlay.len());
+    out.extend((p.width as u32).to_le_bytes());
+    out.extend((p.height as u32).to_le_bytes());
+    for v in [r.clipped_white, r.crushed_black, r.banding_risk] {
+        out.extend((v as f32).to_le_bytes());
+    }
+    if r.overlay.len() == p.width * p.height * 4 {
+        out.extend(&r.overlay);
+    }
+    Response::new(out)
+}
+
+/// エフェクトを GPU で処理するか。
+#[tauri::command]
+fn set_gpu(state: State<'_, Shared>, on: bool) -> Snapshot {
+    znd_preview::GPU_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+    let mut s = lock(&state);
+    s.refresh();
+    s.snapshot()
+}
+
+/// レンダリングのエラー（素材が読めないなど）。
+#[tauri::command]
+fn render_error(state: State<'_, Shared>) -> Option<String> {
+    lock(&state).engine.as_ref().and_then(|e| e.error())
 }
 
 /// RAM プレビュー済みのフレーム番号。
@@ -626,6 +675,17 @@ fn main() {
             keymap_load,
             keymap_save,
             ops::op,
+            screening,
+            set_gpu,
+            render_error,
+            viewer::viewer_overlay,
+            viewer::viewer_down,
+            viewer::viewer_move,
+            viewer::viewer_up,
+            viewer::viewer_click,
+            viewer::pen_finish,
+            viewer::pen_active,
+            viewer::mask_remove_vertex,
             ops::beat_sources,
             ops::beat_count,
             plugins::plugin_state,

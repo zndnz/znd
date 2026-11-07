@@ -5,6 +5,7 @@ import { api } from "./api";
 import { applyRememberedEase } from "./components/Easing";
 import { openComp } from "./components/ProjectList";
 import { deleteSelectedKey } from "./components/Timeline";
+import { deleteActiveVertex } from "./components/Viewer";
 import type { KeyAddr, OpResult } from "./model";
 import { timeToFrame } from "./model";
 import { adopt, currentComp, get, keysOp, run, selectedLayer, set, setFrame, type Tool, totalFrames } from "./store";
@@ -90,6 +91,7 @@ export function runAction(id: string) {
     case "save":
       return void run(() => api.save(false), "保存しました");
     case "delete":
+      if (deleteActiveVertex()) return;
       if (deleteSelectedKey()) return;
       return onLayer("delete");
     case "duplicate":
