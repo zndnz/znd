@@ -7,10 +7,11 @@ import { Inspector } from "./components/Inspector";
 import { IconButton } from "./components/controls";
 import { layerActions } from "./components/layerActions";
 import { newComposition, ProjectList } from "./components/ProjectList";
-import { deleteSelectedKey, Timeline } from "./components/Timeline";
+import { Timeline } from "./components/Timeline";
 import { createLayer, Viewer } from "./components/Viewer";
 import { fps } from "./model";
-import { adopt, currentComp, get, keysOp, reply, run, set, setFrame, totalFrames, useUi } from "./store";
+import { adopt, currentComp, get, keysOp, reply, run, set, totalFrames, useUi } from "./store";
+import type { KeyKind } from "./model";
 import {
   CheckDialog,
   ExportDialog,
@@ -23,7 +24,9 @@ import {
   useTasks,
   VersionsDialog,
 } from "./components/Windows";
-import { applyRememberedEase } from "./components/Easing";
+import { addMarker, copyKeys, pasteKeys, runAction, runOp, selectAllKeys } from "./actions";
+import { actionFor, loadKeymap } from "./keymap";
+import { BeatfitDialog, ShortcutsDialog } from "./components/Tools";
 import { onPluginKey, onPluginMenu, PluginLog, PluginManager, PluginNotices, PluginPanels, PluginToolbar, refreshPlugins } from "./components/Plugins";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -31,6 +34,12 @@ function onMenu(id: string) {
   const s = get();
   if (id.startsWith("layer:")) return void createLayer(id.slice(6));
   if (onPluginMenu(id)) return;
+  if (id.startsWith("detect_beats:")) return void runOp({ op: "detect_beats", layer: s.selected, sensitivity: Number(id.slice(13)) });
+  if (id.startsWith("band:")) {
+    if (!s.selected) return set({ status: "スケールを付けるレイヤーを選択してください" });
+    return void runOp({ op: "band_scale", layer: s.selected, source: s.selected, band: id.slice(5) });
+  }
+  if (id.startsWith("keys:")) return void keysOp("キーフレーム補間", { op: "kind", kind: id.slice(5) as KeyKind });
   switch (id) {
     case "new":
       return void run(api.newProject, "新しいプロジェクトを作りました");
@@ -85,9 +94,33 @@ function onMenu(id: string) {
     case "duplicate":
       return s.selected && layerActions(s.selected).duplicate();
     case "bring_forward":
-      return s.selected && layerActions(s.selected).reorder(-1);
+      return s.selected && layerActions(s.selected).reorder("forward");
     case "send_backward":
-      return s.selected && layerActions(s.selected).reorder(1);
+      return s.selected && layerActions(s.selected).reorder("backward");
+    case "bring_front":
+      return s.selected && layerActions(s.selected).reorder("front");
+    case "send_back":
+      return s.selected && layerActions(s.selected).reorder("back");
+    case "split":
+    case "precompose":
+    case "outline":
+    case "new_row":
+      return s.selected && void runOp({ op: id, layer: s.selected });
+    case "marker":
+      return addMarker();
+    case "clear_markers":
+      return void runOp({ op: "clear_markers" });
+    case "bpm_from_taps":
+      return void runOp({ op: "bpm_from_taps" });
+    case "select_all_keys":
+      return void selectAllKeys();
+    case "reverse_keys":
+      return runAction("reverse_keys");
+    case "work_clear":
+      return set({ workArea: null });
+    case "shortcuts":
+    case "beatfit":
+      return set({ dialog: id });
     case "toggle_project":
       return set({ showProject: !s.showProject });
     case "toggle_inspector":
@@ -111,45 +144,33 @@ const isTyping = () => {
   return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
 };
 
+/** キー操作。割り当て（keymap.ts）から操作を探して実行する。⌘ のつくものの多くはメニューが先に受ける。 */
 function onKey(e: KeyboardEvent) {
+  const typing = isTyping();
+  if (!typing && onPluginKey(e)) return;
+  if (!typing && e.key === "Escape") return set({ selected: null, selectedFootage: null, selectedKeys: null });
+  const action = actionFor(e);
+  if (!action) {
+    // 割り当ての無いキー: T でテキストを作る
+    if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === "t") void createLayer("text");
+    return;
+  }
+  if (typing && !action.global) return;
+  if (e.repeat && !action.repeat) return;
+  e.preventDefault();
+  runAction(action.id);
+}
+
+/** ⌘C / ⌘V: 文字入力中でなければ、キーフレームのコピーと貼り付け。 */
+function onCopy(e: ClipboardEvent) {
+  if (!isTyping() && copyKeys()) e.preventDefault();
+}
+function onPaste(e: ClipboardEvent) {
   if (isTyping()) return;
-  if (onPluginKey(e)) return;
-  if (e.metaKey || e.ctrlKey) return;
-  const s = get();
-  const step = e.shiftKey ? 10 : 1;
-  switch (e.key) {
-    case " ":
-      e.preventDefault();
-      return set({ playing: !s.playing });
-    case "ArrowLeft":
-      return setFrame(s.frame - step);
-    case "ArrowRight":
-      return setFrame(s.frame + step);
-    case "Home":
-      return setFrame(0);
-    case "End":
-      return setFrame(totalFrames() - 1);
-    case "v":
-      return set({ tool: "select" });
-    case "h":
-      return set({ tool: "hand" });
-    case "t":
-      return void createLayer("text");
-    case "b":
-      return set((st) => ({ workArea: [s.frame, st.workArea?.[1] ?? totalFrames()] }));
-    case "n":
-      return set((st) => ({ workArea: [st.workArea?.[0] ?? 0, Math.max(s.frame + 1, (st.workArea?.[0] ?? 0) + 1)] }));
-    case "e":
-      return applyRememberedEase();
-    case "F9":
-      return void keysOp("イージーイーズ", { op: "kind", kind: "easy_ease" });
-    case "Escape":
-      return set({ selected: null, selectedFootage: null, selectedKeys: null });
-    case "Backspace":
-    case "Delete":
-      if (deleteSelectedKey()) return;
-      if (s.selected) layerActions(s.selected).remove();
-      return;
+  const text = e.clipboardData?.getData("text/plain") ?? "";
+  if (text) {
+    e.preventDefault();
+    void pasteKeys(text);
   }
 }
 
@@ -219,10 +240,15 @@ export function App() {
     void api.snapshot().then(adopt);
     void refreshPlugins(true);
     const un = api.onMenu(onMenu);
+    void loadKeymap();
     window.addEventListener("keydown", onKey);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("paste", onPaste);
     return () => {
       void un.then((u) => u());
       window.removeEventListener("keydown", onKey);
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("paste", onPaste);
     };
   }, []);
   // メッセージは少ししたら消す
@@ -268,6 +294,8 @@ export function App() {
         <ReviewsDialog />
         <LicensesDialog />
         <RecoveryDialog />
+        <BeatfitDialog />
+        <ShortcutsDialog />
       </div>
     </TooltipProvider>
   );

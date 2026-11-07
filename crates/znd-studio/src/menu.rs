@@ -130,8 +130,42 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&item("layer:camera", "カメラ", None)?)
         .item(&item("layer:light_point", "ライト", None)?)
         .separator()
+        .item(&item("split", "再生ヘッドで分割", None)?)
+        .item(&item("precompose", "プリコンポーズ", None)?)
+        .item(&item("outline", "テキストをシェイプに変換", None)?)
+        .item(&item("new_row", "この行から出す", None)?)
+        .separator()
+        .item(&item("bring_front", "最前面へ", Some("Shift+CmdOrCtrl+]"))?)
         .item(&item("bring_forward", "前面へ", Some("CmdOrCtrl+]"))?)
         .item(&item("send_backward", "背面へ", Some("CmdOrCtrl+["))?)
+        .item(&item("send_back", "最背面へ", Some("Shift+CmdOrCtrl+["))?)
+        .build()?;
+    let audio = SubmenuBuilder::new(app, "オーディオから生成")
+        .item(&item("detect_beats:0.3", "ビートを検出してマーカーを打つ（控えめ）", None)?)
+        .item(&item("detect_beats:0.5", "ビートを検出してマーカーを打つ（標準）", None)?)
+        .item(&item("detect_beats:0.8", "ビートを検出してマーカーを打つ（細かく）", None)?)
+        .separator()
+        .item(&item("band:low", "低域の音量 → 選択レイヤーのスケール", None)?)
+        .item(&item("band:mid", "中域の音量 → 選択レイヤーのスケール", None)?)
+        .item(&item("band:high", "高域の音量 → 選択レイヤーのスケール", None)?)
+        .separator()
+        .item(&item("bpm_from_taps", "空コメントのマーカーから BPM を推定（タップ入力）", None)?)
+        .item(&item("clear_markers", "マーカーをすべて削除", None)?)
+        .build()?;
+    let anim = SubmenuBuilder::new(app, "アニメーション")
+        .item(&item("select_all_keys", "選択レイヤーのキーフレームをすべて選択", None)?)
+        .item(&item("keys:easy_ease", "イージーイーズ", None)?)
+        .item(&item("keys:ease_in", "イーズイン", None)?)
+        .item(&item("keys:ease_out", "イーズアウト", None)?)
+        .item(&item("keys:linear", "リニア", None)?)
+        .item(&item("keys:hold", "停止", None)?)
+        .item(&item("reverse_keys", "キーフレームの時間反転", None)?)
+        .separator()
+        .item(&item("marker", "現在の時刻にマーカーを追加", None)?)
+        .item(&item("work_clear", "ワークエリアを解除", None)?)
+        .separator()
+        .item(&audio)
+        .item(&item("beatfit", "ビートに合わせる…", None)?)
         .build()?;
     let view = SubmenuBuilder::new(app, "表示")
         .item(&item("toggle_project", "プロジェクトを表示", Some("CmdOrCtrl+1"))?)
@@ -141,8 +175,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&item("timeline_fit", "タイムラインを全体表示", None)?)
         .build()?;
     let plugin = plugin_menu(app)?;
-    let help = SubmenuBuilder::new(app, "ヘルプ").item(&item("licenses", "使用 OSS とライセンス…", None)?).build()?;
-    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &comp, &layer, &view, &plugin, &help]).build()
+    let help = SubmenuBuilder::new(app, "ヘルプ")
+        .item(&item("shortcuts", "キーボードショートカット…", None)?)
+        .item(&item("licenses", "使用 OSS とライセンス…", None)?)
+        .build()?;
+    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &comp, &layer, &anim, &view, &plugin, &help]).build()
 }
 
 pub fn forward<R: Runtime>(app: &AppHandle<R>, id: &str) {

@@ -129,6 +129,18 @@ impl Sound {
         }
     }
 
+    /// 映像と音のずれの補正（ミリ秒。正の値で映像を遅らせる）。
+    pub fn set_offset_ms(&self, ms: f64) {
+        if let Some(p) = &self.player {
+            p.set_offset_ms(ms);
+        }
+    }
+
+    /// 出力デバイスの遅延。
+    pub fn latency(&self) -> Option<std::time::Duration> {
+        self.player.as_ref().and_then(|p| p.latency())
+    }
+
     /// 再生中に、いま鳴っている位置のフレームを返す（音が無ければ `None`。画面は経過時間で進める）。
     /// `frame` は画面が経過時間から求めたフレームで、ミックスが再生の途中で終わったときはそこから鳴らし始める。
     pub fn clock(&self, fr: FrameRate, frame: i64) -> Option<i64> {

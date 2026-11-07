@@ -2,6 +2,15 @@
 
 import {
   ArrowUp,
+  ChartSpline,
+  CircleDashed,
+  Flag,
+  Ghost,
+  Grid3x3,
+  PenTool,
+  RotateCw,
+  SquareDashed,
+  ZoomIn,
   AudioLines,
   Box,
   ChevronDown,
@@ -79,6 +88,15 @@ const icons: Record<string, LucideIcon> = {
   trash: Trash2,
   threeD: Box,
   search: Search,
+  shy: Ghost,
+  zoom: ZoomIn,
+  rotate: RotateCw,
+  pen: PenTool,
+  grid: Grid3x3,
+  marker: Flag,
+  graph: ChartSpline,
+  rectMask: SquareDashed,
+  ellipseMask: CircleDashed,
 };
 
 export function Icon({ name, size = 16, className, filled }: { name: string; size?: number; className?: string; filled?: boolean }) {

@@ -43,32 +43,3 @@ export function freshId(project: Project, prefix: string): string {
   for (const f of project.footage) used.add(f.id);
   for (let i = 1; ; i++) if (!used.has(`${prefix}_${i}`)) return `${prefix}_${i}`;
 }
-
-/** 重ね順を 1 つ動かす（`delta` が負なら前面へ）。 */
-export function reorder(comp: Composition, layerId: string, delta: number) {
-  const i = comp.layers.findIndex((l) => l.id === layerId);
-  const j = i + delta;
-  if (i < 0 || j < 0 || j >= comp.layers.length) return;
-  [comp.layers[i], comp.layers[j]] = [comp.layers[j], comp.layers[i]];
-}
-
-/** レイヤーを複製して、元のすぐ上に置く。新しい ID を返す。 */
-export function duplicateLayer(project: Project, comp: Composition, layerId: string): string | null {
-  const i = comp.layers.findIndex((l) => l.id === layerId);
-  if (i < 0) return null;
-  const copy: Layer = structuredClone(comp.layers[i]);
-  copy.id = freshId(project, "layer");
-  copy.name = `${copy.name} のコピー`;
-  comp.layers.splice(i, 0, copy);
-  return copy.id;
-}
-
-/** レイヤーを消す。親にしていたレイヤーは親を外し、トラックマットに使っていたものはマットを外す。 */
-export function deleteLayer(comp: Composition, layerId: string) {
-  comp.layers = comp.layers.filter((l) => l.id !== layerId);
-  for (const l of comp.layers) {
-    if (l.parent === layerId) l.parent = null;
-    const matte = l.track_matte as { layer?: string } | null | undefined;
-    if (matte?.layer === layerId) l.track_matte = null;
-  }
-}

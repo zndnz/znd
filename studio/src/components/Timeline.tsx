@@ -8,12 +8,21 @@ import { currentComp, editComp, editLayer, get, isKeySelected, keysOp, selectKey
 import { useLayerKeys } from "./PropRow";
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { Button } from "@/components/ui/button";
+import { addMarker, copyKeys, pasteKeys, runAction, runOp, setKeyTarget } from "../actions";
+import { chordsOf, display } from "../keymap";
+import { KEY_KINDS } from "../model";
 import { Slider } from "@/components/ui/slider";
 import { IconButton, NumberField } from "./controls";
 import { Icon } from "./icons";
@@ -50,6 +59,8 @@ export function Timeline() {
   const start = useUi((s) => s.tlStart);
   const body = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
+  const hideShy = useUi((s) => s.hideShy);
+  const search = useUi((s) => s.tlSearch);
 
   useLayoutEffect(() => {
     const el = body.current;
@@ -106,6 +117,7 @@ export function Timeline() {
         <div className="ruler" style={{ height: RULER }} onPointerDown={scrub}>
           <WorkArea view={view} />
           <Flashes view={view} />
+          <BeatGrid comp={comp} view={view} />
           {ticks.map((f) => (
             <span key={f} className="tick" style={{ left: xOf(view, f) }}>
               {seconds(frameToTime(comp.frame_rate, f)).toFixed(2)}
@@ -113,15 +125,19 @@ export function Timeline() {
           ))}
           <span className="playhead-cap" style={{ left: px }} />
         </div>
+        <MarkerLane comp={comp} view={view} />
         <div className="tracks">
           <div className="tl-grid">
             {ticks.map((f) => (
               <span key={f} style={{ left: xOf(view, f) }} />
             ))}
           </div>
-          {comp.layers.map((layer) => (
-            <LayerTrack key={layer.id} comp={comp} layer={layer} view={view} />
-          ))}
+          {trackRows(comp.layers)
+            .map((row) => row.filter((l) => (!hideShy || !l.shy) && (!search || l.name.toLowerCase().includes(search.toLowerCase()))))
+            .filter((row) => row.length > 0)
+            .map((row) => (
+              <RowTrack key={row[0].id} comp={comp} members={row} view={view} />
+            ))}
           {comp.layers.length === 0 && <div className="tl-empty">下のパレットからレイヤーを作るか、素材を読み込んでください</div>}
           <div className="tl-spacer" />
         </div>
@@ -158,6 +174,8 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
         {timecode(fr, frame)}
       </span>
       <span className="grow" />
+      <TimelineFilters />
+      <IconButton icon="marker" title={`マーカーを打つ (${shortcut("marker")})`} onClick={() => addMarker()} />
       <IconButton icon="magnet" title="スナップ（再生ヘッド・レイヤーの端・キーフレームに吸着）" on={snapping} onClick={() => set((s) => ({ snapping: !s.snapping }))} />
       <Slider
         className="w-40"
@@ -239,7 +257,52 @@ function snapFrame(comp: Composition, f: number, ppf: number, exclude: string): 
   return best;
 }
 
-function LayerTrack({ comp, layer, view }: { comp: Composition; layer: Layer; view: View }) {
+/** タイムラインの 1 行。重ね順で隣り合い `track` が同じ（0 以外の）レイヤーは、1 行に時間をずらして並ぶ。 */
+function trackRows(layers: Layer[]): Layer[][] {
+  const rows: Layer[][] = [];
+  for (const l of layers) {
+    const last = rows[rows.length - 1];
+    if (last && l.track && last[0].track === l.track) last.push(l);
+    else rows.push([l]);
+  }
+  return rows;
+}
+
+function RowTrack({ comp, members, view }: { comp: Composition; members: Layer[]; view: View }) {
+  const selected = useUi((s) => s.selected);
+  const active = members.find((l) => l.id === selected) ?? members[0];
+  const open = useUi((s) => !!s.expanded[active.id]);
+  return (
+    <div className="track">
+      <div className="track-row" style={{ height: ROW }}>
+        {members.map((l) => (
+          <Bar key={l.id} comp={comp} layer={l} view={view} />
+        ))}
+      </div>
+      {open && <PropRows comp={comp} layer={active} view={view} />}
+    </div>
+  );
+}
+
+function PropRows({ comp, layer, view }: { comp: Composition; layer: Layer; view: View }) {
+  const onlyAnimated = useUi((s) => s.onlyAnimated);
+  const all = useLayerKeys(layer);
+  const three = !!layer.three_d || ["camera", "light", "model"].includes(layer.kind.type);
+  // トランスフォーム（3D レイヤーでなければ 2D のものだけ）と、ほかの動きのあるプロパティすべて
+  const rows = all.filter((p) =>
+    onlyAnimated ? p.animated : p.path.startsWith("transform.") ? three || !["transform.position_z", "transform.anchor_z", "transform.rotation_x", "transform.rotation_y"].includes(p.path) : p.animated,
+  );
+  const x0 = xOf(view, timeToFrame(comp.frame_rate, layer.in_point));
+  return (
+    <>
+      {rows.map((p) => (
+        <PropTrack key={p.path} comp={comp} layer={layer} prop={p} view={view} x0={x0} />
+      ))}
+    </>
+  );
+}
+
+function Bar({ comp, layer, view }: { comp: Composition; layer: Layer; view: View }) {
   const selected = useUi((s) => s.selected === layer.id);
   const open = useUi((s) => !!s.expanded[layer.id]);
   const fr = comp.frame_rate;
@@ -285,15 +348,9 @@ function LayerTrack({ comp, layer, view }: { comp: Composition; layer: Layer; vi
     window.addEventListener("pointerup", up);
   };
 
-  // 開いたときの行: トランスフォーム（3D レイヤーでなければ 2D のものだけ）と、ほかの動きのあるプロパティすべて
   const all = useLayerKeys(layer);
-  const three = !!layer.three_d || ["camera", "light", "model"].includes(layer.kind.type);
-  const rows = all.filter((p) =>
-    p.path.startsWith("transform.") ? three || !["transform.position_z", "transform.anchor_z", "transform.rotation_x", "transform.rotation_y"].includes(p.path) : p.animated,
-  );
+  const hold = (layer.hold_frames as number | undefined) ?? 1;
   return (
-    <div className="track">
-      <div className="track-row" style={{ height: ROW }}>
         <ContextMenu>
           <ContextMenuTrigger
             render={<div className={cls} style={{ left: x0, width: Math.max(4, x1 - x0) }} title={layer.name} />}
@@ -310,6 +367,8 @@ function LayerTrack({ comp, layer, view }: { comp: Composition; layer: Layer; vi
               <Icon name="twirl" size={12} />
             </button>
             <span className="bar-name">{layer.name}</span>
+            {hold > 1 && <span className="bar-flag text-[10px]">{hold}コマ</span>}
+            {layer.shy && <span className="bar-flag text-[10px]">シャイ</span>}
             {layer.locked && <Icon name="lock" size={12} className="bar-flag" />}
             {!open && [...new Set(all.flatMap((p) => p.keys.map((k) => k.time)))].map((t) => (
               <span key={t} className="key-dot" style={{ left: xOf(view, timeToFrame(fr, t)) - x0 }} />
@@ -317,9 +376,6 @@ function LayerTrack({ comp, layer, view }: { comp: Composition; layer: Layer; vi
           </ContextMenuTrigger>
           <LayerMenu layer={layer} />
         </ContextMenu>
-      </div>
-      {open && rows.map((p) => <PropTrack key={p.path} comp={comp} layer={layer} prop={p} view={view} x0={x0} />)}
-    </div>
   );
 }
 
@@ -347,13 +403,19 @@ function PropTrack(props: { comp: Composition; layer: Layer; prop: PropInfo; vie
         const addr = { path: prop.path, time: k.time };
         const on = isKeySelected(ui, layer.id, addr);
         return (
-          <span
-            key={k.time}
+          <ContextMenu key={k.time}>
+          <ContextMenuTrigger
+            render={<span />}
+            onContextMenu={() => {
+              if (!on) selectKey(layer.id, addr, false);
+            }}
             className={`key kind-${k.kind} ${on ? "on" : ""}`}
             style={{ left: xs[i] }}
             title={`${prop.label}: ${timecode(fr, timeToFrame(fr, k.time))}`}
             onPointerDown={(e) => {
+              if (e.button !== 0) return;
               e.stopPropagation();
+              setKeyTarget(layer.id, prop.path);
               const f0 = timeToFrame(fr, k.time);
               if (!on || e.shiftKey) selectKey(layer.id, addr, e.shiftKey);
               setFrame(f0);
@@ -378,6 +440,8 @@ function PropTrack(props: { comp: Composition; layer: Layer; prop: PropInfo; vie
               window.addEventListener("pointerup", up);
             }}
           />
+          <KeyMenu />
+          </ContextMenu>
         );
       })}
     </div>
@@ -393,37 +457,242 @@ export function deleteSelectedKey(): boolean {
 
 function LayerMenu({ layer }: { layer: Layer }) {
   const a = layerActions(layer.id);
+  const inRow = useUi((s) => {
+    const c = currentComp(s);
+    return !!layer.track && (c?.layers.filter((l) => l.track === layer.track).length ?? 0) > 1;
+  });
+  const hold = (layer.hold_frames as number | undefined) ?? 1;
   return (
-    <ContextMenuContent className="w-60">
+    <ContextMenuContent className="w-64">
+      <ContextMenuLabel className="truncate text-xs text-muted-foreground">{layer.name}</ContextMenuLabel>
+      <ContextMenuItem onClick={a.duplicate}>
+        複製<ContextMenuShortcut>{shortcut("duplicate")}</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem disabled={!!layer.locked} onClick={a.split}>
+        再生ヘッドで分割<ContextMenuShortcut>{shortcut("split_layer")}</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem disabled={!!layer.locked} onClick={() => void runOp({ op: "move_in", layer: layer.id })}>
+        再生ヘッドの位置から始める<ContextMenuShortcut>{shortcut("move_in")}</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem onClick={() => a.reorder("front")}>最前面へ</ContextMenuItem>
+      <ContextMenuItem onClick={() => a.reorder("forward")}>
+        ひとつ前面へ<ContextMenuShortcut>⌘]</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => a.reorder("backward")}>
+        ひとつ背面へ<ContextMenuShortcut>⌘[</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => a.reorder("back")}>最背面へ</ContextMenuItem>
+      {inRow && <ContextMenuItem onClick={a.newRow}>この行から出す</ContextMenuItem>}
+      <ContextMenuSub>
+        <ContextMenuSubTrigger>コマ打ち</ContextMenuSubTrigger>
+        <ContextMenuSubContent>
+          {[1, 2, 3, 4].map((n) => (
+            <ContextMenuCheckboxItem key={n} checked={hold === n} onClick={() => a.hold(n)}>
+              {n === 1 ? "なし（1 コマ）" : `${n} コマ打ち`}
+              <ContextMenuShortcut>{shortcut(`hold_${n}`)}</ContextMenuShortcut>
+            </ContextMenuCheckboxItem>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+      <ContextMenuSeparator />
       <ContextMenuItem onClick={a.toggleVisible}>{layer.visible === false ? "表示する" : "隠す"}</ContextMenuItem>
       <ContextMenuItem onClick={a.toggleLock}>{layer.locked ? "ロックを外す" : "ロック"}</ContextMenuItem>
       <ContextMenuItem onClick={a.toggleSolo}>{layer.solo ? "ソロを外す" : "ソロ"}</ContextMenuItem>
+      <ContextMenuItem onClick={a.toggleShy}>{layer.shy ? "シャイを外す" : "シャイ"}</ContextMenuItem>
       <ContextMenuSeparator />
-      <ContextMenuItem onClick={a.duplicate}>
-        複製<ContextMenuShortcut>⌘D</ContextMenuShortcut>
-      </ContextMenuItem>
-      <ContextMenuItem onClick={() => a.reorder(-1)}>
-        前面へ<ContextMenuShortcut>⌘]</ContextMenuShortcut>
-      </ContextMenuItem>
-      <ContextMenuItem onClick={() => a.reorder(1)}>
-        背面へ<ContextMenuShortcut>⌘[</ContextMenuShortcut>
-      </ContextMenuItem>
-      <ContextMenuItem
-        onClick={() =>
-          editComp("レイヤーを移動", (c) => {
-            const target = c.layers.find((x) => x.id === layer.id);
-            if (!target || target.locked) return false;
-            shiftLayer(target, frameToTime(c.frame_rate, get().frame) - target.in_point);
-          })
-        }
-      >
-        再生ヘッドの位置から始める
-      </ContextMenuItem>
+      <ContextMenuItem onClick={a.precompose}>プリコンポーズ</ContextMenuItem>
+      {layer.kind.type === "text" && <ContextMenuItem onClick={a.outline}>テキストをシェイプに変換</ContextMenuItem>}
       <PluginLayerMenu layer={layer.id} />
       <ContextMenuSeparator />
-      <ContextMenuItem variant="destructive" onClick={a.remove}>
-        削除<ContextMenuShortcut>⌫</ContextMenuShortcut>
+      <ContextMenuItem variant="destructive" disabled={!!layer.locked} onClick={a.remove}>
+        削除<ContextMenuShortcut>{shortcut("delete")}</ContextMenuShortcut>
       </ContextMenuItem>
     </ContextMenuContent>
+  );
+}
+
+/** 選んでいるキーフレームの右クリック。 */
+export function KeyMenu() {
+  const sel = useUi((s) => s.selectedKeys);
+  const [pct, setPct] = useState(200);
+  const n = sel?.keys.length ?? 0;
+  return (
+    <ContextMenuContent className="w-64">
+      <ContextMenuLabel className="text-xs text-muted-foreground">選択中のキーフレーム: {n} 個</ContextMenuLabel>
+      <ContextMenuSub>
+        <ContextMenuSubTrigger disabled={n === 0}>キーフレーム補間</ContextMenuSubTrigger>
+        <ContextMenuSubContent>
+          {KEY_KINDS.map(([k, label]) => (
+            <ContextMenuItem key={k} onClick={() => void keysOp("キーフレーム補間", { op: "kind", kind: k })}>
+              {label}
+              <ContextMenuShortcut>{shortcut(KIND_ACTION[k] ?? "")}</ContextMenuShortcut>
+            </ContextMenuItem>
+          ))}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+      <ContextMenuItem disabled={n === 0} onClick={() => runAction("reverse_keys")}>
+        時間反転<ContextMenuShortcut>{shortcut("reverse_keys")}</ContextMenuShortcut>
+      </ContextMenuItem>
+      <div className="flex items-center gap-2 px-2 py-1 text-sm" onPointerDown={(e) => e.stopPropagation()}>
+        <span className="text-muted-foreground">時間伸縮</span>
+        <NumberField value={pct} digits={0} min={-1000} max={1000} unit="%" onChange={(v) => setPct(v)} />
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={n === 0}
+          onClick={() => sel && void runOp({ op: "scale_keys", layer: sel.layer, keys: sel.keys, percent: pct })}
+        >
+          適用
+        </Button>
+      </div>
+      <ContextMenuSeparator />
+      <ContextMenuItem disabled={n === 0} onClick={copyKeys}>
+        コピー<ContextMenuShortcut>⌘C</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem onClick={() => void pasteKeys()}>
+        再生ヘッドの位置に貼り付け<ContextMenuShortcut>⌘V</ContextMenuShortcut>
+      </ContextMenuItem>
+      <ContextMenuItem variant="destructive" disabled={n === 0} onClick={() => void deleteSelectedKey()}>
+        削除<ContextMenuShortcut>{shortcut("delete")}</ContextMenuShortcut>
+      </ContextMenuItem>
+    </ContextMenuContent>
+  );
+}
+
+const KIND_ACTION: Record<string, string> = { easy_ease: "easy_ease", ease_in: "ease_in", ease_out: "ease_out", linear: "linear_keys", hold: "hold_keys" };
+
+/** 操作に割り当てたショートカットの表記（最初のもの）。 */
+export function shortcut(action: string): string {
+  const c = chordsOf(action)[0];
+  return c ? display(c) : "";
+}
+
+/** ビートグリッドの拍（小節の頭は濃く）。 */
+function BeatGrid({ comp, view }: { comp: Composition; view: View }) {
+  const g = comp.beat_grid as { bpm: number; offset: number; beats_per_bar: number; subdivision: number } | null | undefined;
+  if (!g || g.bpm <= 0) return null;
+  const rate = fps(comp.frame_rate);
+  const beat = (60 / g.bpm) * rate;
+  const ppb = (beat / view.span) * view.width;
+  if (ppb < 4) return null;
+  const off = (seconds(g.offset ?? 0) * rate) % beat;
+  const marks: [number, boolean][] = [];
+  const first = Math.ceil((view.start - off) / beat);
+  for (let i = first; off + i * beat <= view.start + view.span && marks.length < 2000; i++) {
+    marks.push([off + i * beat, ((i % (g.beats_per_bar || 4)) + (g.beats_per_bar || 4)) % (g.beats_per_bar || 4) === 0]);
+  }
+  return (
+    <>
+      {marks.map(([f, bar], i) => (
+        <span key={i} className={`absolute top-0 w-px ${bar ? "h-3 bg-sky-400/80" : "h-1.5 bg-sky-400/40"}`} style={{ left: xOf(view, f) }} />
+      ))}
+    </>
+  );
+}
+
+interface Marker {
+  time: number;
+  duration?: number;
+  comment: string;
+}
+
+/** コンポのマーカー。クリックでその時刻へ、ドラッグで移動、ダブルクリックでコメント、右クリックで削除。 */
+function MarkerLane({ comp, view }: { comp: Composition; view: View }) {
+  const markers = (comp.markers as Marker[] | undefined) ?? [];
+  const [editing, setEditing] = useState<number | null>(null);
+  const fr = comp.frame_rate;
+  const ppf = view.width / view.span;
+  if (markers.length === 0) return null;
+  const down = (e: React.PointerEvent, i: number) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const f0 = timeToFrame(fr, markers[i].time);
+    setFrame(f0);
+    const startX = e.clientX;
+    const move = (ev: PointerEvent) => {
+      const f = Math.max(0, Math.round(f0 + (ev.clientX - startX) / ppf));
+      editComp("マーカーを移動", (c) => {
+        const m = (c.markers as Marker[] | undefined)?.[i];
+        if (!m) return false;
+        m.time = frameToTime(fr, f);
+      }, true);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      editComp("マーカーを並べ直す", (c) => {
+        const list = c.markers as Marker[] | undefined;
+        if (!list || list.every((m, k) => k === 0 || list[k - 1].time <= m.time)) return false;
+        list.sort((a, b) => a.time - b.time);
+      });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <div className="marker-lane">
+      {markers.map((m, i) => (
+        <ContextMenu key={i}>
+          <ContextMenuTrigger
+            render={<span />}
+            className="marker"
+            style={{ left: xOf(view, timeToFrame(fr, m.time)) }}
+            title={m.comment || timecode(fr, timeToFrame(fr, m.time))}
+            onPointerDown={(e: React.PointerEvent) => down(e, i)}
+            onDoubleClick={() => setEditing(i)}
+          >
+            {editing === i ? (
+              <input
+                autoFocus
+                className="marker-input"
+                defaultValue={m.comment}
+                onPointerDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter" || e.key === "Escape") (e.target as HTMLInputElement).blur();
+                }}
+                onBlur={(e) => {
+                  const v = e.target.value;
+                  setEditing(null);
+                  if (v !== m.comment) editComp("マーカーのコメント", (c) => void ((c.markers as Marker[])[i].comment = v));
+                }}
+              />
+            ) : (
+              m.comment && <span className="marker-text">{m.comment}</span>
+            )}
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem onClick={() => setEditing(i)}>コメントを編集</ContextMenuItem>
+            <ContextMenuItem variant="destructive" onClick={() => editComp("マーカーを削除", (c) => void (c.markers as Marker[]).splice(i, 1))}>
+              削除
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      ))}
+    </div>
+  );
+}
+
+/** シャイを隠す・動きのあるプロパティだけ・名前で絞り込む。 */
+function TimelineFilters() {
+  const hideShy = useUi((s) => s.hideShy);
+  const onlyAnimated = useUi((s) => s.onlyAnimated);
+  const search = useUi((s) => s.tlSearch);
+  return (
+    <>
+      <input
+        className="h-7 w-32 rounded-3xl bg-input/50 px-3 text-xs outline-none placeholder:text-muted-foreground/60"
+        placeholder="レイヤーを検索"
+        value={search}
+        onChange={(e) => set({ tlSearch: e.target.value })}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Escape") set({ tlSearch: "" });
+        }}
+      />
+      <IconButton icon="shy" title="シャイのレイヤーを隠す" on={hideShy} onClick={() => set((s) => ({ hideShy: !s.hideShy }))} />
+      <IconButton icon="diamond" title="動きのあるプロパティだけを表示" on={onlyAnimated} onClick={() => set((s) => ({ onlyAnimated: !s.onlyAnimated }))} />
+    </>
   );
 }

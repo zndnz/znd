@@ -24,7 +24,7 @@ import {
 } from "./model";
 import { findComp } from "./ops";
 
-export type Tool = "select" | "hand";
+export type Tool = "select" | "hand" | "zoom" | "rotate" | "pen" | "rect" | "ellipse";
 
 /** 選んでいるキーフレーム（1 つのレイヤーの中で複数）。 */
 export interface SelectedKeys {
@@ -58,6 +58,12 @@ export interface UiState {
   tlStart: number;
   workArea: [number, number] | null;
   snapping: boolean;
+  /** シャイのレイヤーを隠す。 */
+  hideShy: boolean;
+  /** タイムラインで、動きのあるプロパティだけを出す。 */
+  onlyAnimated: boolean;
+  /** タイムラインのレイヤーの絞り込み。 */
+  tlSearch: string;
   status: string;
   /** 開いているウィンドウ（書き出し・プラグインの管理など。同時に 1 つ）。 */
   dialog: string | null;
@@ -100,6 +106,9 @@ let state: UiState = {
   tlStart: 0,
   workArea: null,
   snapping: true,
+  hideShy: false,
+  onlyAnimated: false,
+  tlSearch: "",
   status: "",
   dialog: null,
   plugins: null,

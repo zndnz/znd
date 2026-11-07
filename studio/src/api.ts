@@ -14,6 +14,7 @@ import type {
   EffectInfo,
   EffectInstance,
   KeyAddr,
+  OpResult,
   KeysOp,
   Layer,
   PanelItem,
@@ -77,6 +78,18 @@ export const api = {
   curveSamples: (curve: EaseCurve, n: number) => invoke<number[]>("curve_samples", { curve, n }),
   parseCurve: (text: string) => invoke<EaseCurve | null>("parse_curve", { text }),
   fonts: () => invoke<[string, string[]][]>("fonts"),
+
+  // ---- レイヤー・キー・マーカー・音声の操作（Rust の ops.rs） ----
+  op: (ctx: { comp: string; frame: number }, op: Record<string, unknown> & { op: string }) => invoke<OpResult>("op", { ctx, op }),
+  beatSources: () => invoke<string[]>("beat_sources"),
+  beatCount: (comp: string, layer: string | null, source: number, range: [number, number] | null) =>
+    invoke<number>("beat_count", { comp, layer, source, range }),
+  audioSettings: () => invoke<{ offset_ms: number; latency_ms: number | null }>("audio_settings"),
+  setAvOffset: (ms: number, save: boolean) => invoke<void>("set_av_offset", { ms, save }),
+  keymapLoad: () => invoke<unknown>("keymap_load"),
+  keymapSave: (value: unknown) => invoke<string>("keymap_save", { value }),
+  prefGet: (key: string) => invoke<unknown>("pref_get", { key }),
+  prefSet: (key: string, value: unknown) => invoke<void>("pref_set", { key, value }),
 
   // ---- ファイル・履歴・版・レビュー ----
   importLyrics: (comp: string) => invoke<Reply | null>("import_lyrics", { comp }),

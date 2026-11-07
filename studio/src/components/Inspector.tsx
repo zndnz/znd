@@ -28,6 +28,7 @@ import { FontPicker } from "./FontPicker";
 import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
 import { PropRow, useLayerProps } from "./PropRow";
+import { AlignRow, CompExtras } from "./Tools";
 
 /** 選択欄の「なし」。 */
 const NONE = "__none";
@@ -86,6 +87,7 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
           <IconButton icon={layer.locked ? "lock" : "unlock"} title="ロック" on={!!layer.locked} onClick={a.toggleLock} />
           <IconButton icon="threeD" title="3D レイヤー" on={!!layer.three_d} onClick={a.toggle3d} />
           <IconButton icon="blur" title="モーションブラー" on={!!layer.motion_blur} onClick={a.toggleMotionBlur} />
+          <IconButton icon="shy" title="シャイ（タイムラインで隠せる）" on={!!layer.shy} onClick={a.toggleShy} />
           <span className="flex-1" />
           <IconButton icon="trash" title="削除" onClick={a.remove} />
         </div>
@@ -103,6 +105,7 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
 
         <Section title="トランスフォーム">
           {rows(transform)}
+          <AlignRow layer={layer} />
           <p className="text-xs text-muted-foreground/70">◆ でキーフレームを打ちます（右クリックでアニメーションを止める）。= でエクスプレッション。</p>
         </Section>
         {timing.length > 0 && <Section title="時間・音声">{rows(timing)}</Section>}
@@ -118,7 +121,14 @@ function LayerInspector({ comp, layer }: { comp: Composition; layer: Layer }) {
             <Choice
               value={layer.parent ?? NONE}
               options={[[NONE, "なし"], ...others.map((o): [string, string] => [o.id, o.name])]}
-              onChange={(v) => editLayer("親", layer.id, (l) => void (l.parent = v === NONE ? null : v))}
+              onChange={(v) => a.parent(v === NONE ? null : v)}
+            />
+          </Row>
+          <Row label="コマ打ち">
+            <Choice
+              value={String((layer.hold_frames as number | undefined) ?? 1)}
+              options={[["1", "なし"], ["2", "2 コマ"], ["3", "3 コマ"], ["4", "4 コマ"]]}
+              onChange={(v) => a.hold(Number(v))}
             />
           </Row>
           <Row label="トラックマット">
@@ -420,6 +430,7 @@ function CompInspector({ comp }: { comp: Composition }) {
           <NumberField value={mb.samples} digits={0} min={2} max={64} onChange={(v, d) => editComp("サンプル数", (c) => void (c.motion_blur = { ...mb, samples: Math.round(v) }), d)} />
         </Row>
       </Section>
+      <CompExtras comp={comp} />
       <Section title="ファイル" defaultOpen={false}>
         <Button variant="secondary" onClick={() => void run(() => api.save(false), "保存しました")}>
           保存

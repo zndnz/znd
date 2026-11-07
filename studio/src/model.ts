@@ -473,3 +473,15 @@ export interface ReviewComment {
   resolved?: boolean;
   created?: string;
 }
+
+/** Rust の `op` の結果。 */
+export interface OpResult {
+  snapshot: Snapshot | null;
+  status: string;
+  /** 操作のあとに選ぶレイヤー（null で選択を外す。undefined なら変えない）。 */
+  select?: string | null;
+  keys?: KeyAddr[] | null;
+  /** コピーしたキーフレーム（クリップボードに入れる）。 */
+  clip?: string | null;
+  comp?: string | null;
+}

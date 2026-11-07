@@ -12,6 +12,7 @@ mod effects;
 mod jobs;
 mod layers;
 mod menu;
+mod ops;
 mod plugins;
 mod prefs;
 mod props;
@@ -237,11 +238,24 @@ fn snapshot(state: State<'_, Shared>) -> Snapshot {
 /// 画面で編集したプロジェクトを採用する。壊れた参照（循環する親子・プリコンポなど）があれば採用しない。
 #[tauri::command]
 fn commit(state: State<'_, Shared>, project: Project, label: String, coalesce: bool) -> Result<Snapshot, String> {
+    let mut project = project;
     let problems = project.validate();
     if !problems.is_empty() {
         return Err(problems.join("\n"));
     }
     let mut s = lock(&state);
+    // ほかの人がロックしているコンポは書き換えない（コメントの追加・解決などコンポの外の変更は受け付ける）
+    for c in &project.compositions {
+        let Some(owner) = s.locked_by_other(&c.id) else { continue };
+        let before = s.project.comp(&c.id).map(|b| serde_json::to_value(b).ok());
+        if before != Some(serde_json::to_value(c).ok()) {
+            return Err(format!("このコンポは {owner} がロックしているため編集できません"));
+        }
+    }
+    // タイムラインの 1 行に並ぶレイヤーの番号を整える（並び替えで別の行と混ざらないように）
+    for c in &mut project.compositions {
+        edit::normalize_tracks(c);
+    }
     s.apply(project, &label, coalesce);
     Ok(s.snapshot())
 }
@@ -456,6 +470,64 @@ fn parse_curve(text: String) -> Option<EaseCurve> {
     props::parse_curve(&text)
 }
 
+#[derive(Serialize)]
+struct AudioSettings {
+    /// 映像と音のずれの補正（ミリ秒）。
+    offset_ms: f64,
+    /// 出力の遅延（自動で補正済み）。
+    latency_ms: Option<f64>,
+}
+
+#[tauri::command]
+fn audio_settings(state: State<'_, Shared>) -> AudioSettings {
+    let s = lock(&state);
+    AudioSettings { offset_ms: s.prefs.av_offset_ms(), latency_ms: s.sound.latency().map(|d| d.as_secs_f64() * 1000.0) }
+}
+
+/// 映像と音のずれの補正を変える（`save` なら設定に残す）。
+#[tauri::command]
+fn set_av_offset(state: State<'_, Shared>, ms: f64, save: bool) -> Result<(), String> {
+    let mut s = lock(&state);
+    let ms = ms.clamp(-500.0, 500.0);
+    s.sound.set_offset_ms(ms);
+    s.prefs.set_av_offset_ms(ms);
+    if save {
+        s.prefs.save()?;
+    }
+    Ok(())
+}
+
+/// 画面が自由に使う設定（ショートカットの割り当てなど）を読む・書く。
+#[tauri::command]
+fn pref_get(state: State<'_, Shared>, key: String) -> serde_json::Value {
+    lock(&state).prefs.get(&format!("studio.{key}"))
+}
+
+#[tauri::command]
+fn pref_set(state: State<'_, Shared>, key: String, value: serde_json::Value) -> Result<(), String> {
+    let mut s = lock(&state);
+    s.prefs.set(&format!("studio.{key}"), value);
+    s.prefs.save()
+}
+
+/// キーボードショートカットの設定（znd-app と同じ `keymap.json`。`{ preset, bindings }`）。
+#[tauri::command]
+fn keymap_load() -> serde_json::Value {
+    prefs::config_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("keymap.json")).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+#[tauri::command]
+fn keymap_save(value: serde_json::Value) -> Result<String, String> {
+    let dir = prefs::config_dir().ok_or("設定フォルダが分かりません")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("keymap.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap_or_default()).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 /// インストール済みのフォント（ファミリー名と、日本語名などの別名）。
 #[tauri::command]
 fn fonts() -> Vec<(String, Vec<String>)> {
@@ -493,6 +565,8 @@ fn main() {
     // プラグインのエフェクトを、プロジェクトを描く前に使えるようにしておく
     let allow_native = studio.prefs.allow_native_plugins();
     plugins::startup(&mut studio.plugins, allow_native);
+    let offset = studio.prefs.av_offset_ms();
+    studio.sound.set_offset_ms(offset);
     // 未保存のまま終了・異常終了した前回の作業
     studio.recovery = io::newer_autosave(&studio.autosave_base());
     tauri::Builder::default()
@@ -545,6 +619,15 @@ fn main() {
             curve_samples,
             parse_curve,
             fonts,
+            audio_settings,
+            set_av_offset,
+            pref_get,
+            pref_set,
+            keymap_load,
+            keymap_save,
+            ops::op,
+            ops::beat_sources,
+            ops::beat_count,
             plugins::plugin_state,
             plugins::plugin_command,
             plugins::plugin_panel,

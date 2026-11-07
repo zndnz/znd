@@ -441,3 +441,44 @@ fieldset.plain {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------- マーカー ---------- */
+
+.marker-lane {
+  position: sticky;
+  top: 30px;
+  z-index: 4;
+  height: 18px;
+  background: var(--background);
+}
+.marker {
+  position: absolute;
+  top: 3px;
+  display: flex;
+  align-items: center;
+  height: 12px;
+  transform: translateX(-5px);
+  cursor: grab;
+}
+.marker::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 2px 2px 50% 50%;
+  background: oklch(0.8 0.14 85);
+}
+.marker-text {
+  padding-left: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: oklch(0.85 0.1 85);
+}
+.marker-input {
+  width: 140px;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: var(--input);
+  outline: none;
+}

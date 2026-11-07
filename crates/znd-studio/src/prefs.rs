@@ -60,4 +60,26 @@ impl Prefs {
     pub fn set_allow_native_plugins(&mut self, on: bool) {
         self.raw.insert("allow_native_plugins".into(), Value::Bool(on));
     }
+
+    /// 映像と音のずれの補正（ミリ秒）。正の値で映像を遅らせる。
+    pub fn av_offset_ms(&self) -> f64 {
+        self.raw.get("av_offset_ms").and_then(Value::as_f64).unwrap_or(0.0)
+    }
+
+    pub fn set_av_offset_ms(&mut self, ms: f64) {
+        self.raw.insert("av_offset_ms".into(), serde_json::json!(ms));
+    }
+
+    /// 画面（TypeScript）が使う項目。
+    pub fn get(&self, key: &str) -> Value {
+        self.raw.get(key).cloned().unwrap_or(Value::Null)
+    }
+
+    pub fn set(&mut self, key: &str, value: Value) {
+        if value.is_null() {
+            self.raw.remove(key);
+        } else {
+            self.raw.insert(key.to_string(), value);
+        }
+    }
 }
