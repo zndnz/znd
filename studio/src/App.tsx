@@ -203,29 +203,44 @@ function usePlayback() {
     const rate = fps(comp.frame_rate);
     const total = totalFrames();
     const [a, b] = get().workArea ?? [0, total];
+    const len = Math.max(1, b - a);
     // ワークエリアの外にいたら先頭から
     if (get().frame < a || get().frame >= b) set({ frame: a });
     let t0 = performance.now();
     let f0 = get().frame;
+    // 最後に再生が書き込んだフレーム。これと違えば、利用者がタイムラインなどで動かしたということ
+    let shown = f0;
+    // 動かすたびに増やし、それより前に尋ねた音の位置は捨てる
+    let epoch = 0;
     let raf = 0;
     let asking = false;
     let stopped = false;
     void api.play(compId, f0, a, b);
     const tick = (now: number) => {
-      const len = Math.max(1, b - a);
-      let f = f0 + Math.floor(((now - t0) / 1000) * rate);
-      if (f >= b) f = a + ((f - a) % len);
-      if (get().frame !== f) set({ frame: f });
+      // 再生中に動かされたら、止めずにそこから再生し直す
+      const moved = get().frame;
+      if (moved !== shown) {
+        t0 = now;
+        f0 = moved;
+        shown = moved;
+        epoch++;
+        void api.play(compId, f0, a, b);
+      }
+      // 音声プレーヤーと同じ折り返し方: 範囲の前からなら b まで進んでから、後ろからならすぐ a へ戻る
+      let f = (f0 >= b ? a : f0) + Math.floor(((now - t0) / 1000) * rate);
+      if (f >= b) f = a + ((f - b) % len);
+      if (shown !== f) set({ frame: (shown = f) });
       // 音の位置を尋ね、返ってきたらそこを起点にする（前の問い合わせが返るまでは待たない）
       if (!asking) {
         asking = true;
+        const asked = epoch;
         void api
           .playClock(compId, f)
           .then((af) => {
-            if (stopped || af === null) return;
+            if (stopped || af === null || asked !== epoch) return;
             t0 = performance.now();
-            f0 = Math.max(a, Math.min(b - 1, af));
-            if (get().frame !== f0) set({ frame: f0 });
+            f0 = Math.max(0, Math.min(total - 1, af));
+            if (shown !== f0) set({ frame: (shown = f0) });
           })
           .catch(() => {})
           .finally(() => (asking = false));
