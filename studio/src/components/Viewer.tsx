@@ -19,6 +19,9 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { IconButton } from "./controls";
 import { Icon } from "./icons";
+import { closeDiff } from "./Windows";
+import type { ReviewComment } from "../model";
+import { frameToTime } from "../model";
 
 const ZOOMS: [number, string][] = [
   [0, "全体表示"],
@@ -47,6 +50,22 @@ export function Viewer() {
   const zoom = useUi((s) => s.viewZoom);
   const pan = useUi((s) => s.viewPan);
   const tool = useUi((s) => s.tool);
+  const diffLabel = useUi((s) => s.diffLabel);
+  const diffGen = useUi((s) => s.diffGen);
+  const diffCanvas = useRef<HTMLCanvasElement>(null);
+  const reviews = useUi((s) => (s.project?.reviews as ReviewComment[] | undefined) ?? []);
+
+  // 版との違いの画像
+  useEffect(() => {
+    if (!diffLabel) return;
+    void api.diffImage().then((d) => {
+      const c = diffCanvas.current;
+      if (!d || !c) return;
+      c.width = d.width;
+      c.height = d.height;
+      c.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(d.rgba), d.width, d.height), 0, 0);
+    });
+  }, [diffLabel, diffGen]);
 
   useEffect(() => {
     const el = wrap.current;
@@ -132,6 +151,17 @@ export function Viewer() {
     <div className={`viewer tool-${tool}`} ref={wrap} onPointerDown={onPointerDown} onWheel={onWheel}>
       <div className="stage" style={{ left, top, width: w, height: h }}>
         <canvas ref={canvas} style={{ width: w, height: h }} />
+        {diffLabel && <canvas ref={diffCanvas} className="absolute inset-0" style={{ width: w, height: h }} />}
+        {reviews
+          .filter((r) => r.comp === comp.id && !r.resolved && r.point && r.time === frameToTime(comp.frame_rate, frame))
+          .map((r, i) => (
+            <span key={i} className="pointer-events-none absolute" style={{ left: r.point![0] * scale, top: r.point![1] * scale }}>
+              <span className="absolute -top-2.5 -left-2.5 size-5 rounded-full border-2 border-sky-400" />
+              <span className="absolute top-[-8px] left-3.5 text-xs whitespace-nowrap text-sky-300">
+                {r.author}: {r.text}
+              </span>
+            </span>
+          ))}
         {guides && (
           <svg className="guides" viewBox="0 0 100 100" preserveAspectRatio="none">
             <rect x="5" y="5" width="90" height="90" />
@@ -176,6 +206,12 @@ export function Viewer() {
           </DropdownMenuContent>
         </DropdownMenu>
         {rendering && <span className="px-3 text-xs text-muted-foreground">レンダリング中…</span>}
+        {diffLabel && (
+          <span className="flex items-center gap-1 px-3 text-xs text-amber-400">
+            {diffLabel}
+            <IconButton icon="close" title="比較表示を閉じる" size="icon-xs" onClick={closeDiff} />
+          </span>
+        )}
       </div>
 
       <ToolPalette />

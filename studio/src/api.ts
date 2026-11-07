@@ -3,7 +3,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CheckResult,
   EaseCurve,
+  ExportFormat,
+  ExportJob,
+  ExportUi,
+  Reply,
+  TaskStatus,
   EasePreset,
   EffectInfo,
   EffectInstance,
@@ -46,7 +52,7 @@ export const api = {
   undo: () => invoke<Snapshot>("undo"),
   redo: () => invoke<Snapshot>("redo"),
   newProject: () => invoke<Snapshot>("new_project"),
-  open: (path?: string) => invoke<Snapshot | null>("open", { path: path ?? null }),
+  open: (path?: string) => invoke<Reply | null>("open", { path: path ?? null }),
   save: (choose: boolean) => invoke<Snapshot | null>("save", { choose }),
   import: (comp: string, frame: number, sequence: boolean) => invoke<Snapshot | null>("import", { comp, frame, sequence }),
   makeLayer: (kind: string, comp: string, frame: number) => invoke<Layer>("make_layer", { kind, comp, frame }),
@@ -71,6 +77,46 @@ export const api = {
   curveSamples: (curve: EaseCurve, n: number) => invoke<number[]>("curve_samples", { curve, n }),
   parseCurve: (text: string) => invoke<EaseCurve | null>("parse_curve", { text }),
   fonts: () => invoke<[string, string[]][]>("fonts"),
+
+  // ---- ファイル・履歴・版・レビュー ----
+  importLyrics: (comp: string) => invoke<Reply | null>("import_lyrics", { comp }),
+  importCamera: (comp: string) => invoke<Reply | null>("import_camera", { comp }),
+  relinkFootage: () => invoke<Reply | null>("relink_footage"),
+  collectFiles: () => invoke<string | null>("collect_files"),
+  exportCompPackage: (comp: string) => invoke<string | null>("export_comp_package", { comp }),
+  importCompPackage: () => invoke<Reply | null>("import_comp_package"),
+  saveFrameImage: (frame: number, downsample: number) => invoke<string | null>("save_frame_image", { frame, downsample }),
+  recover: (restore: boolean) => invoke<Reply>("recover", { restore }),
+  history: () => invoke<{ undo: string[]; redo: string[] }>("history"),
+  historyJump: (index: number | null, forward: number | null) => invoke<Snapshot>("history_jump", { index, forward }),
+  versions: () => invoke<{ name: string; saved: number; file: string }[] | null>("versions"),
+  versionSave: (name: string) => invoke<string>("version_save", { name }),
+  versionRestore: (file: string, name: string) => invoke<Reply>("version_restore", { file, name }),
+  versionCompare: (file: string, name: string, comp: string, frame: number) => invoke<string>("version_compare", { file, name, comp, frame }),
+  async diffImage(): Promise<{ width: number; height: number; rgba: Uint8ClampedArray } | null> {
+    const buf = await invoke<ArrayBuffer>("diff_image");
+    if (buf.byteLength < 8) return null;
+    const head = new DataView(buf, 0, 8);
+    const width = head.getUint32(0, true);
+    const height = head.getUint32(4, true);
+    return { width, height, rgba: new Uint8ClampedArray(buf, 8, width * height * 4) };
+  },
+  diffClose: () => invoke<void>("diff_close"),
+  reviewAdd: (comp: string, frame: number, text: string, point: [number, number] | null) => invoke<Reply>("review_add", { comp, frame, text, point }),
+  creditsText: (comp: string) => invoke<string>("credits_text", { comp }),
+  productionLog: () => invoke<string>("production_log"),
+  licenses: () => invoke<{ components: { name: string; license: string; usage: string }[]; notice: string }>("licenses"),
+
+  // ---- 書き出し・提出前チェック（バックグラウンド） ----
+  exportFormats: () => invoke<ExportFormat[]>("export_formats"),
+  exportWarnings: (comp: string) => invoke<string[]>("export_warnings", { comp }),
+  exportPick: (comp: string, settings: ExportUi) => invoke<string | null>("export_pick", { comp, settings }),
+  exportStart: (jobs: ExportJob[], report: boolean) => invoke<void>("export_start", { jobs, report }),
+  taskStatus: () => invoke<TaskStatus>("task_status"),
+  taskCancel: () => invoke<void>("task_cancel"),
+  checkStart: (comp: string) => invoke<void>("check_start", { comp }),
+  checkResult: () => invoke<CheckResult | null>("check_result"),
+  exportBreakdown: (comp: string, frame: number) => invoke<string | null>("export_breakdown", { comp, frame }),
 
   // ---- プラグイン ----
   pluginState: () => invoke<PluginState>("plugin_state"),

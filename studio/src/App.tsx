@@ -10,7 +10,19 @@ import { newComposition, ProjectList } from "./components/ProjectList";
 import { deleteSelectedKey, Timeline } from "./components/Timeline";
 import { createLayer, Viewer } from "./components/Viewer";
 import { fps } from "./model";
-import { adopt, currentComp, get, keysOp, run, set, setFrame, totalFrames, useUi } from "./store";
+import { adopt, currentComp, get, keysOp, reply, run, set, setFrame, totalFrames, useUi } from "./store";
+import {
+  CheckDialog,
+  ExportDialog,
+  HistoryDialog,
+  LicensesDialog,
+  RecoveryDialog,
+  ReviewsDialog,
+  runCheck,
+  TaskIndicator,
+  useTasks,
+  VersionsDialog,
+} from "./components/Windows";
 import { applyRememberedEase } from "./components/Easing";
 import { onPluginKey, onPluginMenu, PluginLog, PluginManager, PluginNotices, PluginPanels, PluginToolbar, refreshPlugins } from "./components/Plugins";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -23,7 +35,7 @@ function onMenu(id: string) {
     case "new":
       return void run(api.newProject, "新しいプロジェクトを作りました");
     case "open":
-      return void run(() => api.open(), "開きました");
+      return void reply(() => api.open());
     case "save":
       return void run(() => api.save(false), "保存しました");
     case "save_as":
@@ -34,6 +46,36 @@ function onMenu(id: string) {
       return void run(() => api.import(s.compId, s.frame, true), "連番を読み込みました");
     case "new_comp":
       return newComposition();
+    case "import_lyrics":
+      return void reply(() => api.importLyrics(s.compId));
+    case "import_camera":
+      return void reply(() => api.importCamera(s.compId));
+    case "relink":
+      return void reply(api.relinkFootage);
+    case "collect":
+      return void reply(api.collectFiles);
+    case "export_comp_package":
+      return void reply(() => api.exportCompPackage(s.compId));
+    case "import_comp_package":
+      return void reply(api.importCompPackage);
+    case "save_frame":
+      return void reply(() => api.saveFrameImage(s.frame, s.downsample));
+    case "check":
+      set({ dialog: "check" });
+      if (!s.check && !s.task) runCheck();
+      return;
+    case "copy_credits":
+      return void api.creditsText(s.compId).then((t) => copy(t, "クレジット文面をクリップボードにコピーしました"));
+    case "copy_log":
+      return void api.productionLog().then((t) => copy(t, "制作ログをクリップボードにコピーしました"));
+    case "breakdown":
+      return void reply(() => api.exportBreakdown(s.compId, s.frame));
+    case "export":
+    case "history":
+    case "versions":
+    case "reviews":
+    case "licenses":
+      return set({ dialog: id });
     case "undo":
       if (isTyping()) return void document.execCommand("undo");
       return void run(api.undo);
@@ -55,6 +97,13 @@ function onMenu(id: string) {
     case "timeline_fit":
       return set({ tlZoom: 1, tlStart: 0 });
   }
+}
+
+function copy(text: string, ok: string) {
+  void navigator.clipboard.writeText(text).then(
+    () => set({ status: ok }),
+    () => set({ status: "クリップボードに入れられませんでした" }),
+  );
 }
 
 const isTyping = () => {
@@ -164,6 +213,7 @@ export function App() {
   const dirty = useUi((s) => !!s.snap?.dirty);
   const status = useUi((s) => s.status);
   usePlayback();
+  useTasks();
 
   useEffect(() => {
     void api.snapshot().then(adopt);
@@ -196,6 +246,7 @@ export function App() {
             {dirty && <span className="dirty" title="保存していない変更があります" />}
           </span>
           <span className="titlebar-right" data-tauri-drag-region>
+            <TaskIndicator />
             {status && <span className="status">{status}</span>}
             <IconButton icon="sidebarR" title="インスペクタ (⌘2)" on={showInspector} onClick={() => set({ showInspector: !showInspector })} />
           </span>
@@ -210,6 +261,13 @@ export function App() {
         <PluginManager />
         <PluginLog />
         <PluginNotices />
+        <ExportDialog />
+        <CheckDialog />
+        <HistoryDialog />
+        <VersionsDialog />
+        <ReviewsDialog />
+        <LicensesDialog />
+        <RecoveryDialog />
       </div>
     </TooltipProvider>
   );

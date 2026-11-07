@@ -19,6 +19,7 @@ import { IconButton, NumberField } from "./controls";
 import { Icon } from "./icons";
 import { layerActions } from "./layerActions";
 import { PluginLayerMenu } from "./Plugins";
+import { useFlashes } from "./Windows";
 
 const PAD = 18;
 const ROW = 36;
@@ -104,6 +105,7 @@ export function Timeline() {
       <div className="tl-body" ref={body} onWheel={onWheel}>
         <div className="ruler" style={{ height: RULER }} onPointerDown={scrub}>
           <WorkArea view={view} />
+          <Flashes view={view} />
           {ticks.map((f) => (
             <span key={f} className="tick" style={{ left: xOf(view, f) }}>
               {seconds(frameToTime(comp.frame_rate, f)).toFixed(2)}
@@ -187,6 +189,23 @@ function Transport({ comp, total }: { comp: Composition; total: number }) {
         onChange={(v) => set({ workArea: [a, Math.max(a + 1, Math.min(total, toFrame(v)))] })}
       />
     </div>
+  );
+}
+
+/** 提出前チェックで見つかった明滅の区間（赤）。 */
+function Flashes({ view }: { view: View }) {
+  const flashes = useFlashes();
+  return (
+    <>
+      {flashes.map(([a, b, why], i) => (
+        <span
+          key={i}
+          className="absolute bottom-0 h-1 rounded-full bg-red-500"
+          style={{ left: xOf(view, a), width: Math.max(2, xOf(view, b + 1) - xOf(view, a)) }}
+          title={why}
+        />
+      ))}
+    </>
   );
 }
 

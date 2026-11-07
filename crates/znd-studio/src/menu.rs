@@ -82,13 +82,22 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .item(&item("import", "素材を読み込む…", Some("CmdOrCtrl+I"))?)
         .item(&item("import_sequence", "連番画像を読み込む…", None)?)
-        .item(&item("new_comp", "新規コンポジション", Some("Alt+CmdOrCtrl+N"))?)
+        .item(&item("import_lyrics", "歌詞を読み込む（LRC / SRT / ASS）…", None)?)
+        .item(&item("import_camera", "カメラを読み込む（.chan / Alembic）…", None)?)
+        .separator()
+        .item(&item("relink", "欠落した素材を再リンク…", None)?)
+        .item(&item("collect", "ファイルを収集（権利情報付き）…", None)?)
+        .item(&item("export_comp_package", "このコンポを書き出す（受け渡し用）…", None)?)
+        .item(&item("import_comp_package", "コンポを読み込む…", None)?)
+        .separator()
+        .item(&item("export", "書き出し…", Some("CmdOrCtrl+M"))?)
         .separator()
         .close_window()
         .build()?;
     let edit = SubmenuBuilder::new(app, "編集")
         .item(&item("undo", "取り消す", Some("CmdOrCtrl+Z"))?)
         .item(&item("redo", "やり直す", Some("Shift+CmdOrCtrl+Z"))?)
+        .item(&item("history", "履歴…", None)?)
         .separator()
         .cut()
         .copy()
@@ -96,6 +105,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .select_all()
         .separator()
         .item(&item("duplicate", "複製", Some("CmdOrCtrl+D"))?)
+        .build()?;
+    let comp = SubmenuBuilder::new(app, "コンポジション")
+        .item(&item("new_comp", "新規コンポジション", Some("Alt+CmdOrCtrl+N"))?)
+        .separator()
+        .item(&item("save_frame", "フレームを画像として保存…", Some("Alt+CmdOrCtrl+S"))?)
+        .separator()
+        .item(&item("check", "提出前チェック…", None)?)
+        .item(&item("copy_credits", "クレジット文面をコピー", None)?)
+        .item(&item("copy_log", "制作ログをコピー", None)?)
+        .item(&item("breakdown", "メイキング用の分解を書き出す…", None)?)
+        .separator()
+        .item(&item("versions", "版（スナップショット）…", None)?)
+        .item(&item("reviews", "レビューコメント…", None)?)
         .build()?;
     let layer = SubmenuBuilder::new(app, "レイヤー")
         .item(&item("layer:text", "テキスト", None)?)
@@ -119,7 +141,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&item("timeline_fit", "タイムラインを全体表示", None)?)
         .build()?;
     let plugin = plugin_menu(app)?;
-    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &layer, &view, &plugin]).build()
+    let help = SubmenuBuilder::new(app, "ヘルプ").item(&item("licenses", "使用 OSS とライセンス…", None)?).build()?;
+    MenuBuilder::new(app).items(&[&app_menu, &file, &edit, &comp, &layer, &view, &plugin, &help]).build()
 }
 
 pub fn forward<R: Runtime>(app: &AppHandle<R>, id: &str) {

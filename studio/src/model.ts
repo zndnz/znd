@@ -144,6 +144,8 @@ export interface Snapshot {
   undo: string | null;
   redo: string | null;
   gpu: string | null;
+  /** 復元できる自動保存。 */
+  recovery: string | null;
 }
 
 export interface ParamInfo {
@@ -412,4 +414,62 @@ export interface PanelItem {
   speed?: number;
   options?: string[];
   items?: PanelItem[];
+}
+
+// ---------- 書き出し・チェック・履歴など ----------
+
+/** 操作の結果。プロジェクトが変わったときだけ `snapshot` がある。 */
+export interface Reply {
+  snapshot: Snapshot | null;
+  status: string;
+}
+
+export interface ExportFormat {
+  label: string;
+  description: string;
+  plugin: boolean;
+  alpha: boolean;
+  crf: boolean;
+  kbps: boolean;
+  single_frame: boolean;
+  params: { id: string; label: string; kind: string; default: string; min: number | null; max: number | null; choices: [string, string][] }[];
+}
+
+/** 書き出しの設定（Rust の `jobs::ExportUi`）。 */
+export interface ExportUi {
+  format: number;
+  crf: number;
+  kbps: number;
+  audio: boolean;
+  pad: number;
+  transparent: boolean;
+  range: [number, number] | null;
+  frame: number;
+  values: Record<string, string>;
+}
+
+export interface ExportJob {
+  comp: string;
+  path: string;
+  settings: ExportUi;
+}
+
+export interface CheckResult {
+  lines: [boolean, string][];
+  flashes: [number, number, string][];
+}
+
+export interface TaskStatus {
+  running: [string, number] | null;
+  finished: { kind: "export" | "check"; ok: boolean; message: string; check: CheckResult | null } | null;
+}
+
+export interface ReviewComment {
+  comp: string;
+  time: Time;
+  author: string;
+  text: string;
+  point?: [number, number];
+  resolved?: boolean;
+  created?: string;
 }

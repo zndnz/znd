@@ -6,7 +6,22 @@
 
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
-import { type Composition, frameCount, frameToTime, type KeyAddr, type Layer, type PluginState, type Project, type PropEdit, type Snapshot, type Time, timeToFrame } from "./model";
+import {
+  type CheckResult,
+  type Composition,
+  type ExportJob,
+  frameCount,
+  frameToTime,
+  type KeyAddr,
+  type Layer,
+  type PluginState,
+  type Project,
+  type PropEdit,
+  type Reply,
+  type Snapshot,
+  type Time,
+  timeToFrame,
+} from "./model";
 import { findComp } from "./ops";
 
 export type Tool = "select" | "hand";
@@ -54,6 +69,15 @@ export interface UiState {
   openPanels: string[];
   /** プラグインからのお知らせ。 */
   alert: string | null;
+  /** 実行中のバックグラウンド処理（名前, 進み具合）。 */
+  task: [string, number] | null;
+  /** 最後の提出前チェックの結果。 */
+  check: CheckResult | null;
+  /** レンダーキュー。 */
+  queue: ExportJob[];
+  /** 版と比べた画像を出しているときの説明。 */
+  diffLabel: string | null;
+  diffGen: number;
 }
 
 let state: UiState = {
@@ -82,6 +106,11 @@ let state: UiState = {
   pluginGen: 0,
   openPanels: [],
   alert: null,
+  task: null,
+  check: null,
+  queue: [],
+  diffLabel: null,
+  diffGen: 0,
 };
 
 const listeners = new Set<() => void>();
@@ -196,6 +225,20 @@ export async function run(f: () => Promise<Snapshot | null>, ok?: string) {
     if (snap) {
       adopt(snap);
       if (ok) set({ status: ok });
+    }
+  } catch (e) {
+    set({ status: String(e) });
+  }
+}
+
+/** 操作の結果（新しい状態とメッセージ）を反映する。 */
+export async function reply(f: () => Promise<Reply | string | null | void>) {
+  try {
+    const r = await f();
+    if (typeof r === "string") set({ status: r });
+    else if (r) {
+      if (r.snapshot) adopt(r.snapshot);
+      if (r.status) set({ status: r.status });
     }
   } catch (e) {
     set({ status: String(e) });

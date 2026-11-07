@@ -9,12 +9,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod effects;
+mod jobs;
 mod layers;
 mod menu;
 mod plugins;
 mod prefs;
 mod props;
+mod rescue;
 mod sound;
+mod work;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -47,6 +50,18 @@ pub(crate) struct Studio {
     user: String,
     prefs: prefs::Prefs,
     plugins: plugins::Host,
+    /// 最後の自動保存より後に編集したか。
+    unsaved_since_autosave: bool,
+    /// 制作ログのための作業時間。
+    session: work::Session,
+    /// バックグラウンドで実行中の処理（書き出し・提出前チェック）。
+    task: Option<jobs::Running>,
+    /// 最後の提出前チェックの結果。
+    check: Option<jobs::Check>,
+    /// 版と比べた画像（幅, 高さ, RGBA8）。
+    diff: Option<(usize, usize, Vec<u8>)>,
+    /// 保存済みのファイルより新しい自動保存（前回、保存せずに終了したかもしれない）。
+    recovery: Option<PathBuf>,
 }
 
 pub(crate) type Shared = Mutex<Studio>;
@@ -55,7 +70,7 @@ pub(crate) fn lock<'a>(s: &'a State<'_, Shared>) -> std::sync::MutexGuard<'a, St
     s.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn base_dir(path: Option<&Path>) -> PathBuf {
+pub(crate) fn base_dir(path: Option<&Path>) -> PathBuf {
     path.and_then(|p| p.parent()).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -76,7 +91,37 @@ impl Studio {
             user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "自分".into()),
             prefs: prefs::Prefs::load(),
             plugins: plugins::Host::default(),
+            unsaved_since_autosave: false,
+            session: work::Session::new(),
+            task: None,
+            check: None,
+            diff: None,
+            recovery: None,
         }
+    }
+
+    fn step_undo(&mut self) {
+        if let Some((label, p)) = self.undo.pop() {
+            let cur = std::mem::replace(&mut self.project, p);
+            self.redo.push((label, cur));
+            self.after_history_jump();
+        }
+    }
+
+    fn step_redo(&mut self) {
+        if let Some((label, p)) = self.redo.pop() {
+            let cur = std::mem::replace(&mut self.project, p);
+            self.undo.push((label, cur));
+            self.after_history_jump();
+        }
+    }
+
+    fn after_history_jump(&mut self) {
+        self.revision += 1;
+        self.dirty = true;
+        self.unsaved_since_autosave = true;
+        self.last_label = None;
+        rescue::remember(&self.project, &self.autosave_base());
     }
 
     /// プロジェクトは変えずに、プレビューを作り直させる（プラグインの読み込み・出力フィルターの切り替えなど）。
@@ -127,6 +172,10 @@ impl Studio {
         self.redo.clear();
         self.last_label = None;
         self.revision += 1;
+        self.unsaved_since_autosave = false;
+        self.check = None;
+        self.diff = None;
+        self.recovery = self.path.as_deref().and_then(io::newer_autosave);
         self.start_engine();
     }
 
@@ -143,7 +192,12 @@ impl Studio {
         self.last_label = Some(label.to_string());
         self.project = Arc::new(project);
         self.dirty = true;
+        self.unsaved_since_autosave = true;
         self.revision += 1;
+        self.session.edits += 1;
+        self.session.touch();
+        // 異常終了したときの退避先として覚えておく
+        rescue::remember(&self.project, &self.autosave_base());
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -155,6 +209,7 @@ impl Studio {
             undo: self.undo.last().map(|u| u.0.clone()),
             redo: self.redo.last().map(|u| u.0.clone()),
             gpu: znd_preview::gpu_name().map(str::to_string),
+            recovery: self.recovery.as_ref().map(|p| p.display().to_string()),
         }
     }
 }
@@ -170,6 +225,8 @@ pub(crate) struct Snapshot {
     undo: Option<String>,
     redo: Option<String>,
     gpu: Option<String>,
+    /// 復元できる自動保存。
+    recovery: Option<String>,
 }
 
 #[tauri::command]
@@ -192,26 +249,14 @@ fn commit(state: State<'_, Shared>, project: Project, label: String, coalesce: b
 #[tauri::command]
 fn undo(state: State<'_, Shared>) -> Snapshot {
     let mut s = lock(&state);
-    if let Some((label, p)) = s.undo.pop() {
-        let cur = std::mem::replace(&mut s.project, p);
-        s.redo.push((label, cur));
-        s.revision += 1;
-        s.dirty = true;
-        s.last_label = None;
-    }
+    s.step_undo();
     s.snapshot()
 }
 
 #[tauri::command]
 fn redo(state: State<'_, Shared>) -> Snapshot {
     let mut s = lock(&state);
-    if let Some((label, p)) = s.redo.pop() {
-        let cur = std::mem::replace(&mut s.project, p);
-        s.undo.push((label, cur));
-        s.revision += 1;
-        s.dirty = true;
-        s.last_label = None;
-    }
+    s.step_redo();
     s.snapshot()
 }
 
@@ -231,7 +276,7 @@ fn new_project(state: State<'_, Shared>) -> Snapshot {
 
 /// プロジェクトを開く。`path` が無ければファイルを選ぶ画面を出す（選ばなければ何もしない）。
 #[tauri::command]
-fn open(state: State<'_, Shared>, path: Option<String>) -> Result<Option<Snapshot>, String> {
+fn open(state: State<'_, Shared>, path: Option<String>) -> Result<Option<work::Reply>, String> {
     let path = match path {
         Some(p) => PathBuf::from(p),
         None => match rfd::FileDialog::new().add_filter("znd プロジェクト", &["json"]).pick_file() {
@@ -240,9 +285,10 @@ fn open(state: State<'_, Shared>, path: Option<String>) -> Result<Option<Snapsho
         },
     };
     let project = io::load(&path).map_err(|e| format!("開けません: {e}"))?;
+    let status = work::open_notes(&project, &path);
     let mut s = lock(&state);
     s.replace(project, Some(path));
-    Ok(Some(s.snapshot()))
+    Ok(Some(work::Reply { snapshot: Some(s.snapshot()), status }))
 }
 
 /// 保存する。`choose` か保存先が未定なら、保存先を選ぶ画面を出す。
@@ -260,6 +306,7 @@ fn save(state: State<'_, Shared>, choose: bool) -> Result<Option<Snapshot>, Stri
     let moved = s.path.as_ref() != Some(&path);
     s.path = Some(path);
     s.dirty = false;
+    s.unsaved_since_autosave = false;
     if moved {
         // 素材の相対パスの基準が変わる
         s.start_engine();
@@ -285,6 +332,7 @@ fn import(state: State<'_, Shared>, comp: String, frame: i64, sequence: bool) ->
 #[tauri::command]
 fn frame(state: State<'_, Shared>, comp: String, frame: i64, downsample: u32) -> Response {
     let mut s = lock(&state);
+    s.session.touch();
     // 表示しているコンポの音を先にミックスしておく（再生を押してすぐ鳴るように）
     s.sync_sound(&comp);
     let Some(engine) = &s.engine else { return Response::new(Vec::new()) };
@@ -415,6 +463,10 @@ fn fonts() -> Vec<(String, Vec<String>)> {
 }
 
 /// フォルダを OS のファイルマネージャーで開く。
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 pub(crate) fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -427,6 +479,7 @@ pub(crate) fn open_in_file_manager(dir: &Path) -> std::io::Result<()> {
 }
 
 fn main() {
+    rescue::install_panic_hook();
     // 使い方: znd-studio [プロジェクト.znd.json]
     let arg = std::env::args().nth(1).map(PathBuf::from);
     let mut studio = match arg.as_ref().map(|p| (p, io::load(p))) {
@@ -440,6 +493,8 @@ fn main() {
     // プラグインのエフェクトを、プロジェクトを描く前に使えるようにしておく
     let allow_native = studio.prefs.allow_native_plugins();
     plugins::startup(&mut studio.plugins, allow_native);
+    // 未保存のまま終了・異常終了した前回の作業
+    studio.recovery = io::newer_autosave(&studio.autosave_base());
     tauri::Builder::default()
         .manage(Mutex::new(studio))
         .setup(|app| {
@@ -449,6 +504,18 @@ fn main() {
             s.start_engine();
             drop(s);
             app.set_menu(menu::build(app.handle())?)?;
+            // 自動保存（編集があったときだけ、2 分おき）
+            let handle = app.handle().clone();
+            std::thread::Builder::new().name("znd-autosave".into()).spawn(move || loop {
+                std::thread::sleep(work::AUTOSAVE_INTERVAL);
+                let state = handle.state::<Shared>();
+                let mut s = lock(&state);
+                if s.unsaved_since_autosave {
+                    if let Err(e) = s.autosave_now() {
+                        eprintln!("{e}");
+                    }
+                }
+            })?;
             Ok(())
         })
         .on_menu_event(|app, event| menu::forward(app, event.id().as_ref()))
@@ -492,8 +559,43 @@ fn main() {
             plugins::plugin_crash_answer,
             plugins::plugin_set_filter,
             plugins::plugin_open_dir,
-            plugins::plugin_clear_logs
+            plugins::plugin_clear_logs,
+            work::import_lyrics,
+            work::import_camera,
+            work::relink_footage,
+            work::collect_files,
+            work::export_comp_package,
+            work::import_comp_package,
+            work::save_frame_image,
+            work::recover,
+            work::history,
+            work::history_jump,
+            work::versions,
+            work::version_save,
+            work::version_restore,
+            work::version_compare,
+            work::diff_image,
+            work::diff_close,
+            work::review_add,
+            work::credits_text,
+            work::production_log,
+            work::licenses,
+            jobs::export_formats,
+            jobs::export_warnings,
+            jobs::export_pick,
+            jobs::export_start,
+            jobs::task_status,
+            jobs::task_cancel,
+            jobs::check_start,
+            jobs::check_result,
+            jobs::export_breakdown
         ])
-        .run(tauri::generate_context!())
-        .expect("znd studio を起動できません");
+        .build(tauri::generate_context!())
+        .expect("znd studio を起動できません")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<Shared>();
+                lock(&state).on_exit();
+            }
+        });
 }
